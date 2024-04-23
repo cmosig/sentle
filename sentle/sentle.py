@@ -1,4 +1,4 @@
-import atenea
+from atenea import atenea
 import itertools
 import numpy as np
 from rasterio import warp, windows, transform
@@ -7,10 +7,13 @@ from rasterio.crs import CRS
 import zarr
 import rasterio.warp
 from typing import Optional, Union
-from utils import paral
+from utils import *
 from pystac_client.item_search import DatetimeLike
 import geopandas as gpd
 import pkg_resources
+import pystac_client
+import planetary_computer
+import xarray as xr
 
 
 def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
@@ -74,11 +77,77 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
     return s2grid
 
 
-def process_subtile(subtile: SentinelSubtile, datetime: DatetimeLike,
-                    zarrpath: str, atenea_args: dict):
+def process_subtile(subtile, datetime: DatetimeLike, zarrpath: str,
+                    atenea_args: dict, subtile_size):
+
+    stac_endpoint = "https://planetarycomputer.microsoft.com/api/stac/v1"
+
     # 1 download subtile with specified date range
+    catalog = pystac_client.Client.open(
+        stac_endpoint,
+        modifier=planetary_computer.sign_inplace,
+    )
+
+    # get sentinel tiles within date range
+    search = catalog.search(collections=["sentinel-2-l2a"],
+                            datetime=datetime,
+                            filter={
+                                "filter": {
+                                    "op":
+                                    "=",
+                                    "args": [{
+                                        "property": "s2:mgrs_tile"
+                                    }, subtile.name]
+                                }
+                            })
+    items = list(search.item_collection())
+    subtile_array = xr.DataArray(
+        data=np.empty((len(items), len(BANDS), subtile_size, subtile_size)),
+        dims=["time", "band", "y", "x"],
+        coords=dict(time=[item.datetime for item in items],
+                    band=BANDS,
+                    id=("time", [item.id for item in items])),
+        attrs=dict(stac=stac_endpoint, collection="sentinel-2-l2a"))
+
+    print(subtile_array)
+
+    # iterate through timestamps
+    crs = None
+    for item in items:
+        for band in BANDS:
+            href = item.assets[band].href
+            with rasterio.open(href) as dr:
+                # convert read window respective to tile resolution
+                factor = BAND_RESOLUTION[band] // 10
+                orig_win = subtile.intersecting_windows
+                read_window = windows.Window(orig_win.col_off // factor,
+                                             orig_win.row_off // factor,
+                                             orig_win.width // factor,
+                                             orig_win.height // factor)
+                # read subtile and directly upsample to 10m resolution using
+                # nearest-neighbor (default)
+                subtile_array.loc[dict(time=item.datetime,
+                                       band=band)] = dr.read(
+                                           indexes=1,
+                                           window=read_window,
+                                           out_shape=(subtile_size,
+                                                      subtile_size))
+
+                # save and validate epsg
+                assert (crs is None) or (crs == dr.crs), "CRS mismatch within one sentinel tile"
+                crs = dr.crs
+
+    # update attrs
+    subtile_array.attrs["epsg"] = crs.to_epsg()
 
     # 2 push that tile through atenea
+    subtile_processed = atenea.process(subtile_array,
+                                       source="cubo",
+                                       return_cloud_classification_layer=True,
+                                       chunksize=(len(items), subtile_size),
+                                       stac=stac_endpoint)
+
+    print(subtile_processed)
 
     # 3 reproject to target_crs
 
@@ -151,32 +220,33 @@ def process(target_crs: CRS,
                                bound_top,
                                subtile_size=subtile_size)
 
-    return
-
     # create zarr storage
     # for each band and mask
     # TODO which dtype?
-    store = zarr.storage.SQLiteStore(zarr_path, dimension_separator=".")
-    for band in BANDS:
-        zarr.creation.empty(shape=(width, height, timeseries_length),
-                            chunks=(chunk_width, chunk_height,
-                                    chunk_timeseries),
-                            path=band,
-                            fill_value=0,
-                            write_empty_chunks=False,
-                            store=store)
+    # store = zarr.storage.SQLiteStore(zarr_path, dimension_separator=".")
+    # for band in BANDS:
+    #     zarr.creation.empty(shape=(width, height, timeseries_length),
+    #                         chunks=(chunk_width, chunk_height,
+    #                                 chunk_timeseries),
+    #                         path=band,
+    #                         fill_value=0,
+    #                         write_empty_chunks=False,
+    #                         store=store)
 
     # 2 in parallel for each sub-sentinel tile
     # 2a download each sub-sentinel tile from planetary computer
     # 2b run each sub-sentinel tile through atenea
-    ns = len(subtiles)
-    paral(process_subtile,
-          [subtiles, [datetime] * ns, [zarrpath] * ns, [kwargs_atenea] * ns],
-          num_cores=num_cores,
-          progress_bar=not quiet)
+    ns = subtiles.shape[0]
+    paral(process_subtile, [
+        list(subtiles.itertuples(index=False, name="subtile")), [datetime] *
+        ns, [zarr_path] * ns, [kwargs_atenea] * ns, [subtile_size] * ns
+    ],
+          num_cores=num_cores)
+
+    return
 
     # need to close
-    store.close()
+    # store.close()
 
     # 3 merge sub-sentinel tiles into one big sparse xarray and return
     # possible ISSUE: what happens when not everything fits into memory --> we
@@ -190,6 +260,6 @@ process(
     bound_bottom=7290000,
     bound_right=776000,
     bound_top=7315000,
-    datetime="2023-12-01/2023-11-01",
+    datetime="2023-11-22/2023-12-01",
     subtile_size=732,
 )
