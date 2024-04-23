@@ -4,6 +4,25 @@ import joblib
 from tqdm import tqdm
 import contextlib
 
+BANDS = [
+    'B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09',
+    'B11', 'B12'
+]
+BAND_RESOLUTION = {
+    'B01': 60,
+    'B02': 10,
+    'B03': 10,
+    'B04': 10,
+    'B05': 20,
+    'B06': 20,
+    'B07': 20,
+    'B08': 10,
+    'B8A': 20,
+    'B09': 60,
+    'B11': 20,
+    'B12': 20
+}
+
 @contextlib.contextmanager
 def tqdm_joblib(tqdm_object):
     """Context manager to patch joblib to report into tqdm progress bar given as argument"""
