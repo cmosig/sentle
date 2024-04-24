@@ -1,4 +1,6 @@
 import rioxarray as rxr
+from affine import Affine
+import pandas as pd
 from rasterio.enums import Resampling
 from atenea import atenea
 import itertools
@@ -16,6 +18,7 @@ import pkg_resources
 import pystac_client
 import planetary_computer
 import xarray as xr
+import warnings
 
 
 def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
@@ -79,44 +82,23 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
     return s2grid
 
 
-def process_subtile(subtile, datetime: DatetimeLike, zarrpath: str,
-                    atenea_args: dict, subtile_size: int, target_crs: CRS,
-                    target_resolution: float):
+def process_subtile(subtile, store, atenea_args: dict, subtile_size: int,
+                    target_crs: CRS, target_resolution: float,
+                    df: pd.DataFrame, stac_endpoint: str, overall_transform):
 
-    stac_endpoint = "https://planetarycomputer.microsoft.com/api/stac/v1"
-
-    # 1 download subtile with specified date range
-    catalog = pystac_client.Client.open(
-        stac_endpoint,
-        modifier=planetary_computer.sign_inplace,
-    )
-
-    # get sentinel tiles within date range
-    search = catalog.search(collections=["sentinel-2-l2a"],
-                            datetime=datetime,
-                            filter={
-                                "filter": {
-                                    "op":
-                                    "=",
-                                    "args": [{
-                                        "property": "s2:mgrs_tile"
-                                    }, subtile.name]
-                                }
-                            })
-
-    items = list(search.item_collection())
-    subtile_array = xr.DataArray(
-        data=np.empty((len(items), len(BANDS), subtile_size, subtile_size)),
-        dims=["time", "band", "y", "x"],
-        coords=dict(time=[item.datetime for item in items],
-                    band=BANDS,
-                    id=("time", [item.id for item in items])),
-        attrs=dict(stac=stac_endpoint, collection="sentinel-2-l2a"))
+    subtile_array = xr.DataArray(data=np.empty(
+        (df.shape[0], len(BANDS), subtile_size, subtile_size)),
+                                 dims=["time", "band", "y", "x"],
+                                 coords=dict(time=df["datetime"].tolist(),
+                                             band=BANDS,
+                                             id=("time", df["id"].tolist())),
+                                 attrs=dict(stac=stac_endpoint,
+                                            collection="sentinel-2-l2a"))
 
     # iterate through timestamps
     crs = None
     transform = None
-    for item in items:
+    for item in df["item"]:
         for band in BANDS:
             href = item.assets[band].href
             with rasterio.open(href) as dr:
@@ -184,19 +166,65 @@ def process_subtile(subtile, datetime: DatetimeLike, zarrpath: str,
                                                        y_dim="y").compute()
 
     # 3 reproject to target_crs for each band
+    # determine transform --> round to target resolution
+    subtile_repr_transform, subtile_repr_width, subtile_repr_height = rasterio.warp.calculate_default_transform(
+        src_crs=crs,
+        dst_crs=target_crs,
+        width=subtile_array.sizes["x"],
+        height=subtile_array.sizes["y"],
+        left=subtile_bounds[0],
+        bottom=subtile_bounds[1],
+        right=subtile_bounds[2],
+        top=subtile_bounds[3],
+        resolution=target_resolution)
+    subtile_repr_transform = Affine(
+        subtile_repr_transform.a,
+        subtile_repr_transform.b,
+        subtile_repr_transform.c -
+        (subtile_repr_transform.c % target_resolution),
+        subtile_repr_transform.d,
+        subtile_repr_transform.e,
+        # + target_resolution because upper left corner
+        subtile_repr_transform.f -
+        (subtile_repr_transform.f % target_resolution) + target_resolution,
+        subtile_repr_transform.g,
+        subtile_repr_transform.h,
+        subtile_repr_transform.i,
+    )
+
+    # include one more pixel because rounding down
+    subtile_repr_width += 1
+    subtile_repr_height += 1
+
     # using billinear resampling for spectral bands and nearest neighbor
     # resampling for everything else
-    subtile_array = xr.concat([
-        subtile_array.sel(band=band).rio.reproject(
+    # NOTE save all bands later
+    # for band in subtile_array.band.data:
+    print(list(store))
+    for band in BANDS:
+        # reproject respective band
+        temp_arr = subtile_array.sel(band=band).rio.reproject(
             dst_crs=target_crs,
-            resolution=target_resolution,
             resampling=Resampling.bilinear
-            if band in BANDS else Resampling.nearest)
-        for band in subtile_array.band.data
-    ],
-                              dim="band").compute()
+            if band in BANDS else Resampling.nearest,
+            transform=subtile_repr_transform,
+            shape=(subtile_repr_height, subtile_repr_width)).compute()
 
-    return subtile_array
+        # save array at specified indices in overall array
+        write_win = windows.from_bounds(*subtile_bounds,
+                                        transform=overall_transform)
+        store[band][write_win.col_off:(write_win.row_off + write_win.width),
+                    write_win.row_off:(write_win.col_off +
+                                       write_win.height)] = temp_arr
+        # temp_arr.to_zarr(store=store,
+        #                  group=band,
+        #                  region={
+        #                      "x":
+        #                      slice(write_win.col_off,
+        #                            write_win.row_off + write_win.width),
+        #                      "y":
+        #                      slice(write_win.row_off, write_win.col_off + write_win.height)
+        #                  })
 
     # 4 remove data that is outside the bounds of the specified bounds
 
@@ -210,20 +238,21 @@ def process_subtile(subtile, datetime: DatetimeLike, zarrpath: str,
     # already is data -> should be the same anyway
     # NOTE 4: somehow prevent that places where this array has no data (nans)
     # are not used to overwrite eixisting data -> solution masked indexing
-    exit()
 
 
-def process(target_crs: CRS,
-            target_resolution: float,
-            bound_left: float,
-            bound_bottom: float,
-            bound_right: float,
-            bound_top: float,
-            datetime: DatetimeLike,
-            subtile_size: int,
-            num_cores: int = 1,
-            kwargs_atenea: dict = dict(),
-            zarr_path: str = None):
+def process(
+        zarr_path: str,
+        target_crs: CRS,
+        target_resolution: float,
+        bound_left: float,
+        bound_bottom: float,
+        bound_right: float,
+        bound_top: float,
+        datetime: DatetimeLike,
+        subtile_size: int,
+        num_cores: int = 1,
+        kwargs_atenea: dict = dict(),
+):
     """
     Parameters
     ----------
@@ -248,7 +277,7 @@ def process(target_crs: CRS,
         Number of CPU cores across which subtile processing is supposed to be distributed.
     kwargs_atenea: dict, default = None
         Arguments passed to atenea specifying processing steps that are applied to each tile.
-    zarr_path: str, default = None
+    zarr_path: str
         Path where zarr storage is supposed to be created.
     """
 
@@ -268,38 +297,85 @@ def process(target_crs: CRS,
                                bound_top,
                                subtile_size=subtile_size)
 
-    # create zarr storage
-    # for each band and mask
-    # TODO which dtype?
-    # store = zarr.storage.SQLiteStore(zarr_path, dimension_separator=".")
-    # for band in BANDS:
-    #     zarr.creation.empty(shape=(width, height, timeseries_length),
-    #                         chunks=(chunk_width, chunk_height,
-    #                                 chunk_timeseries),
-    #                         path=band,
-    #                         fill_value=0,
-    #                         write_empty_chunks=False,
-    #                         store=store)
+    # 2 setup zarr storage
+    # determine width and height based on bounds and resolution
+    width, w_rem = divmod(abs(bound_right - bound_left), target_resolution)
+    height, h_rem = divmod(abs(bound_right - bound_left), target_resolution)
+    if h_rem > 0:
+        warning.warn(
+            "Specified top/bottom bounds are not perfectly divisable by specified target_resolution. The resulting coverage will be slightly cropped"
+        )
+    if w_rem > 0:
+        warning.warn(
+            "Specified left/right bounds are not perfectly divisable by specified target_resolution. The resulting coverage will be slightly cropped"
+        )
 
-    # 2 in parallel for each sub-sentinel tile
-    # 2a download each sub-sentinel tile from planetary computer
-    # 2b run each sub-sentinel tile through atenea
+    # sign into planetary computer
+    stac_endpoint = "https://planetarycomputer.microsoft.com/api/stac/v1"
+    catalog = pystac_client.Client.open(
+        stac_endpoint,
+        modifier=planetary_computer.sign_inplace,
+    )
+
+    # get all items within date range
+    search = catalog.search(collections=["sentinel-2-l2a"],
+                            datetime=datetime,
+                            bbox=rasterio.warp.transform_bounds(
+                                src_crs=target_crs,
+                                dst_crs="EPSG:4326",
+                                left=bound_left,
+                                bottom=bound_bottom,
+                                right=bound_right,
+                                top=bound_top))
+
+    items = pd.DataFrame()
+    items["item"] = list(search.item_collection())
+    items["tile"] = items["item"].apply(lambda x: x.properties["s2:mgrs_tile"])
+    items["datetime"] = items["item"].apply(lambda x: x.datetime)
+    items["id"] = items["item"].apply(lambda x: x.id)
+
+    # determine overall transform from bounds
+    overall_transform = transform.from_bounds(bound_left, bound_bottom,
+                                              bound_right, bound_top, width,
+                                              height)
+
+    # NOTE kind of magic values for now
+    # one chunk per timestep!
+    chunks = (100, 100, 1)
+
+    # TODO NEXT TODO understand the strucutre of xarray saved zarr arrays better and replicate here
+    # create zarr storage for each band and mask
+    store = zarr.storage.SQLiteStore(zarr_path, dimension_separator=".")
+    for band in BANDS:
+        # TODO somehow specifying fill value fails here
+        zarr.creation.empty(
+            shape=(width, height, items["datetime"].nunique()),
+            chunks=chunks,
+            #fill_value=0,
+            path=band,
+            write_empty_chunks=False,
+            store=store)
 
     # NOTE TEMP
     subtiles = subtiles[:1]
 
     ns = subtiles.shape[0]
+    subtiles = list(subtiles.itertuples(index=False, name="subtile"))
     subtile_arrays = paral(process_subtile, [
-        list(subtiles.itertuples(index=False, name="subtile")),
-        [datetime] * ns, [zarr_path] * ns, [kwargs_atenea] * ns,
-        [subtile_size] * ns, [target_crs] * ns, [target_resolution] * ns
+        subtiles,
+        [store] * ns,
+        [kwargs_atenea] * ns,
+        [subtile_size] * ns,
+        [target_crs] * ns,
+        [target_resolution] * ns,
+        [items[items["tile"] == s.name] for s in subtiles],
+        [stac_endpoint] * ns,
+        [overall_transform] * ns,
     ],
                            num_cores=num_cores)
 
-    return subtile_arrays
-
     # need to close
-    # store.close()
+    store.close()
 
     # 3 merge sub-sentinel tiles into one big sparse xarray and return
     # possible ISSUE: what happens when not everything fits into memory --> we
@@ -307,12 +383,14 @@ def process(target_crs: CRS,
     # it's done --> is that supported with ZARR?
 
 
-# process(
-#     CRS.from_string("EPSG:8857"),
-#     bound_left=767300,
-#     bound_bottom=7290000,
-#     bound_right=776000,
-#     bound_top=7315000,
-#     datetime="2023-11-22/2023-12-01",
-#     subtile_size=732,
-# )
+x = process(target_crs=CRS.from_string("EPSG:8857"),
+            bound_left=767300,
+            bound_bottom=7290000,
+            bound_right=776000,
+            bound_top=7315000,
+            datetime="2023-11-11/2023-12-01",
+            subtile_size=732,
+            target_resolution=10,
+            zarr_path="bigout.zarr")
+
+print(x)
