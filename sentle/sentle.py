@@ -1,3 +1,5 @@
+import rioxarray as rxr
+from rasterio.enums import Resampling
 from atenea import atenea
 import itertools
 import numpy as np
@@ -78,7 +80,8 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
 
 
 def process_subtile(subtile, datetime: DatetimeLike, zarrpath: str,
-                    atenea_args: dict, subtile_size):
+                    atenea_args: dict, subtile_size: int, target_crs: CRS,
+                    target_resolution: float):
 
     stac_endpoint = "https://planetarycomputer.microsoft.com/api/stac/v1"
 
@@ -100,6 +103,7 @@ def process_subtile(subtile, datetime: DatetimeLike, zarrpath: str,
                                     }, subtile.name]
                                 }
                             })
+
     items = list(search.item_collection())
     subtile_array = xr.DataArray(
         data=np.empty((len(items), len(BANDS), subtile_size, subtile_size)),
@@ -109,10 +113,9 @@ def process_subtile(subtile, datetime: DatetimeLike, zarrpath: str,
                     id=("time", [item.id for item in items])),
         attrs=dict(stac=stac_endpoint, collection="sentinel-2-l2a"))
 
-    print(subtile_array)
-
     # iterate through timestamps
     crs = None
+    transform = None
     for item in items:
         for band in BANDS:
             href = item.assets[band].href
@@ -134,26 +137,69 @@ def process_subtile(subtile, datetime: DatetimeLike, zarrpath: str,
                                                       subtile_size))
 
                 # save and validate epsg
-                assert (crs is None) or (crs == dr.crs), "CRS mismatch within one sentinel tile"
+                assert (crs is None) or (
+                    crs == dr.crs), "CRS mismatch within one sentinel tile"
                 crs = dr.crs
 
-    # update attrs
+                # save transform for 10m tile
+                if band == "B02":
+                    transform = dr.transform
+
+    # this is required for atenea
     subtile_array.attrs["epsg"] = crs.to_epsg()
+    # this is required for rioxarray to figure out the crs
+    subtile_array.attrs["crs"] = crs
+
+    # determine bounds based on subtile window and tile transform
+    subtile_bounds = windows.bounds(subtile.intersecting_windows, transform)
+    assert (
+        subtile_bounds[2] - subtile_bounds[0]
+    ) // 10 == subtile_size, "mismatch between subtile size and bounds on x-axis"
+    assert (
+        subtile_bounds[3] - subtile_bounds[1]
+    ) // 10 == subtile_size, "mismatch between subtile size and bounds on y-axis"
+
+    # set array coordindates based on bounds and standard resolution of 10m
+    subtile_array = subtile_array.assign_coords(
+        dict(x=np.arange(start=subtile_bounds[0],
+                         stop=subtile_bounds[2],
+                         step=10),
+             y=np.arange(start=subtile_bounds[1],
+                         stop=subtile_bounds[3],
+                         step=10))).compute()
 
     # 2 push that tile through atenea
-    subtile_processed = atenea.process(subtile_array,
-                                       source="cubo",
-                                       return_cloud_classification_layer=True,
-                                       chunksize=(len(items), subtile_size),
-                                       stac=stac_endpoint)
+    # TODO add atenea kwargs
+    subtile_array = atenea.process(
+        subtile_array,
+        source="cubo",
+        # TODO need to add padding and then reactivate cloud filtering
+        mask_clouds=False,
+        return_cloud_classification_layer=True,
+        # chunksize=(len(items), subtile_size),
+        stac=stac_endpoint).compute()
 
-    print(subtile_processed)
+    # make sure that x and y are the correct spatial resolutions
+    subtile_array = subtile_array.rio.set_spatial_dims(x_dim="x",
+                                                       y_dim="y").compute()
 
-    # 3 reproject to target_crs
+    # 3 reproject to target_crs for each band
+    # using billinear resampling for spectral bands and nearest neighbor
+    # resampling for everything else
+    subtile_array = xr.concat([
+        subtile_array.sel(band=band).rio.reproject(
+            dst_crs=target_crs,
+            resolution=target_resolution,
+            resampling=Resampling.bilinear
+            if band in BANDS else Resampling.nearest)
+        for band in subtile_array.band.data
+    ],
+                              dim="band").compute()
+
+    return subtile_array
 
     # 4 remove data that is outside the bounds of the specified bounds
 
-    # 5 save that tile to a specified zarr
     # NOTE 1: think about the storage type that we want to use, definetly not Directory --> too many files
     # NOTE 2: timestamps: either we need to round to the number of days and then the
     # zarr array has one timestep per day --> possibly completely empty
@@ -164,11 +210,11 @@ def process_subtile(subtile, datetime: DatetimeLike, zarrpath: str,
     # already is data -> should be the same anyway
     # NOTE 4: somehow prevent that places where this array has no data (nans)
     # are not used to overwrite eixisting data -> solution masked indexing
-
-    pass
+    exit()
 
 
 def process(target_crs: CRS,
+            target_resolution: float,
             bound_left: float,
             bound_bottom: float,
             bound_right: float,
@@ -184,6 +230,8 @@ def process(target_crs: CRS,
 
     target_crs: CRS
         Specifies the target CRS that all data will be reprojected to.
+    target_resolution: float
+        Determines the resolution that all data is reprojected to in the `target_crs`.
     bound_left: float
         Left bound of area that is supposed to be covered. Unit is in `target_crs`.
     bound_bottom: float
@@ -236,14 +284,19 @@ def process(target_crs: CRS,
     # 2 in parallel for each sub-sentinel tile
     # 2a download each sub-sentinel tile from planetary computer
     # 2b run each sub-sentinel tile through atenea
-    ns = subtiles.shape[0]
-    paral(process_subtile, [
-        list(subtiles.itertuples(index=False, name="subtile")), [datetime] *
-        ns, [zarr_path] * ns, [kwargs_atenea] * ns, [subtile_size] * ns
-    ],
-          num_cores=num_cores)
 
-    return
+    # NOTE TEMP
+    subtiles = subtiles[:1]
+
+    ns = subtiles.shape[0]
+    subtile_arrays = paral(process_subtile, [
+        list(subtiles.itertuples(index=False, name="subtile")),
+        [datetime] * ns, [zarr_path] * ns, [kwargs_atenea] * ns,
+        [subtile_size] * ns, [target_crs] * ns, [target_resolution] * ns
+    ],
+                           num_cores=num_cores)
+
+    return subtile_arrays
 
     # need to close
     # store.close()
@@ -254,12 +307,12 @@ def process(target_crs: CRS,
     # it's done --> is that supported with ZARR?
 
 
-process(
-    CRS.from_string("EPSG:8857"),
-    bound_left=767300,
-    bound_bottom=7290000,
-    bound_right=776000,
-    bound_top=7315000,
-    datetime="2023-11-22/2023-12-01",
-    subtile_size=732,
-)
+# process(
+#     CRS.from_string("EPSG:8857"),
+#     bound_left=767300,
+#     bound_bottom=7290000,
+#     bound_right=776000,
+#     bound_top=7315000,
+#     datetime="2023-11-22/2023-12-01",
+#     subtile_size=732,
+# )
