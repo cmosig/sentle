@@ -21,6 +21,8 @@ import pystac_client
 import planetary_computer
 import xarray as xr
 import warnings
+from tqdm import tqdm
+import os
 
 
 def recrop_write_window(win, overall_height, overall_width):
@@ -285,6 +287,7 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
     write_win, local_win = recrop_write_window(write_win, overall_height,
                                                overall_width)
 
+    pbar = tqdm(total=len(BANDS) * subtile_array.sizes["time"])
     for band in BANDS:
         # using billinear resampling for spectral bands and nearest neighbor
         # resampling for everything else
@@ -314,6 +317,8 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
                                         local_win.row_off,
                                         local_win.col_off:local_win.col_off +
                                         local_win.width]
+
+            pbar.update()
 
 
 def process(
@@ -438,7 +443,6 @@ def process(
 
     # TODO NEXT TODO understand the strucutre of xarray saved zarr arrays better and replicate here
     # create zarr storage for each band and mask
-    #store = zarr.storage.SQLiteStore(zarr_path, dimension_separator=".")
     #for band in BANDS:
     #    # TODO somehow specifying fill value fails here
     #    zarr.creation.empty(
@@ -450,7 +454,7 @@ def process(
     #        store=store)
 
     # NOTE TEMP
-    # subtiles = subtiles[:1]
+    subtiles = subtiles[:1]
 
     ns = subtiles.shape[0]
     subtiles = list(subtiles.itertuples(index=False, name="subtile"))
@@ -466,6 +470,17 @@ def process(
                         overall_transform=overall_transform,
                         overall_width=width,
                         overall_height=height)
+
+    # convert Timestamp object to UTC timestamp float so that it can be stored in zarr
+    out_array = out_array.assign_coords(dict(time=[int(t.timestamp()) for t in out_array.time.data]))
+
+    # out_array.assign_coords(dict(time=out_array.time.data)) 
+    store = zarr.storage.DirectoryStore(zarr_path, dimension_separator=".")
+    print(out_array)
+    out_array.rename("S2").to_zarr(
+        store=store, mode="w-", compute=True, encoding={"S2": {
+            "write_empty_chunks": False
+        }})
 
     # subtile_arrays = paral(process_subtile, [
     #     subtiles,
@@ -485,6 +500,9 @@ def process(
     # may want to have each subtile already being written to the harddrive once
     # it's done --> is that supported with ZARR?
 
+
+if os.path.exists("bigout.zarr"):
+    os.rmdir("bigout.zarr")
 
 x = process(target_crs=CRS.from_string("EPSG:8857"),
             bound_left=767300,
