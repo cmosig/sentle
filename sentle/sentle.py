@@ -161,7 +161,8 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
                     overall_width: int, overall_height: int):
 
     subtile_array = xr.DataArray(data=np.empty(
-        (df.shape[0], len(BANDS), subtile_size, subtile_size)),
+        (df.shape[0], len(BANDS), subtile_size, subtile_size),
+        dtype=np.uint16),
                                  dims=["time", "band", "y", "x"],
                                  coords=dict(time=df["datetime"].tolist(),
                                              band=BANDS,
@@ -186,12 +187,14 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
 
                 # read subtile and directly upsample to 10m resolution using
                 # nearest-neighbor (default)
+                # TODO lazy reading with rioxarray?
                 subtile_array.loc[dict(time=item.datetime,
                                        band=band)] = dr.read(
                                            indexes=1,
                                            window=read_window,
                                            out_shape=(subtile_size,
-                                                      subtile_size))
+                                                      subtile_size),
+                                           )
 
                 # save and validate epsg
                 assert (crs is None) or (
@@ -229,16 +232,16 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
 
     # 2 push that tile through atenea
     # TODO add atenea kwargs
-    subtile_array = atenea.process(
-        subtile_array,
-        source="cubo",
-        # TODO need to add padding and then reactivate cloud filtering
-        mask_clouds=False,
-        # dont reduce time otherwise timesteps will be broken
-        reduce_time=False,
-        return_cloud_classification_layer=True,
-        # chunksize=(len(items), subtile_size),
-        stac=stac_endpoint)
+    # subtile_array = atenea.process(
+    #     subtile_array,
+    #     source="cubo",
+    #     # TODO need to add padding and then reactivate cloud filtering
+    #     mask_clouds=False,
+    #     # dont reduce time otherwise timesteps will be broken
+    #     reduce_time=False,
+    #     return_cloud_classification_layer=True,
+    #     # chunksize=(len(items), subtile_size),
+    #     stac=stac_endpoint)
 
     # make sure that x and y are the correct spatial resolutions
     subtile_array = subtile_array.rio.set_spatial_dims(x_dim="x", y_dim="y")
@@ -288,7 +291,8 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
                                                overall_width)
 
     pbar = tqdm(total=len(BANDS) * subtile_array.sizes["time"])
-    for band in BANDS:
+
+    for band_index, band in enumerate(BANDS):
         # using billinear resampling for spectral bands and nearest neighbor
         # resampling for everything else
         temp_arr = subtile_array.sel(band=band).rio.reproject(
@@ -296,7 +300,8 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
             resampling=Resampling.bilinear
             if band in BANDS else Resampling.nearest,
             transform=subtile_repr_transform,
-            shape=(subtile_repr_height, subtile_repr_width))
+            shape=(subtile_repr_height, subtile_repr_width),
+            nodata=0)
 
         # TODO masked writing --> solution: write on seperate timestamps and then
         # do mean aggregate afterwards
@@ -306,10 +311,10 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
             dict(x=temp_arr.x.data - (target_resolution / 2),
                  y=temp_arr.y.data + (target_resolution / 2)))
 
-        for ts in subtile_array.time.data:
-            out_array.loc[dict(
-                band=band,
-                time=ts)][write_win.row_off:write_win.row_off +
+        temp_arr = temp_arr.compute()
+
+        for ts_index, ts in enumerate(subtile_array.time.data):
+            out_array[ts_index, band_index, write_win.row_off:write_win.row_off +
                           write_win.height,
                           write_win.col_off:write_win.col_off +
                           write_win.width] = temp_arr.loc[dict(
@@ -426,7 +431,7 @@ def process(
     timesteps = items["datetime"].drop_duplicates().tolist()
     out_array = xr.DataArray(
         data=da.zeros((len(timesteps), len(BANDS), height, width),
-                      chunks=(1, 12, 100, 100)),
+                      chunks=(1, 12, 100, 100), dtype=np.uint16),
         dims=["time", "band", "y", "x"],
         coords=dict(
             time=timesteps,
@@ -472,13 +477,17 @@ def process(
                         overall_height=height)
 
     # convert Timestamp object to UTC timestamp float so that it can be stored in zarr
-    out_array = out_array.assign_coords(dict(time=[int(t.timestamp()) for t in out_array.time.data]))
+    out_array = out_array.assign_coords(
+        dict(time=[int(t.timestamp()) for t in out_array.time.data]))
 
-    # out_array.assign_coords(dict(time=out_array.time.data)) 
+    # out_array.assign_coords(dict(time=out_array.time.data))
     store = zarr.storage.DirectoryStore(zarr_path, dimension_separator=".")
     print(out_array)
     out_array.rename("S2").to_zarr(
-        store=store, mode="w-", compute=True, encoding={"S2": {
+        store=store,
+        mode="w-",
+        compute=True,
+        encoding={"S2": {
             "write_empty_chunks": False
         }})
 
@@ -500,9 +509,6 @@ def process(
     # may want to have each subtile already being written to the harddrive once
     # it's done --> is that supported with ZARR?
 
-
-if os.path.exists("bigout.zarr"):
-    os.rmdir("bigout.zarr")
 
 x = process(target_crs=CRS.from_string("EPSG:8857"),
             bound_left=767300,
