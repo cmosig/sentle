@@ -37,12 +37,8 @@ def recrop_write_window(win, overall_height, overall_width):
     lwidth = win.width
     lheight = win.height
 
-    print("glob", grow, gcol, gwidth, gheight)
-    print("loc", lrow, lcol, lwidth, lheight)
-
     # if overlapping to the left
     if gcol < 0:
-        print("overlap left")
         lcol = abs(gcol)
         gwidth -= abs(gcol)
         lwidth -= abs(gcol)
@@ -50,7 +46,6 @@ def recrop_write_window(win, overall_height, overall_width):
 
     # if overlapping on the bottom
     if grow < 0:
-        print("overlap bottom")
         lrow = abs(grow)
         gheight -= abs(grow)
         lheight -= abs(grow)
@@ -58,20 +53,15 @@ def recrop_write_window(win, overall_height, overall_width):
 
     # if overlapping to the right
     if overall_width < (gcol + gwidth):
-        print("overlap right")
         difwidth = (gcol + gwidth) - overall_width
         gwidth -= difwidth
         lwidth -= difwidth
 
     # if overlapping to the top
     if overall_height < (grow + gheight):
-        print("overlap top")
         difheight = (grow + gheight) - overall_height
         gheight -= difheight
         lheight -= difheight
-
-    print("glob", grow, gcol, gwidth, gheight)
-    print("loc", lrow, lcol, lwidth, lheight)
 
     assert gcol >= 0
     assert grow >= 0
@@ -282,35 +272,22 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
     subtile_repr_width += 1
     subtile_repr_height += 1
 
-    # using billinear resampling for spectral bands and nearest neighbor
-    # resampling for everything else
-    # for band in subtile_array.band.data:
-
-    # TODO masked writing --> solution: write on seperate timestamps and then
-    # do mean aggregate afterwards
-
     subtile_bounds_tcrs = bounds_from_transform_height_width_res(
         transform=subtile_repr_transform,
         height=subtile_repr_height,
         width=subtile_repr_width,
         resolution=target_resolution)
 
-    print("from transform height width", subtile_bounds_tcrs)
-
-    print(subtile_bounds_tcrs)
-
-    print(f"{subtile_bounds_tcrs=}")
-    print(overall_transform)
     write_win = windows.from_bounds(
         *subtile_bounds_tcrs,
         transform=overall_transform).round_offsets().round_lengths()
-    print(write_win)
 
     write_win, local_win = recrop_write_window(write_win, overall_height,
                                                overall_width)
 
     for band in BANDS:
-        # reproject respective band
+        # using billinear resampling for spectral bands and nearest neighbor
+        # resampling for everything else
         temp_arr = subtile_array.sel(band=band).rio.reproject(
             dst_crs=target_crs,
             resampling=Resampling.bilinear
@@ -318,74 +295,15 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
             transform=subtile_repr_transform,
             shape=(subtile_repr_height, subtile_repr_width))
 
+        # TODO masked writing --> solution: write on seperate timestamps and then
+        # do mean aggregate afterwards
+
         # change center to coordinates to top-left coords (rioxarray caveat)
         temp_arr = temp_arr.assign_coords(
             dict(x=temp_arr.x.data - (target_resolution / 2),
                  y=temp_arr.y.data + (target_resolution / 2)))
 
-        # flip back y-axis (rioxarray caveat)
-        # temp_arr = temp_arr.reindex(y=temp_arr.y[::-1])
-        # temp_arr = temp_arr.isel(y=slice(None, None, -1))
-
-        # print(subtile_repr_transform, temp_arr.x[0].item(), temp_arr.y[0].item())
-        # print(temp_arr)
-        # print(transform)
-        # print("bounds in UTM", subtile_bounds_utm)
-        # print(subtile_repr_transform)
-        # print("bounds in trcs", (temp_arr.x[0].item(), temp_arr.y[0].item(),temp_arr.x[-1].item(), temp_arr.y[-1].item()))
-        # xs_tcrs = np.arange(
-        #     max(out_array.x.min().item(),
-        #         temp_arr.x.min().item()),
-        #     min(out_array.x.max().item(),
-        #         temp_arr.x.max().item()), target_resolution)
-        # ys_tcrs = np.arange(
-        #     max(out_array.y.min().item(),
-        #         temp_arr.y.min().item()),
-        #     min(out_array.y.max().item(),
-        #         temp_arr.y.max().item()), target_resolution)
-
-        # print(subtile_repr_transform)
-        # print(out_array.y[0], out_array.y[-1])
-        # print(max(out_array.y[0].item(), temp_arr.y[0].item()), min(out_array.y[-1].item(), temp_arr.y[-1].item()))
-        # print("indexing")
-        # print(xs_tcrs)
-        # print(temp_arr.x.data)
-
-        # for ts in subtile_array.time.data:
-        #     out_array.loc[dict(band=band, x=xs_tcrs, y=ys_tcrs,
-        #                        time=ts)] = temp_arr[time=ts, x=xs_tcrs, y=ys_tcrs)
-
         for ts in subtile_array.time.data:
-            print("min max out",
-                  out_array.y.min().item(),
-                  out_array.y.max().item())
-            print("min max loc",
-                  temp_arr.y.min().item(),
-                  temp_arr.y.max().item())
-            print("----------")
-            print("local win", local_win)
-            print("out win", write_win)
-            print(
-                "Y window out",
-                out_array.y[write_win.row_off:write_win.row_off +
-                            write_win.height].data)
-            print(
-                "Y window loc", temp_arr.y[local_win.row_off:local_win.height +
-                                           local_win.row_off].data)
-            # print( "X window out", out_array.x[write_win.col_off:write_win.col_off + write_win.width].data)
-            # print( "X window loc", temp_arr.x[local_win.col_off:local_win.width + local_win.col_off].data)
-            # print("complete loc", temp_arr.y.data)
-            print("----------")
-
-            # temp_array_sliced =
-            # out_array.loc[dict(
-            #     band=band,
-            #     time=ts,
-            #     y=slice(temp_array_sliced.y.max().item(),
-            #             temp_array_sliced.y.min().item()),
-            #     x=slice(temp_array_sliced.x.min().item(),
-            #             temp_array_sliced.x.max().item() ))] = temp_array_sliced
-
             out_array.loc[dict(
                 band=band,
                 time=ts)][write_win.row_off:write_win.row_off +
@@ -396,18 +314,6 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
                                         local_win.row_off,
                                         local_win.col_off:local_win.col_off +
                                         local_win.width]
-    # 4 remove data that is outside the bounds of the specified bounds
-
-    # NOTE 1: think about the storage type that we want to use, definetly not Directory --> too many files
-    # NOTE 2: timestamps: either we need to round to the number of days and then the
-    # zarr array has one timestep per day --> possibly completely empty
-    # timesteps
-    # determine in advance using the stac api which timestamps we have across
-    # the entire area and then this will be the timesteps
-    # NOTE 3: also "stupid mode" simply overwrite timestamps where there
-    # already is data -> should be the same anyway
-    # NOTE 4: somehow prevent that places where this array has no data (nans)
-    # are not used to overwrite eixisting data -> solution masked indexing
 
 
 def process(
@@ -589,5 +495,3 @@ x = process(target_crs=CRS.from_string("EPSG:8857"),
             subtile_size=732,
             target_resolution=10,
             zarr_path="bigout.zarr")
-
-print(x)
