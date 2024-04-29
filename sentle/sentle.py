@@ -194,7 +194,7 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
                                            window=read_window,
                                            out_shape=(subtile_size,
                                                       subtile_size),
-                                           )
+                                       )
 
                 # save and validate epsg
                 assert (crs is None) or (
@@ -314,14 +314,14 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
         temp_arr = temp_arr.compute()
 
         for ts_index, ts in enumerate(subtile_array.time.data):
-            out_array[ts_index, band_index, write_win.row_off:write_win.row_off +
-                          write_win.height,
-                          write_win.col_off:write_win.col_off +
-                          write_win.width] = temp_arr.loc[dict(
-                              time=ts)][local_win.row_off:local_win.height +
-                                        local_win.row_off,
-                                        local_win.col_off:local_win.col_off +
-                                        local_win.width]
+            out_array[ts_index, band_index,
+                      write_win.row_off:write_win.row_off + write_win.height,
+                      write_win.col_off:write_win.col_off +
+                      write_win.width] = temp_arr.loc[dict(
+                          time=ts)][local_win.row_off:local_win.height +
+                                    local_win.row_off,
+                                    local_win.col_off:local_win.col_off +
+                                    local_win.width]
 
             pbar.update()
 
@@ -431,7 +431,8 @@ def process(
     timesteps = items["datetime"].drop_duplicates().tolist()
     out_array = xr.DataArray(
         data=da.zeros((len(timesteps), len(BANDS), height, width),
-                      chunks=(1, 12, 100, 100), dtype=np.uint16),
+                      chunks=(1, 12, 100, 100),
+                      dtype=np.uint16),
         dims=["time", "band", "y", "x"],
         coords=dict(
             time=timesteps,
@@ -459,7 +460,7 @@ def process(
     #        store=store)
 
     # NOTE TEMP
-    subtiles = subtiles[:1]
+    # subtiles = subtiles[:6]
 
     ns = subtiles.shape[0]
     subtiles = list(subtiles.itertuples(index=False, name="subtile"))
