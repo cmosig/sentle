@@ -160,9 +160,12 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
                     df: pd.DataFrame, stac_endpoint: str, overall_transform,
                     overall_width: int, overall_height: int):
 
+    # NOTE we somehow need to parallize the function and get an understanding
+    # for what is slow and fast in here
+
     subtile_array = xr.DataArray(data=np.empty(
         (df.shape[0], len(BANDS), subtile_size, subtile_size),
-        dtype=np.uint16),
+        dtype=np.float32),
                                  dims=["time", "band", "y", "x"],
                                  coords=dict(time=df["datetime"].tolist(),
                                              band=BANDS,
@@ -188,13 +191,17 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
                 # read subtile and directly upsample to 10m resolution using
                 # nearest-neighbor (default)
                 # TODO lazy reading with rioxarray?
+                read_data = dr.read(indexes=1,
+                                    window=read_window,
+                                    out_shape=(subtile_size, subtile_size),
+                                    out_dtype=np.float32)
+
+                # replace 0 with NaN -> important for merging
+                # 0 means in sentinel2 nodata
+                read_data[read_data == 0] = np.nan
+
                 subtile_array.loc[dict(time=item.datetime,
-                                       band=band)] = dr.read(
-                                           indexes=1,
-                                           window=read_window,
-                                           out_shape=(subtile_size,
-                                                      subtile_size),
-                                       )
+                                       band=band)] = read_data
 
                 # save and validate epsg
                 assert (crs is None) or (
@@ -301,7 +308,7 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
             if band in BANDS else Resampling.nearest,
             transform=subtile_repr_transform,
             shape=(subtile_repr_height, subtile_repr_width),
-            nodata=0)
+            nodata=np.nan)
 
         # TODO masked writing --> solution: write on seperate timestamps and then
         # do mean aggregate afterwards
@@ -314,15 +321,30 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
         temp_arr = temp_arr.compute()
 
         for ts_index, ts in enumerate(subtile_array.time.data):
+            # save crop subtile of subtil into respective region in overall array
+            out_array_crop = out_array.isel(
+                time=ts_index,
+                band=band_index,
+                y=slice(write_win.row_off,
+                        write_win.row_off + write_win.height),
+                x=slice(write_win.col_off,
+                        write_win.col_off + write_win.width))
+
+            temp_arr_ts_crop = temp_arr.loc[dict(
+                time=ts)][local_win.row_off:local_win.height +
+                          local_win.row_off,
+                          local_win.col_off:local_win.col_off +
+                          local_win.width]
+
+            # do nanmean with existing data in array
+            # NOTE it may be faster to do an overall nan mean at a later stage
+            # NOTE need to call compute here, otherwise to slow
             out_array[ts_index, band_index,
                       write_win.row_off:write_win.row_off + write_win.height,
                       write_win.col_off:write_win.col_off +
-                      write_win.width] = temp_arr.loc[dict(
-                          time=ts)][local_win.row_off:local_win.height +
-                                    local_win.row_off,
-                                    local_win.col_off:local_win.col_off +
-                                    local_win.width]
-
+                      write_win.width] = xr.concat(
+                          [out_array_crop, temp_arr_ts_crop],
+                          dim="concatdim").mean(dim="concatdim", skipna=True).compute()
             pbar.update()
 
 
@@ -430,9 +452,13 @@ def process(
 
     timesteps = items["datetime"].drop_duplicates().tolist()
     out_array = xr.DataArray(
-        data=da.zeros((len(timesteps), len(BANDS), height, width),
-                      chunks=(1, 12, 100, 100),
-                      dtype=np.uint16),
+        data=da.full(
+            shape=(len(timesteps), len(BANDS), height, width),
+            # TODO optimize, magic 100/100 magic values atm
+            chunks=(1, 12, 100, 100),
+            # needs to be float in order to store NaNs
+            dtype=np.float32,
+            fill_value=np.nan),
         dims=["time", "band", "y", "x"],
         coords=dict(
             time=timesteps,
@@ -443,9 +469,7 @@ def process(
             y=np.arange(bound_top, bound_bottom,
                         -target_resolution).astype(np.float32)))
 
-    # NOTE kind of magic values for now
-    # one chunk per timestep!
-    # chunks = (100, 100, 1)
+    # TODO maybe cast to uint16 at the end again
 
     # TODO NEXT TODO understand the strucutre of xarray saved zarr arrays better and replicate here
     # create zarr storage for each band and mask
@@ -511,12 +535,14 @@ def process(
     # it's done --> is that supported with ZARR?
 
 
-x = process(target_crs=CRS.from_string("EPSG:8857"),
-            bound_left=767300,
-            bound_bottom=7290000,
-            bound_right=776000,
-            bound_top=7315000,
-            datetime="2023-11-11/2023-12-01",
-            subtile_size=732,
-            target_resolution=10,
-            zarr_path="bigout.zarr")
+x = process(
+    target_crs=CRS.from_string("EPSG:8857"),
+    bound_left=767300,
+    bound_bottom=7290000,
+    bound_right=776000,
+    bound_top=7315000,
+    # datetime="2023-11-11/2023-12-01",
+    datetime="2023-11-16",
+    subtile_size=732,
+    target_resolution=10,
+    zarr_path="bigout_oneday.zarr")
