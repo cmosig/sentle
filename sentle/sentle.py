@@ -316,20 +316,11 @@ def process_subtile(subtile, timestamp, atenea_args: dict, subtile_size: int,
         dict(x=subtile_array.x.data - (target_resolution / 2),
              y=subtile_array.y.data + (target_resolution / 2)))
 
-    print("before crop")
-    print(subtile_array)
-
-    print("write_win", write_win)
-    print("local_win", local_win)
-
     # crop subtile_array
     subtile_array = subtile_array[:, local_win.row_off:local_win.height +
                                   local_win.row_off,
                                   local_win.col_off:local_win.col_off +
                                   local_win.width]
-
-    print("after crop")
-    print(subtile_array)
 
     return subtile_array, write_win
 
@@ -382,12 +373,16 @@ def process_ptile(
                                 right=bound_right,
                                 top=bound_top))
 
+    item_list = list(search.item_collection())
+    if len(item_list) == 0:
+        # if there is nothing within the bounds and for that timestamp return.
+        # possible and normal
+        return out_array
+
     items = pd.DataFrame()
-    items["item"] = list(search.item_collection())
+    items["item"] = item_list
     items["tile"] = items["item"].apply(lambda x: x.properties["s2:mgrs_tile"])
     items["id"] = items["item"].apply(lambda x: x.id)
-
-    print((bound_left, bound_bottom, bound_right, bound_top), timestamp, items)
 
     # determine ptile transform from bounds
     ptile_width = (bound_right - bound_left) / target_resolution
@@ -413,10 +408,9 @@ def process_ptile(
             ptile_width=ptile_width,
             ptile_height=ptile_height)
 
-        out_array[
-            0, :, write_win.row_off:write_win.row_off + write_win.height,
-            write_win.col_off:write_win.col_off + write_win.
-            width] = subtile_array  #.expand_dims(dim={"time": [timestamp]})
+        out_array[0, :, write_win.row_off:write_win.row_off + write_win.height,
+                  write_win.col_off:write_win.col_off +
+                  write_win.width] = subtile_array
 
     return out_array
 
