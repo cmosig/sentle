@@ -78,14 +78,16 @@ def recrop_write_window(win, overall_height, overall_width):
     assert lheight <= win.height
     assert lwidth == gwidth
     assert lheight == lheight
+    assert all([
+        x % 1 == 0
+        for x in [grow, gcol, gwidth, gheight, lrow, lcol, lwidth, lheight]
+    ])
 
-    return windows.Window(row_off=grow,
-                          col_off=gcol,
-                          height=gheight,
-                          width=gwidth), windows.Window(row_off=lrow,
-                                                        col_off=lcol,
-                                                        height=lheight,
-                                                        width=lwidth)
+    return windows.Window(
+        row_off=grow, col_off=gcol, height=gheight,
+        width=gwidth).round_offsets().round_lengths(), windows.Window(
+            row_off=lrow, col_off=lcol, height=lheight,
+            width=lwidth).round_offsets().round_lengths()
 
 
 def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
@@ -157,63 +159,61 @@ def bounds_from_transform_height_width_res(transform, height, width,
             transform.c + (width * resolution), transform.f)
 
 
-def process_subtile(subtile, out_array, timestamp, atenea_args: dict,
-                    subtile_size: int, target_crs: CRS,
-                    target_resolution: float, df: pd.DataFrame,
-                    stac_endpoint: str, ptile_transform, ptile_width: int,
-                    ptile_height: int):
+def process_subtile(subtile, timestamp, atenea_args: dict, subtile_size: int,
+                    target_crs: CRS, target_resolution: float,
+                    df: pd.DataFrame, stac_endpoint: str, ptile_transform,
+                    ptile_width: int, ptile_height: int):
 
-    # NOTE we somehow need to parallize the function and get an understanding
-    # for what is slow and fast in here
-
-    subtile_array = xr.DataArray(data=np.empty(
-        (df.shape[0], len(BANDS), subtile_size, subtile_size),
-        dtype=np.float32),
-                                 dims=["time", "band", "y", "x"],
-                                 coords=dict(time=[timestamp],
-                                             band=BANDS,
-                                             id=("time", df["id"].tolist())),
-                                 attrs=dict(stac=stac_endpoint,
-                                            collection="sentinel-2-l2a"))
+    # init array that needs to be filled
+    subtile_array = xr.DataArray(
+        data=np.empty((len(BANDS), subtile_size, subtile_size),
+                      dtype=np.float32),
+        dims=["band", "y", "x"],
+        coords=dict(band=BANDS),
+        attrs=dict(
+            stac=stac_endpoint,
+            collection="sentinel-2-l2a",
+            # TODO transform upstream
+            id=df["id"].iloc[0]))
 
     # iterate through timestamps
     crs = None
     transform = None
-    for item in df["item"]:
-        for band in BANDS:
-            href = item.assets[band].href
-            with rasterio.open(href) as dr:
-                # convert read window respective to tile resolution
-                factor = BAND_RESOLUTION[band] // 10
-                orig_win = subtile.intersecting_windows
-                read_window = windows.Window(orig_win.col_off // factor,
-                                             orig_win.row_off // factor,
-                                             orig_win.width // factor,
-                                             orig_win.height // factor)
+    # TODO transform to one item upstream
+    item = df["item"].iloc[0]
+    for band in BANDS:
+        href = item.assets[band].href
+        with rasterio.open(href) as dr:
+            # convert read window respective to tile resolution
+            factor = BAND_RESOLUTION[band] // 10
+            orig_win = subtile.intersecting_windows
+            read_window = windows.Window(orig_win.col_off // factor,
+                                         orig_win.row_off // factor,
+                                         orig_win.width // factor,
+                                         orig_win.height // factor)
 
-                # read subtile and directly upsample to 10m resolution using
-                # nearest-neighbor (default)
-                # TODO lazy reading with rioxarray?
-                read_data = dr.read(indexes=1,
-                                    window=read_window,
-                                    out_shape=(subtile_size, subtile_size),
-                                    out_dtype=np.float32)
+            # read subtile and directly upsample to 10m resolution using
+            # nearest-neighbor (default)
+            # TODO lazy reading with rioxarray?
+            read_data = dr.read(indexes=1,
+                                window=read_window,
+                                out_shape=(subtile_size, subtile_size),
+                                out_dtype=np.float32)
 
-                # replace 0 with NaN -> important for merging
-                # 0 means in sentinel2 nodata
-                read_data[read_data == 0] = np.nan
+            # replace 0 with NaN -> important for merging
+            # 0 means in sentinel2 nodata
+            read_data[read_data == 0] = np.nan
 
-                subtile_array.loc[dict(time=item.datetime,
-                                       band=band)] = read_data
+            subtile_array.loc[dict(band=band)] = read_data
 
-                # save and validate epsg
-                assert (crs is None) or (
-                    crs == dr.crs), "CRS mismatch within one sentinel tile"
-                crs = dr.crs
+            # save and validate epsg
+            assert (crs is None) or (
+                crs == dr.crs), "CRS mismatch within one sentinel tile"
+            crs = dr.crs
 
-                # save transform for 10m tile
-                if band == "B02":
-                    transform = dr.transform
+            # save transform for 10m tile
+            if band == "B02":
+                transform = dr.transform
 
     # this is required for atenea
     subtile_array.attrs["epsg"] = crs.to_epsg()
@@ -300,56 +300,38 @@ def process_subtile(subtile, out_array, timestamp, atenea_args: dict,
     write_win, local_win = recrop_write_window(write_win, ptile_height,
                                                ptile_width)
 
-    pbar = tqdm(total=len(BANDS) * subtile_array.sizes["time"])
+    # TODO using billinear resampling for spectral bands and nearest neighbor
+    # resampling for everything else
 
-    for band_index, band in enumerate(BANDS):
-        # using billinear resampling for spectral bands and nearest neighbor
-        # resampling for everything else
-        temp_arr = subtile_array.sel(band=band).rio.reproject(
-            dst_crs=target_crs,
-            resampling=Resampling.bilinear
-            if band in BANDS else Resampling.nearest,
-            transform=subtile_repr_transform,
-            shape=(subtile_repr_height, subtile_repr_width),
-            nodata=np.nan)
+    # take only sentinel bands for now
+    subtile_array = subtile_array.sel(band=BANDS)
+    subtile_array = subtile_array.rio.reproject(
+        dst_crs=target_crs,
+        transform=subtile_repr_transform,
+        shape=(subtile_repr_height, subtile_repr_width),
+        nodata=np.nan)
 
-        # TODO masked writing --> solution: write on seperate timestamps and then
-        # do mean aggregate afterwards
+    # change center to coordinates to top-left coords (rioxarray caveat)
+    subtile_array = subtile_array.assign_coords(
+        dict(x=subtile_array.x.data - (target_resolution / 2),
+             y=subtile_array.y.data + (target_resolution / 2)))
 
-        # change center to coordinates to top-left coords (rioxarray caveat)
-        temp_arr = temp_arr.assign_coords(
-            dict(x=temp_arr.x.data - (target_resolution / 2),
-                 y=temp_arr.y.data + (target_resolution / 2)))
+    print("before crop")
+    print(subtile_array)
 
-        temp_arr = temp_arr.compute()
+    print("write_win", write_win)
+    print("local_win", local_win)
 
-        for ts_index, ts in enumerate(subtile_array.time.data):
-            # save crop subtile of subtil into respective region in ptile array
-            out_array_crop = out_array.isel(
-                time=ts_index,
-                band=band_index,
-                y=slice(write_win.row_off,
-                        write_win.row_off + write_win.height),
-                x=slice(write_win.col_off,
-                        write_win.col_off + write_win.width))
+    # crop subtile_array
+    subtile_array = subtile_array[:, local_win.row_off:local_win.height +
+                                  local_win.row_off,
+                                  local_win.col_off:local_win.col_off +
+                                  local_win.width]
 
-            temp_arr_ts_crop = temp_arr.loc[dict(
-                time=ts)][local_win.row_off:local_win.height +
-                          local_win.row_off,
-                          local_win.col_off:local_win.col_off +
-                          local_win.width]
+    print("after crop")
+    print(subtile_array)
 
-            # do nanmean with existing data in array
-            # NOTE it may be faster to do an ptile nan mean at a later stage
-            # NOTE need to call compute here, otherwise to slow
-            out_array[ts_index, band_index,
-                      write_win.row_off:write_win.row_off + write_win.height,
-                      write_win.col_off:write_win.col_off +
-                      write_win.width] = xr.concat(
-                          [out_array_crop, temp_arr_ts_crop],
-                          dim="concatdim").mean(dim="concatdim",
-                                                skipna=True).compute()
-            pbar.update()
+    return subtile_array, write_win
 
 
 def process_ptile(
@@ -418,18 +400,25 @@ def process_ptile(
                                             height=ptile_height)
 
     for st in subtiles.itertuples(index=False, name="subtile"):
-        process_subtile(subtile=st,
-                        out_array=da,
-                        timestamp=timestamp,
-                        atenea_args=kwargs_atenea,
-                        subtile_size=subtile_size,
-                        target_crs=target_crs,
-                        target_resolution=target_resolution,
-                        df=items[items["tile"] == st.name],
-                        stac_endpoint=stac_endpoint,
-                        ptile_transform=ptile_transform,
-                        ptile_width=ptile_width,
-                        ptile_height=ptile_height)
+        subtile_array, write_win = process_subtile(
+            subtile=st,
+            timestamp=timestamp,
+            atenea_args=kwargs_atenea,
+            subtile_size=subtile_size,
+            target_crs=target_crs,
+            target_resolution=target_resolution,
+            df=items[items["tile"] == st.name],
+            stac_endpoint=stac_endpoint,
+            ptile_transform=ptile_transform,
+            ptile_width=ptile_width,
+            ptile_height=ptile_height)
+
+        out_array[
+            0, :, write_win.row_off:write_win.row_off + write_win.height,
+            write_win.col_off:write_win.col_off + write_win.
+            width] = subtile_array  #.expand_dims(dim={"time": [timestamp]})
+
+    return out_array
 
 
 def process(zarr_path: str,
@@ -472,7 +461,7 @@ def process(zarr_path: str,
         Path where zarr storage is supposed to be created.
     """
 
-    client = Client(n_workers=2, threads_per_worker=2, memory_limit='2GB')
+    client = Client(n_workers=1, threads_per_worker=1, memory_limit='2GB')
     print(client.dashboard_link)
 
     # 2 setup zarr storage
