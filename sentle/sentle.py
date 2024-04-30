@@ -1,5 +1,5 @@
-from dask.distributed import Client
 import dask.array as da
+from time import sleep
 import rioxarray as rxr
 from affine import Affine
 import pandas as pd
@@ -23,6 +23,7 @@ import xarray as xr
 import warnings
 from tqdm import tqdm
 import os
+from dask.distributed import Client
 
 
 def recrop_write_window(win, overall_height, overall_width):
@@ -344,23 +345,76 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
                       write_win.col_off:write_win.col_off +
                       write_win.width] = xr.concat(
                           [out_array_crop, temp_arr_ts_crop],
-                          dim="concatdim").mean(dim="concatdim", skipna=True).compute()
+                          dim="concatdim").mean(dim="concatdim",
+                                                skipna=True).compute()
             pbar.update()
 
 
-def process(
-        zarr_path: str,
+def process_ptile(
+        da: xr.DataArray,
         target_crs: CRS,
         target_resolution: float,
-        bound_left: float,
-        bound_bottom: float,
-        bound_right: float,
-        bound_top: float,
-        datetime: DatetimeLike,
-        subtile_size: int,
-        num_cores: int = 1,
+        subtile_size: int = 732,
         kwargs_atenea: dict = dict(),
 ):
+    print("process ptile", da.time.data)
+    dout = da.copy()
+    dout[:] = 9
+    return dout
+
+    # TODO think about what to do with clouds and if to optionally filter them like atenea
+    # --> mask_Clouds, drop_cloudy, clear_sky_threshold, mask_snow)
+
+    # 1 obtain sub-sentinel tiles based on supplied bounds and CRS
+    subtiles = obtain_subtiles(target_crs,
+                               bound_left,
+                               bound_bottom,
+                               bound_right,
+                               bound_top,
+                               subtile_size=subtile_size)
+
+    # TODO maybe cast to uint16 at the end again
+
+    # TODO NEXT TODO understand the strucutre of xarray saved zarr arrays better and replicate here
+    # create zarr storage for each band and mask
+    #for band in BANDS:
+    #    # TODO somehow specifying fill value fails here
+    #    zarr.creation.empty(
+    #        shape=(width, height, items["datetime"].nunique()),
+    #        chunks=chunks,
+    #        #fill_value=0,
+    #        path=band,
+    #        write_empty_chunks=False,
+    #        store=store)
+
+    ns = subtiles.shape[0]
+    subtiles = list(subtiles.itertuples(index=False, name="subtile"))
+    for st in subtiles:
+        process_subtile(subtile=st,
+                        out_array=out_array,
+                        atenea_args=kwargs_atenea,
+                        subtile_size=subtile_size,
+                        target_crs=target_crs,
+                        target_resolution=target_resolution,
+                        df=items[items["tile"] == st.name],
+                        stac_endpoint=stac_endpoint,
+                        overall_transform=overall_transform,
+                        overall_width=width,
+                        overall_height=height)
+
+
+def process(zarr_path: str,
+            target_crs: CRS,
+            target_resolution: float,
+            bound_left: float,
+            bound_bottom: float,
+            bound_right: float,
+            bound_top: float,
+            datetime: DatetimeLike,
+            processing_tile_size: int,
+            num_cores: int = 1,
+            subtile_size: int = 732,
+            kwargs_atenea: dict = dict()):
     """
     Parameters
     ----------
@@ -389,32 +443,19 @@ def process(
         Path where zarr storage is supposed to be created.
     """
 
-    if zarr_path is None:
-        # then return as xarray
-        # otherwise store as zarr
-        pass
-
-    # TODO think about what to do with clouds and if to optionally filter them like atenea
-    # --> mask_Clouds, drop_cloudy, clear_sky_threshold, mask_snow)
-
-    # 1 obtain sub-sentinel tiles based on supplied bounds and CRS
-    subtiles = obtain_subtiles(target_crs,
-                               bound_left,
-                               bound_bottom,
-                               bound_right,
-                               bound_top,
-                               subtile_size=subtile_size)
+    client = Client(n_workers=2, threads_per_worker=2, memory_limit='2GB')
+    print(client.dashboard_link)
 
     # 2 setup zarr storage
     # determine width and height based on bounds and resolution
     width, w_rem = divmod(abs(bound_right - bound_left), target_resolution)
     height, h_rem = divmod(abs(bound_top - bound_bottom), target_resolution)
     if h_rem > 0:
-        warning.warn(
+        warnings.warn(
             "Specified top/bottom bounds are not perfectly divisable by specified target_resolution. The resulting coverage will be slightly cropped"
         )
     if w_rem > 0:
-        warning.warn(
+        warnings.warn(
             "Specified left/right bounds are not perfectly divisable by specified target_resolution. The resulting coverage will be slightly cropped"
         )
 
@@ -425,7 +466,7 @@ def process(
         modifier=planetary_computer.sign_inplace,
     )
 
-    # get all items within date range
+    # get all items within date range and area
     search = catalog.search(collections=["sentinel-2-l2a"],
                             datetime=datetime,
                             bbox=rasterio.warp.transform_bounds(
@@ -451,11 +492,13 @@ def process(
                                               height=height)
 
     timesteps = items["datetime"].drop_duplicates().tolist()
+
+    # chunks with one per timestep -> many empty timesteps for specific areas,
+    # because we have all the timesteps for Germany
     out_array = xr.DataArray(
         data=da.full(
             shape=(len(timesteps), len(BANDS), height, width),
-            # TODO optimize, magic 100/100 magic values atm
-            chunks=(1, 12, 100, 100),
+            chunks=(1, 12, processing_tile_size, processing_tile_size),
             # needs to be float in order to store NaNs
             dtype=np.float32,
             fill_value=np.nan),
@@ -469,37 +512,13 @@ def process(
             y=np.arange(bound_top, bound_bottom,
                         -target_resolution).astype(np.float32)))
 
-    # TODO maybe cast to uint16 at the end again
-
-    # TODO NEXT TODO understand the strucutre of xarray saved zarr arrays better and replicate here
-    # create zarr storage for each band and mask
-    #for band in BANDS:
-    #    # TODO somehow specifying fill value fails here
-    #    zarr.creation.empty(
-    #        shape=(width, height, items["datetime"].nunique()),
-    #        chunks=chunks,
-    #        #fill_value=0,
-    #        path=band,
-    #        write_empty_chunks=False,
-    #        store=store)
-
-    # NOTE TEMP
-    # subtiles = subtiles[:6]
-
-    ns = subtiles.shape[0]
-    subtiles = list(subtiles.itertuples(index=False, name="subtile"))
-    for st in subtiles:
-        process_subtile(subtile=st,
-                        out_array=out_array,
-                        atenea_args=kwargs_atenea,
-                        subtile_size=subtile_size,
-                        target_crs=target_crs,
-                        target_resolution=target_resolution,
-                        df=items[items["tile"] == st.name],
-                        stac_endpoint=stac_endpoint,
-                        overall_transform=overall_transform,
-                        overall_width=width,
-                        overall_height=height)
+    out_array = out_array.map_blocks(process_ptile,
+                                     kwargs=dict(
+                                         target_crs=target_crs,
+                                         target_resolution=target_resolution,
+                                         subtile_size=subtile_size,
+                                         kwargs_atenea=kwargs_atenea),
+                                     template=out_array)
 
     # convert Timestamp object to UTC timestamp float so that it can be stored in zarr
     out_array = out_array.assign_coords(
@@ -507,7 +526,6 @@ def process(
 
     # out_array.assign_coords(dict(time=out_array.time.data))
     store = zarr.storage.DirectoryStore(zarr_path, dimension_separator=".")
-    print(out_array)
     out_array.rename("S2").to_zarr(
         store=store,
         mode="w-",
@@ -516,33 +534,29 @@ def process(
             "write_empty_chunks": False
         }})
 
-    # subtile_arrays = paral(process_subtile, [
-    #     subtiles,
-    #     [out_array] * ns,
-    #     [kwargs_atenea] * ns,
-    #     [subtile_size] * ns,
-    #     [target_crs] * ns,
-    #     [target_resolution] * ns,
-    #     [items[items["tile"] == s.name] for s in subtiles],
-    #     [stac_endpoint] * ns,
-    #     [overall_transform] * ns,
-    # ],
-    #                        num_cores=num_cores)
 
-    # 3 merge sub-sentinel tiles into one big sparse xarray and return
-    # possible ISSUE: what happens when not everything fits into memory --> we
-    # may want to have each subtile already being written to the harddrive once
-    # it's done --> is that supported with ZARR?
+if __name__ == "__main__":
+    x = process(
+        target_crs=CRS.from_string("EPSG:8857"),
+        bound_left=767300,
+        bound_bottom=7290000,
+        bound_right=776000,
+        bound_top=7315000,
+        # datetime="2023-11-11/2023-12-01",
+        datetime="2023-11",
+        # datetime="2020/2023",
+        processing_tile_size=4000,
+        target_resolution=10,
+        zarr_path="bigout_parallel_test.zarr")
 
-
-x = process(
-    target_crs=CRS.from_string("EPSG:8857"),
-    bound_left=767300,
-    bound_bottom=7290000,
-    bound_right=776000,
-    bound_top=7315000,
-    # datetime="2023-11-11/2023-12-01",
-    datetime="2023-11-16",
-    subtile_size=732,
-    target_resolution=10,
-    zarr_path="bigout_oneday.zarr")
+# x = process(
+#     target_crs=CRS.from_string("EPSG:8857"),
+#     bound_left=564670,
+#     bound_bottom=5718050,
+#     bound_right=1084500,
+#     bound_top=6409170,
+#     # datetime="2023-11-11/2023-12-01",
+#     datetime="2023",
+#     processing_tile_size=4000,
+#     target_resolution=10,
+#     zarr_path="bigout_oneday.zarr")
