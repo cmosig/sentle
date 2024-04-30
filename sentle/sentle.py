@@ -104,6 +104,7 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
             subtile_size) == 0, "subtile_size needs to be a divisor of 10980"
 
     # 1 load sentinel grid
+    # TODO this should be loaded overall just once
     s2grid = gpd.read_file(
         pkg_resources.resource_filename(__name__,
                                         "data/sentinel2_grid_stripped.gpkg"))
@@ -156,10 +157,11 @@ def bounds_from_transform_height_width_res(transform, height, width,
             transform.c + (width * resolution), transform.f)
 
 
-def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
-                    target_crs: CRS, target_resolution: float,
-                    df: pd.DataFrame, stac_endpoint: str, overall_transform,
-                    overall_width: int, overall_height: int):
+def process_subtile(subtile, out_array, timestamp, atenea_args: dict,
+                    subtile_size: int, target_crs: CRS,
+                    target_resolution: float, df: pd.DataFrame,
+                    stac_endpoint: str, ptile_transform, ptile_width: int,
+                    ptile_height: int):
 
     # NOTE we somehow need to parallize the function and get an understanding
     # for what is slow and fast in here
@@ -168,7 +170,7 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
         (df.shape[0], len(BANDS), subtile_size, subtile_size),
         dtype=np.float32),
                                  dims=["time", "band", "y", "x"],
-                                 coords=dict(time=df["datetime"].tolist(),
+                                 coords=dict(time=[timestamp],
                                              band=BANDS,
                                              id=("time", df["id"].tolist())),
                                  attrs=dict(stac=stac_endpoint,
@@ -293,10 +295,10 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
 
     write_win = windows.from_bounds(
         *subtile_bounds_tcrs,
-        transform=overall_transform).round_offsets().round_lengths()
+        transform=ptile_transform).round_offsets().round_lengths()
 
-    write_win, local_win = recrop_write_window(write_win, overall_height,
-                                               overall_width)
+    write_win, local_win = recrop_write_window(write_win, ptile_height,
+                                               ptile_width)
 
     pbar = tqdm(total=len(BANDS) * subtile_array.sizes["time"])
 
@@ -322,7 +324,7 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
         temp_arr = temp_arr.compute()
 
         for ts_index, ts in enumerate(subtile_array.time.data):
-            # save crop subtile of subtil into respective region in overall array
+            # save crop subtile of subtil into respective region in ptile array
             out_array_crop = out_array.isel(
                 time=ts_index,
                 band=band_index,
@@ -338,7 +340,7 @@ def process_subtile(subtile, out_array, atenea_args: dict, subtile_size: int,
                           local_win.width]
 
             # do nanmean with existing data in array
-            # NOTE it may be faster to do an overall nan mean at a later stage
+            # NOTE it may be faster to do an ptile nan mean at a later stage
             # NOTE need to call compute here, otherwise to slow
             out_array[ts_index, band_index,
                       write_win.row_off:write_win.row_off + write_win.height,
@@ -354,18 +356,24 @@ def process_ptile(
         da: xr.DataArray,
         target_crs: CRS,
         target_resolution: float,
+        catalog,
+        stac_endpoint: str,
         subtile_size: int = 732,
         kwargs_atenea: dict = dict(),
 ):
-    print("process ptile", da.time.data)
-    dout = da.copy()
-    dout[:] = 9
-    return dout
 
     # TODO think about what to do with clouds and if to optionally filter them like atenea
     # --> mask_Clouds, drop_cloudy, clear_sky_threshold, mask_snow)
 
+    # TODO we do this for each timestamp right now, maybe this could be moved upstream
     # 1 obtain sub-sentinel tiles based on supplied bounds and CRS
+    # - add target resolution to miny and maxx because we are using top-left coordinates
+    bound_left = da.x.min().item()
+    bound_bottom = da.y.min().item() - target_resolution
+    bound_right = da.x.max().item() + target_resolution
+    bound_top = da.y.max().item()
+
+    # figure out all the sentinel 2 subtiles
     subtiles = obtain_subtiles(target_crs,
                                bound_left,
                                bound_bottom,
@@ -373,34 +381,55 @@ def process_ptile(
                                bound_top,
                                subtile_size=subtile_size)
 
-    # TODO maybe cast to uint16 at the end again
+    # TODO change that so that we have one "timestamp" per sentinel tile
+    out_array = da.copy()
 
-    # TODO NEXT TODO understand the strucutre of xarray saved zarr arrays better and replicate here
-    # create zarr storage for each band and mask
-    #for band in BANDS:
-    #    # TODO somehow specifying fill value fails here
-    #    zarr.creation.empty(
-    #        shape=(width, height, items["datetime"].nunique()),
-    #        chunks=chunks,
-    #        #fill_value=0,
-    #        path=band,
-    #        write_empty_chunks=False,
-    #        store=store)
+    timestamp = da.time.data
+    assert timestamp.shape == (1, )
+    timestamp = timestamp[0]
 
-    ns = subtiles.shape[0]
-    subtiles = list(subtiles.itertuples(index=False, name="subtile"))
-    for st in subtiles:
+    # TODO create geopandas df in process function and somehow pass filtered
+    # version of this --> less network
+    search = catalog.search(collections=["sentinel-2-l2a"],
+                            datetime=timestamp,
+                            bbox=rasterio.warp.transform_bounds(
+                                src_crs=target_crs,
+                                dst_crs="EPSG:4326",
+                                left=bound_left,
+                                bottom=bound_bottom,
+                                right=bound_right,
+                                top=bound_top))
+
+    items = pd.DataFrame()
+    items["item"] = list(search.item_collection())
+    items["tile"] = items["item"].apply(lambda x: x.properties["s2:mgrs_tile"])
+    items["id"] = items["item"].apply(lambda x: x.id)
+
+    print((bound_left, bound_bottom, bound_right, bound_top), timestamp, items)
+
+    # determine ptile transform from bounds
+    ptile_width = (bound_right - bound_left) / target_resolution
+    ptile_height = (bound_top - bound_bottom) / target_resolution
+    ptile_transform = transform.from_bounds(west=bound_left,
+                                            south=bound_bottom,
+                                            east=bound_right,
+                                            north=bound_top,
+                                            width=ptile_width,
+                                            height=ptile_height)
+
+    for st in subtiles.itertuples(index=False, name="subtile"):
         process_subtile(subtile=st,
-                        out_array=out_array,
+                        out_array=da,
+                        timestamp=timestamp,
                         atenea_args=kwargs_atenea,
                         subtile_size=subtile_size,
                         target_crs=target_crs,
                         target_resolution=target_resolution,
                         df=items[items["tile"] == st.name],
                         stac_endpoint=stac_endpoint,
-                        overall_transform=overall_transform,
-                        overall_width=width,
-                        overall_height=height)
+                        ptile_transform=ptile_transform,
+                        ptile_width=ptile_width,
+                        ptile_height=ptile_height)
 
 
 def process(zarr_path: str,
@@ -477,21 +506,7 @@ def process(zarr_path: str,
                                 right=bound_right,
                                 top=bound_top))
 
-    items = pd.DataFrame()
-    items["item"] = list(search.item_collection())
-    items["tile"] = items["item"].apply(lambda x: x.properties["s2:mgrs_tile"])
-    items["datetime"] = items["item"].apply(lambda x: x.datetime)
-    items["id"] = items["item"].apply(lambda x: x.id)
-
-    # determine overall transform from bounds
-    overall_transform = transform.from_bounds(west=bound_left,
-                                              south=bound_bottom,
-                                              east=bound_right,
-                                              north=bound_top,
-                                              width=width,
-                                              height=height)
-
-    timesteps = items["datetime"].drop_duplicates().tolist()
+    timesteps = [i.datetime for i in search.item_collection()]
 
     # chunks with one per timestep -> many empty timesteps for specific areas,
     # because we have all the timesteps for Germany
@@ -508,7 +523,7 @@ def process(zarr_path: str,
             band=BANDS,
             x=np.arange(bound_left, bound_right,
                         target_resolution).astype(np.float32),
-            # we do y-axis in reverse for easier access with indexing
+            # we do y-axis in reverse: top-left coordinate
             y=np.arange(bound_top, bound_bottom,
                         -target_resolution).astype(np.float32)))
 
@@ -517,14 +532,17 @@ def process(zarr_path: str,
                                          target_crs=target_crs,
                                          target_resolution=target_resolution,
                                          subtile_size=subtile_size,
-                                         kwargs_atenea=kwargs_atenea),
+                                         kwargs_atenea=kwargs_atenea,
+                                         catalog=catalog,
+                                         stac_endpoint=stac_endpoint),
                                      template=out_array)
+
+    # TODO maybe cast to uint16 at the end again
 
     # convert Timestamp object to UTC timestamp float so that it can be stored in zarr
     out_array = out_array.assign_coords(
         dict(time=[int(t.timestamp()) for t in out_array.time.data]))
 
-    # out_array.assign_coords(dict(time=out_array.time.data))
     store = zarr.storage.DirectoryStore(zarr_path, dimension_separator=".")
     out_array.rename("S2").to_zarr(
         store=store,
@@ -549,14 +567,14 @@ if __name__ == "__main__":
         target_resolution=10,
         zarr_path="bigout_parallel_test.zarr")
 
-# x = process(
-#     target_crs=CRS.from_string("EPSG:8857"),
-#     bound_left=564670,
-#     bound_bottom=5718050,
-#     bound_right=1084500,
-#     bound_top=6409170,
-#     # datetime="2023-11-11/2023-12-01",
-#     datetime="2023",
-#     processing_tile_size=4000,
-#     target_resolution=10,
-#     zarr_path="bigout_oneday.zarr")
+    # x = process(
+    #     target_crs=CRS.from_string("EPSG:8857"),
+    #     bound_left=564670,
+    #     bound_bottom=5718050,
+    #     bound_right=1084500,
+    #     bound_top=6409170,
+    #     # datetime="2023-11-11/2023-12-01",
+    #     datetime="2023",
+    #     processing_tile_size=4000,
+    #     target_resolution=10,
+    #     zarr_path="bigout_oneday.zarr")
