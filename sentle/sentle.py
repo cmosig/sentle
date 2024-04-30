@@ -424,9 +424,11 @@ def process(zarr_path: str,
             bound_top: float,
             datetime: DatetimeLike,
             processing_tile_size: int,
-            num_cores: int = 1,
+            num_workers: int = 1,
+            threads_per_worker: int = 1,
             subtile_size: int = 732,
-            kwargs_atenea: dict = dict()):
+            kwargs_atenea: dict = dict(),
+            memory_limit_per_worker: str = "2GB"):
     """
     Parameters
     ----------
@@ -454,8 +456,11 @@ def process(zarr_path: str,
     zarr_path: str
         Path where zarr storage is supposed to be created.
     """
+    # TODO update docstring
 
-    client = Client(n_workers=1, threads_per_worker=1, memory_limit='2GB')
+    client = Client(n_workers=num_workers,
+                    threads_per_worker=threads_per_worker,
+                    memory_limit=memory_limit_per_worker)
     print(client.dashboard_link)
 
     # 2 setup zarr storage
@@ -548,7 +553,11 @@ if __name__ == "__main__":
         # datetime="2020/2023",
         processing_tile_size=4000,
         target_resolution=10,
-        zarr_path="bigout_parallel_test.zarr")
+        zarr_path="bigout_parallel_test.zarr",
+        num_workers=3,
+        threads_per_worker=2,
+        # less then 2GB per worker will likely not work
+        memory_limit_per_worker="2GB")
 
     # x = process(
     #     target_crs=CRS.from_string("EPSG:8857"),
