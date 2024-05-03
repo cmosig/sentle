@@ -1,4 +1,6 @@
-import dask.array as da
+import dask.array
+from collections import defaultdict
+import sparse
 from time import sleep
 import rioxarray as rxr
 from affine import Affine
@@ -24,6 +26,9 @@ import warnings
 from tqdm import tqdm
 import os
 from dask.distributed import Client
+from termcolor import colored
+from dask.diagnostics import ProgressBar
+import matplotlib.pyplot as plt
 
 
 def recrop_write_window(win, overall_height, overall_width):
@@ -164,6 +169,12 @@ def process_subtile(subtile, timestamp, atenea_args: dict, subtile_size: int,
                     df: pd.DataFrame, stac_endpoint: str, ptile_transform,
                     ptile_width: int, ptile_height: int):
 
+    # s2_name = out_array.subtile.data[0]
+    s2_name = subtile.name
+    intersecting_windows = subtile.intersecting_windows
+    # intersecting_windows = out_array.intersecting_windows.data[0]
+    df = df[df["tile"] == s2_name]
+
     # init array that needs to be filled
     subtile_array = xr.DataArray(
         data=np.empty((len(BANDS), subtile_size, subtile_size),
@@ -186,7 +197,7 @@ def process_subtile(subtile, timestamp, atenea_args: dict, subtile_size: int,
         with rasterio.open(href) as dr:
             # convert read window respective to tile resolution
             factor = BAND_RESOLUTION[band] // 10
-            orig_win = subtile.intersecting_windows
+            orig_win = intersecting_windows
             read_window = windows.Window(orig_win.col_off // factor,
                                          orig_win.row_off // factor,
                                          orig_win.width // factor,
@@ -221,8 +232,7 @@ def process_subtile(subtile, timestamp, atenea_args: dict, subtile_size: int,
     subtile_array.attrs["crs"] = crs
 
     # determine bounds based on subtile window and tile transform
-    subtile_bounds_utm = windows.bounds(subtile.intersecting_windows,
-                                        transform)
+    subtile_bounds_utm = windows.bounds(intersecting_windows, transform)
     assert (
         subtile_bounds_utm[2] - subtile_bounds_utm[0]
     ) // 10 == subtile_size, "mismatch between subtile size and bounds on x-axis"
@@ -322,6 +332,10 @@ def process_subtile(subtile, timestamp, atenea_args: dict, subtile_size: int,
                                   local_win.col_off:local_win.col_off +
                                   local_win.width]
 
+    # temp = out_array.copy()
+    # temp[0, :, write_win.row_off:write_win.row_off + write_win.height,
+    #      write_win.col_off:write_win.col_off + write_win.width] = subtile_array
+
     return subtile_array, write_win
 
 
@@ -354,10 +368,7 @@ def process_ptile(
                                bound_top,
                                subtile_size=subtile_size)
 
-    # TODO change that so that we have one "timestamp" per sentinel tile
-    out_array = da.copy()
-
-    timestamp = da.time.data
+    timestamp = da.time.data.copy()
     assert timestamp.shape == (1, )
     timestamp = timestamp[0]
 
@@ -377,7 +388,8 @@ def process_ptile(
     if len(item_list) == 0:
         # if there is nothing within the bounds and for that timestamp return.
         # possible and normal
-        return out_array
+        print(colored("empty ptile, returning input da", "green"))
+        return da
 
     items = pd.DataFrame()
     items["item"] = item_list
@@ -394,23 +406,164 @@ def process_ptile(
                                             width=ptile_width,
                                             height=ptile_height)
 
-    for st in subtiles.itertuples(index=False, name="subtile"):
-        subtile_array, write_win = process_subtile(
+    num_subtiles = subtiles.shape[0]
+    # subtiles = list(subtiles.itertuples(index=False, name="subtile"))
+    # one per subtile for later merging
+    # out_array = xr.DataArray(
+    #     data=.array.full(
+    #         shape=(num_subtiles, da.shape[1], da.shape[2], da.shape[3]),
+    #         chunks=(1, da.shape[1], da.shape[2], da.shape[3]),
+    #         # needs to be float in order to store NaNs
+    #         dtype=np.float32,
+    #         fill_value=np.nan),
+    #     dims=["subtile", "band", "y", "x"],
+    #     coords=dict(subtile=[s.name for s in subtiles],
+    #                 band=da.band,
+    #                 x=da.x,
+    #                 y=da.y,
+    #                 intersecting_windows=("subtile", [
+    #                     s.intersecting_windows for s in subtiles
+    #                 ])))
+
+    # print("before_map", timestamp, out_array, out_array.sizes, type(out_array))
+    # out_array = xr.DataArray(
+    #     data=np.full(
+    #         shape=(1, da.shape[1], da.shape[2], da.shape[3]),
+    #         # chunks=(1, da.shape[1], da.shape[2], da.shape[3]),
+    #         # needs to be float in order to store NaNs
+    #         dtype=np.float32,
+    #         fill_value=np.nan),
+    #     dims=["time", "band", "y", "x"],
+    #     coords=dict(time=[timestamp],
+    #                 band=BANDS,
+    #                 x=da.x.data.copy(),
+    #                 y=da.y.data.copy()))
+
+    # out_array = xr.DataArray(
+    #     data=dask.array.full_like(
+    #         a=da,
+    #         fill_value=np.nan),
+    #     dims=["time", "band", "y", "x"],
+    #     coords=dict(time=[timestamp],
+    #                 band=da.band,
+    #                 x=da.x,
+    #                 y=da.y))
+
+    # print(colored("new", "red"), out_array)
+    # print(colored("copy", "green"), da.copy())
+    # print(colored("copy", "green"), type(da.copy().data))
+
+    # out_array = da.copy()
+
+    # out_array[0] = 9
+    # print("after 9", out_array)
+    # return out_array.mean(dim="subtile", skipna=True).expand_dims(dict(time=[timestamp]))
+
+    #     out_array = out_array.map_blocks(
+    #         process_subtile,
+    #         kwargs=dict(timestamp=timestamp,
+    #                     atenea_args=kwargs_atenea,
+    #                     subtile_size=subtile_size,
+    #                     target_crs=target_crs,
+    #                     target_resolution=target_resolution,
+    #                     df=items,
+    #                     stac_endpoint=stac_endpoint,
+    #                     ptile_transform=ptile_transform,
+    #                     ptile_width=ptile_width,
+    #                     ptile_height=ptile_height),
+    #         template=out_array).mean(dim="subtile", skipna=True).expand_dims(dict(time=[timestamp]))
+
+    # TODO something is wrong with the timestamp here after expand dim
+    # out_array.compute()
+    # print("after map", out_array, out_array.sizes, type(out_array))
+
+    subtile_array = np.full(shape=(da.shape[1], da.shape[2], da.shape[3]), fill_value=0, dtype=np.float32)
+    # subtile_array_count = np.full(shape=(da.shape[1], da.shape[2], da.shape[3]), fill_value=0, dtype=np.uint8)
+    subtile_array_count = np.full(shape=(da.shape[1], da.shape[2], da.shape[3]), fill_value=0, dtype=np.float32)
+
+    for i, st in enumerate(subtiles.itertuples(index=False, name="subtile")):
+
+        subtile_array_xr, write_win = process_subtile(
             subtile=st,
             timestamp=timestamp,
             atenea_args=kwargs_atenea,
             subtile_size=subtile_size,
             target_crs=target_crs,
             target_resolution=target_resolution,
-            df=items[items["tile"] == st.name],
+            # df=items[items["tile"] == st.name],
+            df=items,
             stac_endpoint=stac_endpoint,
             ptile_transform=ptile_transform,
             ptile_width=ptile_width,
             ptile_height=ptile_height)
 
-        out_array[0, :, write_win.row_off:write_win.row_off + write_win.height,
-                  write_win.col_off:write_win.col_off +
-                  write_win.width] = subtile_array
+        # subtile_array_np = np.full(shape=(da.shape[1], da.shape[2], da.shape[3]), fill_value=np.nan, dtype=np.float32)
+
+        # TODO move fillna upstream, -> set nodata = 0 instead of np.nan earlier
+        subtile_array[:, write_win.row_off:write_win.row_off +
+                         write_win.height,
+                         write_win.col_off:write_win.col_off +
+                         write_win.width] += subtile_array_xr.fillna(0).data
+
+        subtile_array_count[:, write_win.row_off:write_win.row_off +
+                         write_win.height,
+                         write_win.col_off:write_win.col_off +
+                         write_win.width] += ~np.isnan(subtile_array_xr.data)
+
+        # returned_arrays[i].append(sparse.GCXS.from_numpy(subtile_array_np, fill_value=np.nan, compressed_axes=(0,)))
+
+    # compute mean based on the number of overlapping pixels
+    # TODO suppress warning of invalid values encountered in divide, this is epxected
+    subtile_array /= subtile_array_count
+
+    # replace zeros with nans again
+    subtile_array[subtile_array == 0] = np.nan
+
+    # expand dimensions -> one timestep
+    subtile_array = np.expand_dims(subtile_array, axis=0)
+
+    # mean_arrays = []
+    # for i in range(len(BANDS)):
+    #     print(i, "stack")
+    #     x = sparse.stack(returned_arrays[i], axis=0)
+    #     print(i, "dense")
+    #     x = x.todense()
+    #     print(i, "mean")
+    #     x = np.nanmean(x, axis=0)
+    #     print(i, "append")
+    #     mean_arrays.append(x)
+
+    # mean_array = np.stack(mean_arrays, axis=0)
+    # print(mean_array.shape)
+    # print(mean_array.nbytes)
+
+    # return_array_merged = mean_array
+
+    # print(colored("after stack", "green"))
+    # print(return_array_merged)
+    # print(return_array_merged.nbytes)
+    # print(return_array_merged.shape)
+
+    # return_array_merged = sparse.nanmean(return_array_merged, axis=0)
+
+    # print(colored("after mean", "green"))
+    # print(return_array_merged)
+    # print(return_array_merged.nbytes)
+    # print(return_array_merged.shape)
+
+    # return_array_merged = return_array_merged.todense()
+
+    # print(colored("after todense", "green"))
+    # print(return_array_merged)
+    # print(return_array_merged.nbytes)
+    # print(return_array_merged.shape)
+
+    out_array = xr.DataArray(data=subtile_array,
+                             dims=["time", "band", "y", "x"],
+                             coords=dict(time=[timestamp],
+                                         band=BANDS,
+                                         x=da.x,
+                                         y=da.y))
 
     return out_array
 
@@ -499,7 +652,7 @@ def process(zarr_path: str,
     # chunks with one per timestep -> many empty timesteps for specific areas,
     # because we have all the timesteps for Germany
     out_array = xr.DataArray(
-        data=da.full(
+        data=dask.array.full(
             shape=(len(timesteps), len(BANDS), height, width),
             chunks=(1, 12, processing_tile_size, processing_tile_size),
             # needs to be float in order to store NaNs
@@ -532,32 +685,39 @@ def process(zarr_path: str,
         dict(time=[int(t.timestamp()) for t in out_array.time.data]))
 
     store = zarr.storage.DirectoryStore(zarr_path, dimension_separator=".")
-    out_array.rename("S2").to_zarr(
-        store=store,
-        mode="w-",
-        compute=True,
-        encoding={"S2": {
-            "write_empty_chunks": False
-        }})
+    with ProgressBar():
+        out_array.rename("S2").to_zarr(
+            store=store,
+            mode="w-",
+            compute=True,
+            encoding={"S2": {
+                "write_empty_chunks": False
+            }})
 
 
 if __name__ == "__main__":
+
+    print("------------------------------------")
+    print("------------------------------------")
+    print("------------------------------------")
+
     x = process(
         target_crs=CRS.from_string("EPSG:8857"),
         bound_left=767300,
         bound_bottom=7290000,
         bound_right=776000,
         bound_top=7315000,
+        # datetime="2023-11-16",
         # datetime="2023-11-11/2023-12-01",
         datetime="2023-11",
         # datetime="2020/2023",
         processing_tile_size=4000,
         target_resolution=10,
-        zarr_path="bigout_parallel_test.zarr",
-        num_workers=3,
-        threads_per_worker=2,
+        zarr_path="bigout_parallel_test_3.zarr",
+        num_workers=5,
+        threads_per_worker=1,
         # less then 2GB per worker will likely not work
-        memory_limit_per_worker="2GB")
+        memory_limit_per_worker="3GB")
 
     # x = process(
     #     target_crs=CRS.from_string("EPSG:8857"),
