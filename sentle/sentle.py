@@ -242,8 +242,6 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
         # dont reduce time otherwise timesteps will be broken
         reduce_time=False,
         return_cloud_classification_layer=True,
-        # time = 1 and subtile size for both x and m
-        chunksize=(1, subtile_size),
         stac=stac_endpoint,
         quiet=True)
 
@@ -251,7 +249,6 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
     subtile_array = subtile_array.loc[dict(time=timestamp)]
 
     # make sure that x and y are the correct spatial resolutions
-    # TODO is that actually needed?
     subtile_array = subtile_array.rio.set_spatial_dims(x_dim="x", y_dim="y")
 
     # 3 reproject to target_crs for each band
@@ -293,16 +290,27 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
         width=subtile_repr_width,
         resolution=target_resolution)
 
-    # TODO using billinear resampling for spectral bands and nearest neighbor
-    # resampling for everything else
+    NN_BANDS = ["snow_mask"]
+    # billinear reprojection for everything but the NN bands
+    subtile_array_BL = subtile_array.sel(
+        band=[x for x in subtile_array.band.data
+              if x not in NN_BANDS]).rio.reproject(
+                  dst_crs=target_crs,
+                  transform=subtile_repr_transform,
+                  shape=(subtile_repr_height, subtile_repr_width),
+                  nodata=np.nan,
+                  resampling=Resampling.bilinear)
 
-    # take only sentinel bands for now
-    subtile_array = subtile_array.sel(band=BANDS)
-    subtile_array = subtile_array.rio.reproject(
+    # nearest neighbor reprojection
+    subtile_array_NN = subtile_array.sel(band=NN_BANDS).rio.reproject(
         dst_crs=target_crs,
         transform=subtile_repr_transform,
         shape=(subtile_repr_height, subtile_repr_width),
-        nodata=np.nan)
+        nodata=np.nan,
+        resampling=Resampling.nearest)
+
+    # merge again
+    subtile_array = xr.concat([subtile_array_BL, subtile_array_NN], dim="band")
 
     # change center to coordinates to top-left coords (rioxarray caveat)
     # TODO file an issue with rioxarray to it a parameter how coords are
@@ -378,7 +386,6 @@ def process_ptile(
     if len(item_list) == 0:
         # if there is nothing within the bounds and for that timestamp return.
         # possible and normal
-        A
         print(colored("empty ptile, returning input da", "green"))
         return da
 
@@ -426,6 +433,9 @@ def process_ptile(
             ptile_width=ptile_width,
             ptile_height=ptile_height)
 
+        # filter the band based on what is in root dataarray
+        subtile_array_xr = subtile_array_xr.sel(band=da.band)
+
         # TODO move fillna upstream, -> set nodata = 0 instead of np.nan earlier
         subtile_array[:,
                       write_win.row_off:write_win.row_off + write_win.height,
@@ -438,6 +448,7 @@ def process_ptile(
                             write_win.width] += ~np.isnan(
                                 subtile_array_xr.data)
 
+    # TODO cannot this mean calculation for masks, need to do max/min or something
     # compute mean based on the number of overlapping pixels
     with warnings.catch_warnings():
         # filter out divide by zero warning, this is expected here
@@ -474,7 +485,31 @@ def process(zarr_path: str,
             threads_per_worker: int = 1,
             subtile_size: int = 732,
             kwargs_atenea: dict = dict(),
-            memory_limit_per_worker: str = "2GB"):
+            memory_limit_per_worker: str = "2GB",
+            bands_to_save=[
+                'B01',
+                'B02',
+                'B03',
+                'B04',
+                'B05',
+                'B06',
+                'B07',
+                'B08',
+                'B8A',
+                'B09',
+                'B11',
+                'B12',
+                'NBAR_B02',
+                'NBAR_B03',
+                'NBAR_B04',
+                'NBAR_B05',
+                'NBAR_B06',
+                'NBAR_B07',
+                'NBAR_B08',
+                'NBAR_B11',
+                'NBAR_B12',
+                'snow_mask',
+           ]):
     """
     Parameters
     ----------
@@ -502,7 +537,10 @@ def process(zarr_path: str,
     zarr_path: str
         Path where zarr storage is supposed to be created.
     """
+
     # TODO update docstring
+    # TODO sanity checks of bands to save based on other arguments
+    # TODO save all bands by default
 
     client = Client(n_workers=num_workers,
                     threads_per_worker=threads_per_worker,
@@ -552,7 +590,7 @@ def process(zarr_path: str,
     # because we have all the timesteps for Germany
     out_array = xr.DataArray(
         data=dask.array.full(
-            shape=(len(timesteps), len(BANDS), height, width),
+            shape=(len(timesteps), len(bands_to_save), height, width),
             chunks=(1, 12, processing_tile_size, processing_tile_size),
             # needs to be float in order to store NaNs
             dtype=np.float32,
@@ -560,7 +598,7 @@ def process(zarr_path: str,
         dims=["time", "band", "y", "x"],
         coords=dict(
             time=timesteps,
-            band=BANDS,
+            band=bands_to_save,
             x=np.arange(bound_left, bound_right,
                         target_resolution).astype(np.float32),
             # we do y-axis in reverse: top-left coordinate
@@ -585,6 +623,7 @@ def process(zarr_path: str,
 
     store = zarr.storage.DirectoryStore(zarr_path, dimension_separator=".")
 
+    # TODO some sort of compression
     out_array.rename("S2").to_zarr(
         store=store,
         mode="w-",
