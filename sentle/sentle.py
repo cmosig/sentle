@@ -1,4 +1,5 @@
 import dask.array
+import logging
 import rioxarray as rxr
 from affine import Affine
 import pandas as pd
@@ -24,7 +25,6 @@ from tqdm import tqdm
 import os
 from dask.distributed import Client, Variable
 from termcolor import colored
-from dask.diagnostics import ProgressBar
 import matplotlib.pyplot as plt
 
 
@@ -577,14 +577,14 @@ def process(zarr_path: str,
         dict(time=[int(t.timestamp()) for t in out_array.time.data]))
 
     store = zarr.storage.DirectoryStore(zarr_path, dimension_separator=".")
-    with ProgressBar():
-        out_array.rename("S2").to_zarr(
-            store=store,
-            mode="w-",
-            compute=True,
-            encoding={"S2": {
-                "write_empty_chunks": False
-            }})
+
+    out_array.rename("S2").to_zarr(
+        store=store,
+        mode="w-",
+        compute=True,
+        encoding={"S2": {
+            "write_empty_chunks": False
+        }})
 
 
 if __name__ == "__main__":
