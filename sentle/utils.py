@@ -23,6 +23,7 @@ BAND_RESOLUTION = {
     'B12': 20
 }
 
+
 @contextlib.contextmanager
 def tqdm_joblib(tqdm_object):
     """Context manager to patch joblib to report into tqdm progress bar given as argument"""
@@ -66,3 +67,9 @@ def paral(function: Callable,
                         backend=backend)(delayed(function)(*its)
                                          for its in zip(*iters))
 
+
+def bounds_from_transform_height_width_res(transform, height, width,
+                                           resolution):
+    # minx, miny, maxx, maxy
+    return (transform.c, transform.f - (height * resolution),
+            transform.c + (width * resolution), transform.f)

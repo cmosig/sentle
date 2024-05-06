@@ -1,7 +1,4 @@
 import dask.array
-from collections import defaultdict
-import sparse
-from time import sleep
 import rioxarray as rxr
 from affine import Affine
 import pandas as pd
@@ -32,6 +29,8 @@ import matplotlib.pyplot as plt
 
 
 def recrop_write_window(win, overall_height, overall_width):
+    """ Determine write window based on overlap with actual bounds and also
+    return how the array that will be written needs to be cropped. """
 
     # global
     grow = win.row_off
@@ -103,20 +102,20 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
 
     # TODO make it possible to not only use naive bounds but also MultiPolygons
 
-    # 0 check if supplied sub_tile_width makes sense
+    # check if supplied sub_tile_width makes sense
     assert (subtile_size
             >= 16) and (subtile_size
                         <= 10980), "subtile_size needs to within 16 and 10980"
     assert (10980 %
             subtile_size) == 0, "subtile_size needs to be a divisor of 10980"
 
-    # 1 load sentinel grid
+    # load sentinel grid
     # TODO this should be loaded overall just once
     s2grid = gpd.read_file(
         pkg_resources.resource_filename(__name__,
                                         "data/sentinel2_grid_stripped.gpkg"))
 
-    # 2 convert box to sentinel grid crs
+    # convert box to sentinel grid crs
     transformed_bounds = box(
         *rasterio.warp.transform_bounds(src_crs=target_crs,
                                         dst_crs=s2grid.crs,
@@ -125,7 +124,7 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
                                         right=right,
                                         top=top))
 
-    # 3 extract overlapping sentinel tiles
+    # extract overlapping sentinel tiles
     s2grid = s2grid[s2grid["geometry"].intersects(transformed_bounds)]
 
     general_subtile_windows = [
@@ -157,22 +156,14 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
     return s2grid
 
 
-def bounds_from_transform_height_width_res(transform, height, width,
-                                           resolution):
-    # minx, miny, maxx, maxy
-    return (transform.c, transform.f - (height * resolution),
-            transform.c + (width * resolution), transform.f)
-
-
 def process_subtile(subtile, timestamp, atenea_args: dict, subtile_size: int,
                     target_crs: CRS, target_resolution: float,
                     df: pd.DataFrame, stac_endpoint: str, ptile_transform,
                     ptile_width: int, ptile_height: int):
 
-    # s2_name = out_array.subtile.data[0]
+    # TODO clean up and push through as proper parameters
     s2_name = subtile.name
     intersecting_windows = subtile.intersecting_windows
-    # intersecting_windows = out_array.intersecting_windows.data[0]
     df = df[df["tile"] == s2_name]
 
     # init array that needs to be filled
@@ -187,15 +178,19 @@ def process_subtile(subtile, timestamp, atenea_args: dict, subtile_size: int,
             # TODO transform upstream
             id=df["id"].iloc[0]))
 
-    # iterate through timestamps
+    # save CRS of downloaded sentinel tiles
     crs = None
+    # save transformation of sentinel tile for later processing
     transform = None
     # TODO transform to one item upstream
     item = df["item"].iloc[0]
+    # retrieve each band for subtile in sentinel tile
     for band in BANDS:
         href = item.assets[band].href
         with rasterio.open(href) as dr:
+
             # convert read window respective to tile resolution
+            # (lower resolution -> fewer pixels for same area)
             factor = BAND_RESOLUTION[band] // 10
             orig_win = intersecting_windows
             read_window = windows.Window(orig_win.col_off // factor,
@@ -205,7 +200,6 @@ def process_subtile(subtile, timestamp, atenea_args: dict, subtile_size: int,
 
             # read subtile and directly upsample to 10m resolution using
             # nearest-neighbor (default)
-            # TODO lazy reading with rioxarray?
             read_data = dr.read(indexes=1,
                                 window=read_window,
                                 out_shape=(subtile_size, subtile_size),
@@ -222,7 +216,7 @@ def process_subtile(subtile, timestamp, atenea_args: dict, subtile_size: int,
                 crs == dr.crs), "CRS mismatch within one sentinel tile"
             crs = dr.crs
 
-            # save transform for 10m tile
+            # save transform for a 10m band tile
             if band == "B02":
                 transform = dr.transform
 
@@ -264,10 +258,12 @@ def process_subtile(subtile, timestamp, atenea_args: dict, subtile_size: int,
     #     stac=stac_endpoint)
 
     # make sure that x and y are the correct spatial resolutions
+    # TODO is that actually needed?
     subtile_array = subtile_array.rio.set_spatial_dims(x_dim="x", y_dim="y")
 
     # 3 reproject to target_crs for each band
-    # determine transform --> round to target resolution
+    # determine transform --> round to target resolution so that reprojected
+    # subtiles align across subtiles
     subtile_repr_transform, subtile_repr_width, subtile_repr_height = rasterio.warp.calculate_default_transform(
         src_crs=crs,
         dst_crs=target_crs,
@@ -297,18 +293,12 @@ def process_subtile(subtile, timestamp, atenea_args: dict, subtile_size: int,
     subtile_repr_width += 1
     subtile_repr_height += 1
 
+    # compute bounds in target crs based on rounded transform
     subtile_bounds_tcrs = bounds_from_transform_height_width_res(
         transform=subtile_repr_transform,
         height=subtile_repr_height,
         width=subtile_repr_width,
         resolution=target_resolution)
-
-    write_win = windows.from_bounds(
-        *subtile_bounds_tcrs,
-        transform=ptile_transform).round_offsets().round_lengths()
-
-    write_win, local_win = recrop_write_window(write_win, ptile_height,
-                                               ptile_width)
 
     # TODO using billinear resampling for spectral bands and nearest neighbor
     # resampling for everything else
@@ -322,19 +312,25 @@ def process_subtile(subtile, timestamp, atenea_args: dict, subtile_size: int,
         nodata=np.nan)
 
     # change center to coordinates to top-left coords (rioxarray caveat)
+    # TODO file an issue with rioxarray to it a parameter how coords are
+    # represented
     subtile_array = subtile_array.assign_coords(
         dict(x=subtile_array.x.data - (target_resolution / 2),
              y=subtile_array.y.data + (target_resolution / 2)))
 
-    # crop subtile_array
+    # figure out where to write the subtile within the overall bounds
+    write_win = windows.from_bounds(
+        *subtile_bounds_tcrs,
+        transform=ptile_transform).round_offsets().round_lengths()
+    write_win, local_win = recrop_write_window(write_win, ptile_height,
+                                               ptile_width)
+
+    # crop subtile_array based on computed local win because it could overlap
+    # with the overall bounds
     subtile_array = subtile_array[:, local_win.row_off:local_win.height +
                                   local_win.row_off,
                                   local_win.col_off:local_win.col_off +
                                   local_win.width]
-
-    # temp = out_array.copy()
-    # temp[0, :, write_win.row_off:write_win.row_off + write_win.height,
-    #      write_win.col_off:write_win.col_off + write_win.width] = subtile_array
 
     return subtile_array, write_win
 
@@ -352,15 +348,18 @@ def process_ptile(
     # TODO think about what to do with clouds and if to optionally filter them like atenea
     # --> mask_Clouds, drop_cloudy, clear_sky_threshold, mask_snow)
 
-    # TODO we do this for each timestamp right now, maybe this could be moved upstream
-    # 1 obtain sub-sentinel tiles based on supplied bounds and CRS
-    # - add target resolution to miny and maxx because we are using top-left coordinates
+    # compute bounds of ptile
+    # (add target resolution to miny and maxx because we are using top-left
+    # coordinates)
     bound_left = da.x.min().item()
     bound_bottom = da.y.min().item() - target_resolution
     bound_right = da.x.max().item() + target_resolution
     bound_top = da.y.max().item()
 
+    # TODO we do obtain_subtiles for each timestamp right now, maybe this could be moved upstream
     # figure out all the sentinel 2 subtiles
+    #
+    # obtain sub-sentinel tiles based on supplied bounds and CRS
     subtiles = obtain_subtiles(target_crs,
                                bound_left,
                                bound_bottom,
@@ -368,23 +367,24 @@ def process_ptile(
                                bound_top,
                                subtile_size=subtile_size)
 
-    timestamp = da.time.data.copy()
+    # extract the timestamp we are processing. there should only be one
+    timestamp = da.time.data
     assert timestamp.shape == (1, )
     timestamp = timestamp[0]
 
     # TODO create geopandas df in process function and somehow pass filtered
-    # version of this --> less network
-    search = catalog.search(collections=["sentinel-2-l2a"],
-                            datetime=timestamp,
-                            bbox=rasterio.warp.transform_bounds(
-                                src_crs=target_crs,
-                                dst_crs="EPSG:4326",
-                                left=bound_left,
-                                bottom=bound_bottom,
-                                right=bound_right,
-                                top=bound_top))
+    # version of this --> less network I/O
+    item_list = list(
+        catalog.search(collections=["sentinel-2-l2a"],
+                       datetime=timestamp,
+                       bbox=rasterio.warp.transform_bounds(
+                           src_crs=target_crs,
+                           dst_crs="EPSG:4326",
+                           left=bound_left,
+                           bottom=bound_bottom,
+                           right=bound_right,
+                           top=bound_top)).item_collection())
 
-    item_list = list(search.item_collection())
     if len(item_list) == 0:
         # if there is nothing within the bounds and for that timestamp return.
         # possible and normal
@@ -406,80 +406,16 @@ def process_ptile(
                                             width=ptile_width,
                                             height=ptile_height)
 
-    num_subtiles = subtiles.shape[0]
-    # subtiles = list(subtiles.itertuples(index=False, name="subtile"))
-    # one per subtile for later merging
-    # out_array = xr.DataArray(
-    #     data=.array.full(
-    #         shape=(num_subtiles, da.shape[1], da.shape[2], da.shape[3]),
-    #         chunks=(1, da.shape[1], da.shape[2], da.shape[3]),
-    #         # needs to be float in order to store NaNs
-    #         dtype=np.float32,
-    #         fill_value=np.nan),
-    #     dims=["subtile", "band", "y", "x"],
-    #     coords=dict(subtile=[s.name for s in subtiles],
-    #                 band=da.band,
-    #                 x=da.x,
-    #                 y=da.y,
-    #                 intersecting_windows=("subtile", [
-    #                     s.intersecting_windows for s in subtiles
-    #                 ])))
+    # intiate one array representing the entire subtile for that timestamp
+    subtile_array = np.full(shape=(da.shape[1], da.shape[2], da.shape[3]),
+                            fill_value=0,
+                            dtype=np.float32)
 
-    # print("before_map", timestamp, out_array, out_array.sizes, type(out_array))
-    # out_array = xr.DataArray(
-    #     data=np.full(
-    #         shape=(1, da.shape[1], da.shape[2], da.shape[3]),
-    #         # chunks=(1, da.shape[1], da.shape[2], da.shape[3]),
-    #         # needs to be float in order to store NaNs
-    #         dtype=np.float32,
-    #         fill_value=np.nan),
-    #     dims=["time", "band", "y", "x"],
-    #     coords=dict(time=[timestamp],
-    #                 band=BANDS,
-    #                 x=da.x.data.copy(),
-    #                 y=da.y.data.copy()))
-
-    # out_array = xr.DataArray(
-    #     data=dask.array.full_like(
-    #         a=da,
-    #         fill_value=np.nan),
-    #     dims=["time", "band", "y", "x"],
-    #     coords=dict(time=[timestamp],
-    #                 band=da.band,
-    #                 x=da.x,
-    #                 y=da.y))
-
-    # print(colored("new", "red"), out_array)
-    # print(colored("copy", "green"), da.copy())
-    # print(colored("copy", "green"), type(da.copy().data))
-
-    # out_array = da.copy()
-
-    # out_array[0] = 9
-    # print("after 9", out_array)
-    # return out_array.mean(dim="subtile", skipna=True).expand_dims(dict(time=[timestamp]))
-
-    #     out_array = out_array.map_blocks(
-    #         process_subtile,
-    #         kwargs=dict(timestamp=timestamp,
-    #                     atenea_args=kwargs_atenea,
-    #                     subtile_size=subtile_size,
-    #                     target_crs=target_crs,
-    #                     target_resolution=target_resolution,
-    #                     df=items,
-    #                     stac_endpoint=stac_endpoint,
-    #                     ptile_transform=ptile_transform,
-    #                     ptile_width=ptile_width,
-    #                     ptile_height=ptile_height),
-    #         template=out_array).mean(dim="subtile", skipna=True).expand_dims(dict(time=[timestamp]))
-
-    # TODO something is wrong with the timestamp here after expand dim
-    # out_array.compute()
-    # print("after map", out_array, out_array.sizes, type(out_array))
-
-    subtile_array = np.full(shape=(da.shape[1], da.shape[2], da.shape[3]), fill_value=0, dtype=np.float32)
-    # subtile_array_count = np.full(shape=(da.shape[1], da.shape[2], da.shape[3]), fill_value=0, dtype=np.uint8)
-    subtile_array_count = np.full(shape=(da.shape[1], da.shape[2], da.shape[3]), fill_value=0, dtype=np.float32)
+    # count how many values we add per pixel to compute mean later
+    subtile_array_count = np.full(shape=(da.shape[1], da.shape[2],
+                                         da.shape[3]),
+                                  fill_value=0,
+                                  dtype=np.uint8)
 
     for i, st in enumerate(subtiles.itertuples(index=False, name="subtile")):
 
@@ -497,20 +433,17 @@ def process_ptile(
             ptile_width=ptile_width,
             ptile_height=ptile_height)
 
-        # subtile_array_np = np.full(shape=(da.shape[1], da.shape[2], da.shape[3]), fill_value=np.nan, dtype=np.float32)
-
         # TODO move fillna upstream, -> set nodata = 0 instead of np.nan earlier
-        subtile_array[:, write_win.row_off:write_win.row_off +
-                         write_win.height,
-                         write_win.col_off:write_win.col_off +
-                         write_win.width] += subtile_array_xr.fillna(0).data
+        subtile_array[:,
+                      write_win.row_off:write_win.row_off + write_win.height,
+                      write_win.col_off:write_win.col_off +
+                      write_win.width] += subtile_array_xr.fillna(0).data
 
         subtile_array_count[:, write_win.row_off:write_win.row_off +
-                         write_win.height,
-                         write_win.col_off:write_win.col_off +
-                         write_win.width] += ~np.isnan(subtile_array_xr.data)
-
-        # returned_arrays[i].append(sparse.GCXS.from_numpy(subtile_array_np, fill_value=np.nan, compressed_axes=(0,)))
+                            write_win.height,
+                            write_win.col_off:write_win.col_off +
+                            write_win.width] += ~np.isnan(
+                                subtile_array_xr.data)
 
     # compute mean based on the number of overlapping pixels
     # TODO suppress warning of invalid values encountered in divide, this is epxected
@@ -522,42 +455,7 @@ def process_ptile(
     # expand dimensions -> one timestep
     subtile_array = np.expand_dims(subtile_array, axis=0)
 
-    # mean_arrays = []
-    # for i in range(len(BANDS)):
-    #     print(i, "stack")
-    #     x = sparse.stack(returned_arrays[i], axis=0)
-    #     print(i, "dense")
-    #     x = x.todense()
-    #     print(i, "mean")
-    #     x = np.nanmean(x, axis=0)
-    #     print(i, "append")
-    #     mean_arrays.append(x)
-
-    # mean_array = np.stack(mean_arrays, axis=0)
-    # print(mean_array.shape)
-    # print(mean_array.nbytes)
-
-    # return_array_merged = mean_array
-
-    # print(colored("after stack", "green"))
-    # print(return_array_merged)
-    # print(return_array_merged.nbytes)
-    # print(return_array_merged.shape)
-
-    # return_array_merged = sparse.nanmean(return_array_merged, axis=0)
-
-    # print(colored("after mean", "green"))
-    # print(return_array_merged)
-    # print(return_array_merged.nbytes)
-    # print(return_array_merged.shape)
-
-    # return_array_merged = return_array_merged.todense()
-
-    # print(colored("after todense", "green"))
-    # print(return_array_merged)
-    # print(return_array_merged.nbytes)
-    # print(return_array_merged.shape)
-
+    # wrap numpy array into xarray again
     out_array = xr.DataArray(data=subtile_array,
                              dims=["time", "band", "y", "x"],
                              coords=dict(time=[timestamp],
@@ -616,7 +514,7 @@ def process(zarr_path: str,
                     memory_limit=memory_limit_per_worker)
     print(client.dashboard_link)
 
-    # 2 setup zarr storage
+    # setup zarr storage
     # determine width and height based on bounds and resolution
     width, w_rem = divmod(abs(bound_right - bound_left), target_resolution)
     height, h_rem = divmod(abs(bound_top - bound_bottom), target_resolution)
