@@ -22,7 +22,7 @@ import xarray as xr
 import warnings
 from tqdm import tqdm
 import os
-from dask.distributed import Client
+from dask.distributed import Client, Variable
 from termcolor import colored
 from dask.diagnostics import ProgressBar
 import matplotlib.pyplot as plt
@@ -110,10 +110,7 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
             subtile_size) == 0, "subtile_size needs to be a divisor of 10980"
 
     # load sentinel grid
-    # TODO this should be loaded overall just once
-    s2grid = gpd.read_file(
-        pkg_resources.resource_filename(__name__,
-                                        "data/sentinel2_grid_stripped.gpkg"))
+    s2grid = Variable("s2gridfile").get()
 
     # convert box to sentinel grid crs
     transformed_bounds = box(
@@ -356,9 +353,6 @@ def process_ptile(
     bound_right = da.x.max().item() + target_resolution
     bound_top = da.y.max().item()
 
-    # TODO we do obtain_subtiles for each timestamp right now, maybe this could be moved upstream
-    # figure out all the sentinel 2 subtiles
-    #
     # obtain sub-sentinel tiles based on supplied bounds and CRS
     subtiles = obtain_subtiles(target_crs,
                                bound_left,
@@ -514,6 +508,12 @@ def process(zarr_path: str,
                     memory_limit=memory_limit_per_worker)
     print(client.dashboard_link)
 
+    # load Sentinel 2 grid
+    Variable("s2gridfile").set(
+        gpd.read_file(
+            pkg_resources.resource_filename(
+                __name__, "data/sentinel2_grid_stripped.gpkg")))
+
     # setup zarr storage
     # determine width and height based on bounds and resolution
     width, w_rem = divmod(abs(bound_right - bound_left), target_resolution)
@@ -611,7 +611,7 @@ if __name__ == "__main__":
         # datetime="2020/2023",
         processing_tile_size=4000,
         target_resolution=10,
-        zarr_path="bigout_parallel_test_3.zarr",
+        zarr_path="bigout_parallel_test_4.zarr",
         num_workers=5,
         threads_per_worker=1,
         # less then 2GB per worker will likely not work
