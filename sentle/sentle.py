@@ -153,15 +153,10 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
     return s2grid
 
 
-def process_subtile(subtile, timestamp, atenea_args: dict, subtile_size: int,
-                    target_crs: CRS, target_resolution: float,
-                    df: pd.DataFrame, stac_endpoint: str, ptile_transform,
-                    ptile_width: int, ptile_height: int):
-
-    # TODO clean up and push through as proper parameters
-    s2_name = subtile.name
-    intersecting_windows = subtile.intersecting_windows
-    df = df[df["tile"] == s2_name]
+def process_subtile(intersecting_windows, stac_item, timestamp,
+                    atenea_args: dict, subtile_size: int, target_crs: CRS,
+                    target_resolution: float, stac_endpoint: str,
+                    ptile_transform, ptile_width: int, ptile_height: int):
 
     # init array that needs to be filled
     subtile_array = xr.DataArray(
@@ -173,17 +168,15 @@ def process_subtile(subtile, timestamp, atenea_args: dict, subtile_size: int,
             stac=stac_endpoint,
             collection="sentinel-2-l2a",
             # TODO transform upstream
-            id=df["id"].iloc[0]))
+            id=stac_item.id))
 
     # save CRS of downloaded sentinel tiles
     crs = None
     # save transformation of sentinel tile for later processing
     transform = None
-    # TODO transform to one item upstream
-    item = df["item"].iloc[0]
     # retrieve each band for subtile in sentinel tile
     for band in BANDS:
-        href = item.assets[band].href
+        href = stac_item.assets[band].href
         with rasterio.open(href) as dr:
 
             # convert read window respective to tile resolution
@@ -388,7 +381,6 @@ def process_ptile(
     items = pd.DataFrame()
     items["item"] = item_list
     items["tile"] = items["item"].apply(lambda x: x.properties["s2:mgrs_tile"])
-    items["id"] = items["item"].apply(lambda x: x.id)
 
     # determine ptile transform from bounds
     ptile_width = (bound_right - bound_left) / target_resolution
@@ -412,16 +404,19 @@ def process_ptile(
                                   dtype=np.uint8)
 
     for i, st in enumerate(subtiles.itertuples(index=False, name="subtile")):
+        subdf = items[items["tile"] == st.name]
+        # there should only be one S2 tile for the timestamp
+        assert subdf.shape[0] == 1
+        stac_item = subdf["item"].iloc[0]
 
         subtile_array_xr, write_win = process_subtile(
-            subtile=st,
+            intersecting_windows=st.intersecting_windows,
+            stac_item=stac_item,
             timestamp=timestamp,
             atenea_args=kwargs_atenea,
             subtile_size=subtile_size,
             target_crs=target_crs,
             target_resolution=target_resolution,
-            # df=items[items["tile"] == st.name],
-            df=items,
             stac_endpoint=stac_endpoint,
             ptile_transform=ptile_transform,
             ptile_width=ptile_width,
