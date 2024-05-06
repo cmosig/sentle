@@ -160,12 +160,13 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
 
     # init array that needs to be filled
     subtile_array = xr.DataArray(data=np.empty(
-        (len(BANDS), subtile_size, subtile_size), dtype=np.float32),
-                                 dims=["band", "y", "x"],
-                                 coords=dict(band=BANDS),
+        (1, len(BANDS), subtile_size, subtile_size), dtype=np.float32),
+                                 dims=["time", "band", "y", "x"],
+                                 coords=dict(band=BANDS,
+                                             time=[timestamp],
+                                             id=("time", [stac_item.id])),
                                  attrs=dict(stac=stac_endpoint,
-                                            collection="sentinel-2-l2a",
-                                            id=stac_item.id))
+                                            collection="sentinel-2-l2a"))
 
     # save CRS of downloaded sentinel tiles
     crs = None
@@ -233,16 +234,21 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
 
     # 2 push that tile through atenea
     # TODO add atenea kwargs
-    # subtile_array = atenea.process(
-    #     subtile_array,
-    #     source="cubo",
-    #     # TODO need to add padding and then reactivate cloud filtering
-    #     mask_clouds=False,
-    #     # dont reduce time otherwise timesteps will be broken
-    #     reduce_time=False,
-    #     return_cloud_classification_layer=True,
-    #     # chunksize=(len(items), subtile_size),
-    #     stac=stac_endpoint)
+    subtile_array = atenea.process(
+        subtile_array,
+        source="cubo",
+        # TODO need to add padding and then reactivate cloud filtering
+        mask_clouds=False,
+        # dont reduce time otherwise timesteps will be broken
+        reduce_time=False,
+        return_cloud_classification_layer=True,
+        # time = 1 and subtile size for both x and m
+        chunksize=(1, subtile_size),
+        stac=stac_endpoint,
+        quiet=True)
+
+    # remove time dimension, only needed for ateana
+    subtile_array = subtile_array.loc[dict(time=timestamp)]
 
     # make sure that x and y are the correct spatial resolutions
     # TODO is that actually needed?
@@ -372,6 +378,7 @@ def process_ptile(
     if len(item_list) == 0:
         # if there is nothing within the bounds and for that timestamp return.
         # possible and normal
+        A
         print(colored("empty ptile, returning input da", "green"))
         return da
 
@@ -599,9 +606,9 @@ if __name__ == "__main__":
         bound_bottom=7290000,
         bound_right=776000,
         bound_top=7315000,
-        # datetime="2023-11-16",
+        datetime="2023-11-16",
         # datetime="2023-11-11/2023-12-01",
-        datetime="2023-11",
+        # datetime="2023-11",
         # datetime="2020/2023",
         processing_tile_size=4000,
         target_resolution=10,
