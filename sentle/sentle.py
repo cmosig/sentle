@@ -159,16 +159,13 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
                     ptile_transform, ptile_width: int, ptile_height: int):
 
     # init array that needs to be filled
-    subtile_array = xr.DataArray(
-        data=np.empty((len(BANDS), subtile_size, subtile_size),
-                      dtype=np.float32),
-        dims=["band", "y", "x"],
-        coords=dict(band=BANDS),
-        attrs=dict(
-            stac=stac_endpoint,
-            collection="sentinel-2-l2a",
-            # TODO transform upstream
-            id=stac_item.id))
+    subtile_array = xr.DataArray(data=np.empty(
+        (len(BANDS), subtile_size, subtile_size), dtype=np.float32),
+                                 dims=["band", "y", "x"],
+                                 coords=dict(band=BANDS),
+                                 attrs=dict(stac=stac_endpoint,
+                                            collection="sentinel-2-l2a",
+                                            id=stac_item.id))
 
     # save CRS of downloaded sentinel tiles
     crs = None
@@ -435,8 +432,10 @@ def process_ptile(
                                 subtile_array_xr.data)
 
     # compute mean based on the number of overlapping pixels
-    # TODO suppress warning of invalid values encountered in divide, this is epxected
-    subtile_array /= subtile_array_count
+    with warnings.catch_warnings():
+        # filter out divide by zero warning, this is expected here
+        warnings.simplefilter("ignore")
+        subtile_array /= subtile_array_count
 
     # replace zeros with nans again
     subtile_array[subtile_array == 0] = np.nan
