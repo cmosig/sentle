@@ -154,7 +154,7 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
 
 
 def process_subtile(intersecting_windows, stac_item, timestamp,
-                    atenea_args: dict, subtile_size: int, target_crs: CRS,
+                    kwargs_atenea: dict, subtile_size: int, target_crs: CRS,
                     target_resolution: float, stac_endpoint: str,
                     ptile_transform, ptile_width: int, ptile_height: int):
 
@@ -232,18 +232,36 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
 
     subtile_array = subtile_array.assign_coords(dict(x=xs_utm, y=ys_utm))
 
+    if "mask_clouds" in kwargs_atenea and kwargs_atenea["mask_clouds"]:
+        assert subtile_size == 732, "cloud masking only works with subtile size of 732 at the moment"
+        # add padding of 2 pixels around the edge
+        subtile_array = subtile_array.pad(pad_width=dict(x=(2, 2), y=(2, 2)))
+        assert subtile_array.x.shape == (736, ) and subtile_array.y.shape == (
+            736, ), "unexpected shape after padding"
+
+    # TODO sanity check of atenea args, e.g. if quiet is there, should be False
+
     # 2 push that tile through atenea
     # TODO add atenea kwargs
     subtile_array = atenea.process(
         subtile_array,
         source="cubo",
         # TODO need to add padding and then reactivate cloud filtering
-        mask_clouds=False,
         # dont reduce time otherwise timesteps will be broken
         reduce_time=False,
+        mask_clouds=kwargs_atenea["mask_clouds"],
         return_cloud_classification_layer=True,
         stac=stac_endpoint,
         quiet=True)
+
+    if "mask_clouds" in kwargs_atenea and kwargs_atenea["mask_clouds"]:
+        assert subtile_array.x.shape == (736, ) and subtile_array.y.shape == (
+            736,
+        ), f"unexpected shape before padding removal {subtile_array.sizes}"
+        subtile_array = subtile_array[:, :, 2:-2, 2:-2]
+        assert subtile_array.x.shape == (732, ) and subtile_array.y.shape == (
+            732,
+        ), f"unexpected shape after padding removal{subtile_array.sizes}"
 
     # remove time dimension, only needed for ateana
     subtile_array = subtile_array.loc[dict(time=timestamp)]
@@ -290,7 +308,7 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
         width=subtile_repr_width,
         resolution=target_resolution)
 
-    NN_BANDS = ["snow_mask"]
+    NN_BANDS = ["snow_mask", "cloud_classification_layer", "clear_sky"]
     # billinear reprojection for everything but the NN bands
     subtile_array_BL = subtile_array.sel(
         band=[x for x in subtile_array.band.data
@@ -424,7 +442,7 @@ def process_ptile(
             intersecting_windows=st.intersecting_windows,
             stac_item=stac_item,
             timestamp=timestamp,
-            atenea_args=kwargs_atenea,
+            kwargs_atenea=kwargs_atenea,
             subtile_size=subtile_size,
             target_crs=target_crs,
             target_resolution=target_resolution,
@@ -465,7 +483,7 @@ def process_ptile(
     out_array = xr.DataArray(data=subtile_array,
                              dims=["time", "band", "y", "x"],
                              coords=dict(time=[timestamp],
-                                         band=BANDS,
+                                         band=da.band,
                                          x=da.x,
                                          y=da.y))
 
@@ -509,7 +527,9 @@ def process(zarr_path: str,
                 'NBAR_B11',
                 'NBAR_B12',
                 'snow_mask',
-           ]):
+                'cloud_classification_layer',
+                'clear_sky',
+            ]):
     """
     Parameters
     ----------
@@ -652,10 +672,11 @@ if __name__ == "__main__":
         processing_tile_size=4000,
         target_resolution=10,
         zarr_path="bigout_parallel_test_4.zarr",
-        num_workers=5,
+        num_workers=2,
         threads_per_worker=1,
         # less then 2GB per worker will likely not work
-        memory_limit_per_worker="3GB")
+        memory_limit_per_worker="10GB",
+        kwargs_atenea=dict(mask_clouds=True))
 
     # x = process(
     #     target_crs=CRS.from_string("EPSG:8857"),
