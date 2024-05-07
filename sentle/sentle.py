@@ -27,6 +27,7 @@ from dask.distributed import Client, Variable
 from termcolor import colored
 import matplotlib.pyplot as plt
 from numcodecs import Blosc
+import scipy.ndimage as sc
 
 
 def recrop_write_window(win, overall_height, overall_width):
@@ -214,7 +215,8 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
                 transform = dr.transform
 
     # this is required for atenea
-    subtile_array.attrs["epsg"] = crs.to_epsg()
+    if compute_nbar:
+        subtile_array.attrs["epsg"] = crs.to_epsg()
     # this is required for rioxarray to figure out the crs
     subtile_array.attrs["crs"] = crs
     # set stac_item, required for harmonization
@@ -246,28 +248,31 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
         assert subtile_array.x.shape == (736, ) and subtile_array.y.shape == (
             736, ), "unexpected shape after padding"
 
-    # TODO sanity check of atenea args, e.g. if quiet is there, should be False
-
     # 2 push that tile through atenea
-    # TODO add atenea kwargs
     subtile_array = atenea.process(
         subtile_array,
         source="sentle",
         reduce_time=False,
         mask_clouds=mask_clouds,
-        return_cloud_classification_layer=return_cloud_classification_layer,
-        return_cloud_probabilities=return_cloud_probabilities,
+        # we compute classification ourselves based on the returned probabilities
+        return_cloud_probabilities=True,
+        return_cloud_classification_layer=False,
+        return_clear_sky_mask=False,
         stac=stac_endpoint,
         quiet=True,
         mask_clouds_device=mask_clouds_device,
         nbar=compute_nbar,
-        mask_snow=mask_snow)
+        mask_snow=mask_snow,
+    )
 
     # drop all attributes --> only needed to atenea
-    del subtile_array.attrs["epsg"]
+    if compute_nbar:
+        del subtile_array.attrs["epsg"]
     del subtile_array.attrs["stac_item"]
 
     if mask_clouds:
+
+        # crop subtile array to original shape
         assert subtile_array.x.shape == (736, ) and subtile_array.y.shape == (
             736,
         ), f"unexpected shape before padding removal {subtile_array.sizes}"
@@ -321,7 +326,7 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
         width=subtile_repr_width,
         resolution=target_resolution)
 
-    NN_BANDS = ["snow_mask", "cloud_classification_layer", "clear_sky"]
+    NN_BANDS = ["snow_mask"]
     # billinear reprojection for everything but the NN bands
     subtile_array_BL = subtile_array.sel(
         band=[x for x in subtile_array.band.data
@@ -402,8 +407,8 @@ def process_ptile(
     assert timestamp.shape == (1, )
     timestamp = timestamp[0]
 
-    # TODO create geopandas df in process function and somehow pass filtered
-    # version of this --> less network I/O
+    # retrieve items (possible across multiple sentinel tile) for specified
+    # timestamp
     item_list = list(
         catalog.search(collections=["sentinel-2-l2a"],
                        datetime=timestamp,
@@ -435,17 +440,22 @@ def process_ptile(
                                             width=ptile_width,
                                             height=ptile_height)
 
+    # cloud classification layer is added later
+    num_bands = da.shape[1]
+    if return_cloud_classification_layer:
+        num_bands -= 1
+
     # intiate one array representing the entire subtile for that timestamp
-    subtile_array = np.full(shape=(da.shape[1], da.shape[2], da.shape[3]),
+    subtile_array = np.full(shape=(num_bands, da.shape[2], da.shape[3]),
                             fill_value=0,
                             dtype=np.float32)
 
     # count how many values we add per pixel to compute mean later
-    subtile_array_count = np.full(shape=(da.shape[1], da.shape[2],
-                                         da.shape[3]),
+    subtile_array_count = np.full(shape=(num_bands, da.shape[2], da.shape[3]),
                                   fill_value=0,
                                   dtype=np.uint8)
 
+    subtile_array_bands = None
     for i, st in enumerate(subtiles.itertuples(index=False, name="subtile")):
         subdf = items[items["tile"] == st.name]
         # there should only be one S2 tile for the timestamp
@@ -470,10 +480,11 @@ def process_ptile(
             compute_nbar=compute_nbar,
             mask_clouds_device=mask_clouds_device)
 
-        # filter the band based on what is in root dataarray
-        subtile_array_xr = subtile_array_xr.sel(band=da.band)
+        # save band order
+        subtile_array_bands = list(subtile_array_xr.band.data)
 
-        # TODO move fillna upstream, -> set nodata = 0 instead of np.nan earlier
+        # also replace nan with 0 so that the mean computation works
+        # (this is reverted later)
         subtile_array[:,
                       write_win.row_off:write_win.row_off + write_win.height,
                       write_win.col_off:write_win.col_off +
@@ -485,15 +496,49 @@ def process_ptile(
                             write_win.width] += ~np.isnan(
                                 subtile_array_xr.data)
 
-    # TODO cannot this mean calculation for masks, need to do max/min or something
-    # compute mean based on the number of overlapping pixels
+    # TODO do snow mask computation outside atenea too -> easier merging?
+
+    # determine nodata mask based on where values are zero -> mean nodata for S2...
+    # (need to do this here, because after computing mean there will be nans
+    # from divide by zero)
+    nodata_mask_S2_raw = np.any(subtile_array[[
+        subtile_array_bands.index(band) for band in S2_RAW_BANDS
+    ]] == 0,
+                                axis=0)
+
     with warnings.catch_warnings():
         # filter out divide by zero warning, this is expected here
         warnings.simplefilter("ignore")
         subtile_array /= subtile_array_count
 
-    # replace zeros with nans again
-    subtile_array[subtile_array == 0] = np.nan
+    if return_cloud_classification_layer:
+
+        # compute cloud classification layer
+        cloud_prob_bands = [
+            "clear_sky_probability", "thick_cloud_probability",
+            "thin_cloud_probability", "shadow_probability"
+        ]
+
+        # select cloud class based on maximum probability
+        cloud_class = np.argmax(subtile_array[[
+            subtile_array_bands.index(band) for band in cloud_prob_bands
+        ]],
+                                axis=0,
+                                keepdims=True)
+
+        # apply max filter on cloud clases to dilate invalid pixels
+        cloud_class = sc.maximum_filter(cloud_class,
+                                        size=(1, 7, 7),
+                                        mode="nearest").astype(np.float32)
+
+        # save cloud classes layer
+        subtile_array = np.concatenate([subtile_array, cloud_class], axis=0)
+        subtile_array_bands.append("cloud_classification_layer")
+
+
+    # ... and set all such pixels to nan (of which some are already nan because
+    # of divide by zero)
+    subtile_array[:, nodata_mask_S2_raw] = np.nan
 
     # expand dimensions -> one timestep
     subtile_array = np.expand_dims(subtile_array, axis=0)
@@ -502,11 +547,12 @@ def process_ptile(
     out_array = xr.DataArray(data=subtile_array,
                              dims=["time", "band", "y", "x"],
                              coords=dict(time=[timestamp],
-                                         band=da.band,
+                                         band=subtile_array_bands,
                                          x=da.x,
                                          y=da.y))
 
-    return out_array
+    # only return bands that have been requested
+    return out_array.sel(band=da.band)
 
 
 def process(
@@ -560,6 +606,7 @@ def process(
 
     # TODO update docstring
     # TODO move out dask client init and zarr store and return lazy dask array
+    # -> also make this into class with to_zarr function ?
 
     # derive bands to save from arguments
     bands_to_save = [
@@ -592,8 +639,6 @@ def process(
         ]
     if return_cloud_classification_layer:
         bands_to_save.append("cloud_classification_layer")
-    if mask_clouds:
-        bands_to_save.append("clear_sky")
     if return_cloud_probabilities:
         bands_to_save += [
             "clear_sky_probability",
@@ -651,7 +696,8 @@ def process(
     out_array = xr.DataArray(
         data=dask.array.full(
             shape=(len(timesteps), len(bands_to_save), height, width),
-            chunks=(1, 12, processing_tile_size, processing_tile_size),
+            chunks=(1, len(bands_to_save), processing_tile_size,
+                    processing_tile_size),
             # needs to be float in order to store NaNs
             dtype=np.float32,
             fill_value=np.nan),
@@ -721,15 +767,15 @@ if __name__ == "__main__":
         processing_tile_size=4000,
         target_resolution=10,
         zarr_path="bigout_parallel_test_4.zarr",
-        num_workers=2,
+        num_workers=1,
         threads_per_worker=1,
         # less then 3GB per worker will likely not work
-        memory_limit_per_worker="10GB",
+        memory_limit_per_worker="8GB",
         mask_clouds=True,
         mask_snow=True,
         return_cloud_probabilities=True,
         return_cloud_classification_layer=True,
-        compute_nbar=True,
+        compute_nbar=False,
         mask_clouds_device="cuda")
 
     # x = process(
