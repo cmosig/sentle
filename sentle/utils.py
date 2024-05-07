@@ -4,11 +4,11 @@ import joblib
 from tqdm import tqdm
 import contextlib
 
-BANDS = [
+S2_RAW_BANDS = [
     'B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09',
     'B11', 'B12'
 ]
-BAND_RESOLUTION = {
+S2_RAW_BAND_RESOLUTION = {
     'B01': 60,
     'B02': 10,
     'B03': 10,

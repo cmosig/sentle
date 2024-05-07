@@ -155,15 +155,19 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
 
 
 def process_subtile(intersecting_windows, stac_item, timestamp,
-                    kwargs_atenea: dict, subtile_size: int, target_crs: CRS,
+                    subtile_size: int, target_crs: CRS,
                     target_resolution: float, stac_endpoint: str,
-                    ptile_transform, ptile_width: int, ptile_height: int):
+                    ptile_transform, ptile_width: int, ptile_height: int,
+                    mask_snow: bool, mask_clouds: bool,
+                    return_cloud_classification_layer: bool,
+                    return_cloud_probabilities: bool, compute_nbar: bool,
+                    mask_clouds_device: str):
 
     # init array that needs to be filled
     subtile_array = xr.DataArray(data=np.empty(
-        (1, len(BANDS), subtile_size, subtile_size), dtype=np.float32),
+        (1, len(S2_RAW_BANDS), subtile_size, subtile_size), dtype=np.float32),
                                  dims=["time", "band", "y", "x"],
-                                 coords=dict(band=BANDS,
+                                 coords=dict(band=S2_RAW_BANDS,
                                              time=[timestamp],
                                              id=("time", [stac_item.id])),
                                  attrs=dict(stac=stac_endpoint,
@@ -174,13 +178,13 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
     # save transformation of sentinel tile for later processing
     transform = None
     # retrieve each band for subtile in sentinel tile
-    for band in BANDS:
+    for band in S2_RAW_BANDS:
         href = stac_item.assets[band].href
         with rasterio.open(href) as dr:
 
             # convert read window respective to tile resolution
             # (lower resolution -> fewer pixels for same area)
-            factor = BAND_RESOLUTION[band] // 10
+            factor = S2_RAW_BAND_RESOLUTION[band] // 10
             orig_win = intersecting_windows
             read_window = windows.Window(orig_win.col_off // factor,
                                          orig_win.row_off // factor,
@@ -235,7 +239,7 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
 
     subtile_array = subtile_array.assign_coords(dict(x=xs_utm, y=ys_utm))
 
-    if "mask_clouds" in kwargs_atenea and kwargs_atenea["mask_clouds"]:
+    if mask_clouds:
         assert subtile_size == 732, "cloud masking only works with subtile size of 732 at the moment"
         # add padding of 2 pixels around the edge
         subtile_array = subtile_array.pad(pad_width=dict(x=(2, 2), y=(2, 2)))
@@ -249,20 +253,21 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
     subtile_array = atenea.process(
         subtile_array,
         source="sentle",
-        # TODO need to add padding and then reactivate cloud filtering
-        # dont reduce time otherwise timesteps will be broken
         reduce_time=False,
-        mask_clouds=kwargs_atenea["mask_clouds"],
-        return_cloud_classification_layer=True,
+        mask_clouds=mask_clouds,
+        return_cloud_classification_layer=return_cloud_classification_layer,
+        return_cloud_probabilities=return_cloud_probabilities,
         stac=stac_endpoint,
         quiet=True,
-        cloud_mask_device="cuda")
+        mask_clouds_device=mask_clouds_device,
+        nbar=compute_nbar,
+        mask_snow=mask_snow)
 
     # drop all attributes --> only needed to atenea
     del subtile_array.attrs["epsg"]
     del subtile_array.attrs["stac_item"]
 
-    if "mask_clouds" in kwargs_atenea and kwargs_atenea["mask_clouds"]:
+    if mask_clouds:
         assert subtile_array.x.shape == (736, ) and subtile_array.y.shape == (
             736,
         ), f"unexpected shape before padding removal {subtile_array.sizes}"
@@ -363,18 +368,19 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
 
 
 def process_ptile(
-        da: xr.DataArray,
-        target_crs: CRS,
-        target_resolution: float,
-        catalog,
-        stac_endpoint: str,
-        subtile_size: int = 732,
-        kwargs_atenea: dict = dict(),
+    da: xr.DataArray,
+    target_crs: CRS,
+    target_resolution: float,
+    catalog,
+    stac_endpoint: str,
+    mask_clouds_device: str,
+    subtile_size: int = 732,
+    mask_snow: bool = False,
+    mask_clouds: bool = False,
+    return_cloud_classification_layer: bool = False,
+    return_cloud_probabilities: bool = False,
+    compute_nbar: bool = False,
 ):
-
-    # TODO think about what to do with clouds and if to optionally filter them like atenea
-    # --> mask_Clouds, drop_cloudy, clear_sky_threshold, mask_snow)
-
     # compute bounds of ptile
     # (add target resolution to miny and maxx because we are using top-left
     # coordinates)
@@ -450,14 +456,19 @@ def process_ptile(
             intersecting_windows=st.intersecting_windows,
             stac_item=stac_item,
             timestamp=timestamp,
-            kwargs_atenea=kwargs_atenea,
             subtile_size=subtile_size,
             target_crs=target_crs,
             target_resolution=target_resolution,
             stac_endpoint=stac_endpoint,
             ptile_transform=ptile_transform,
             ptile_width=ptile_width,
-            ptile_height=ptile_height)
+            ptile_height=ptile_height,
+            mask_snow=mask_snow,
+            mask_clouds=mask_clouds,
+            return_cloud_classification_layer=return_cloud_classification_layer,
+            return_cloud_probabilities=return_cloud_probabilities,
+            compute_nbar=compute_nbar,
+            mask_clouds_device=mask_clouds_device)
 
         # filter the band based on what is in root dataarray
         subtile_array_xr = subtile_array_xr.sel(band=da.band)
@@ -498,46 +509,27 @@ def process_ptile(
     return out_array
 
 
-def process(zarr_path: str,
-            target_crs: CRS,
-            target_resolution: float,
-            bound_left: float,
-            bound_bottom: float,
-            bound_right: float,
-            bound_top: float,
-            datetime: DatetimeLike,
-            processing_tile_size: int,
-            num_workers: int = 1,
-            threads_per_worker: int = 1,
-            subtile_size: int = 732,
-            kwargs_atenea: dict = dict(),
-            memory_limit_per_worker: str = "2GB",
-            bands_to_save=[
-                'B01',
-                'B02',
-                'B03',
-                'B04',
-                'B05',
-                'B06',
-                'B07',
-                'B08',
-                'B8A',
-                'B09',
-                'B11',
-                'B12',
-                'NBAR_B02',
-                'NBAR_B03',
-                'NBAR_B04',
-                'NBAR_B05',
-                'NBAR_B06',
-                'NBAR_B07',
-                'NBAR_B08',
-                'NBAR_B11',
-                'NBAR_B12',
-                'snow_mask',
-                'cloud_classification_layer',
-                'clear_sky',
-            ]):
+def process(
+    zarr_path: str,
+    target_crs: CRS,
+    target_resolution: float,
+    bound_left: float,
+    bound_bottom: float,
+    bound_right: float,
+    bound_top: float,
+    datetime: DatetimeLike,
+    processing_tile_size: int,
+    num_workers: int = 1,
+    threads_per_worker: int = 1,
+    subtile_size: int = 732,
+    memory_limit_per_worker: str = "4GB",
+    mask_snow: bool = False,
+    mask_clouds: bool = False,
+    mask_clouds_device="cuda",
+    return_cloud_classification_layer: bool = False,
+    return_cloud_probabilities: bool = False,
+    compute_nbar: bool = False,
+):
     """
     Parameters
     ----------
@@ -560,15 +552,55 @@ def process(zarr_path: str,
         Specifies the size of each subtile. The maximum is the size of a sentinel tile (10980). If cloud filtering is enabled the minimum tilesize is 256, otherwise 16. It also needs to be a divisor of 10980, so that each sentinel tile can be segmented without overlaps.
     num_cores: int, default = 1
         Number of CPU cores across which subtile processing is supposed to be distributed.
-    kwargs_atenea: dict, default = None
-        Arguments passed to atenea specifying processing steps that are applied to each tile.
     zarr_path: str
         Path where zarr storage is supposed to be created.
     """
 
+    assert subtile_size == 732, "Unsupported subtile size."
+
     # TODO update docstring
-    # TODO sanity checks of bands to save based on other arguments
-    # TODO save all bands by default
+    # TODO move out dask client init and zarr store and return lazy dask array
+
+    # derive bands to save from arguments
+    bands_to_save = [
+        "B01",
+        "B02",
+        "B03",
+        "B04",
+        "B05",
+        "B06",
+        "B07",
+        "B08",
+        "B8A",
+        "B09",
+        "B11",
+        "B12",
+    ]
+    if mask_snow:
+        bands_to_save.append("snow_mask")
+    if compute_nbar:
+        bands_to_save += [
+            "NBAR_B02",
+            "NBAR_B03",
+            "NBAR_B04",
+            "NBAR_B05",
+            "NBAR_B06",
+            "NBAR_B07",
+            "NBAR_B08",
+            "NBAR_B11",
+            "NBAR_B12",
+        ]
+    if return_cloud_classification_layer:
+        bands_to_save.append("cloud_classification_layer")
+    if mask_clouds:
+        bands_to_save.append("clear_sky")
+    if return_cloud_probabilities:
+        bands_to_save += [
+            "clear_sky_probability",
+            "thick_cloud_probability",
+            "thin_cloud_probability",
+            "shadow_probability",
+        ]
 
     client = Client(n_workers=num_workers,
                     threads_per_worker=threads_per_worker,
@@ -633,15 +665,22 @@ def process(zarr_path: str,
             y=np.arange(bound_top, bound_bottom,
                         -target_resolution).astype(np.float32)))
 
-    out_array = out_array.map_blocks(process_ptile,
-                                     kwargs=dict(
-                                         target_crs=target_crs,
-                                         target_resolution=target_resolution,
-                                         subtile_size=subtile_size,
-                                         kwargs_atenea=kwargs_atenea,
-                                         catalog=catalog,
-                                         stac_endpoint=stac_endpoint),
-                                     template=out_array)
+    out_array = out_array.map_blocks(
+        process_ptile,
+        kwargs=dict(
+            target_crs=target_crs,
+            target_resolution=target_resolution,
+            subtile_size=subtile_size,
+            catalog=catalog,
+            stac_endpoint=stac_endpoint,
+            mask_snow=mask_snow,
+            mask_clouds=mask_clouds,
+            return_cloud_classification_layer=return_cloud_classification_layer,
+            return_cloud_probabilities=return_cloud_probabilities,
+            compute_nbar=compute_nbar,
+            mask_clouds_device=mask_clouds_device,
+        ),
+        template=out_array)
 
     # TODO maybe cast to uint16 at the end again
 
@@ -684,9 +723,14 @@ if __name__ == "__main__":
         zarr_path="bigout_parallel_test_4.zarr",
         num_workers=2,
         threads_per_worker=1,
-        # less then 2GB per worker will likely not work
+        # less then 3GB per worker will likely not work
         memory_limit_per_worker="10GB",
-        kwargs_atenea=dict(mask_clouds=True))
+        mask_clouds=True,
+        mask_snow=True,
+        return_cloud_probabilities=True,
+        return_cloud_classification_layer=True,
+        compute_nbar=True,
+        mask_clouds_device="cuda")
 
     # x = process(
     #     target_crs=CRS.from_string("EPSG:8857"),
