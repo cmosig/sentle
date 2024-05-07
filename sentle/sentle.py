@@ -213,6 +213,8 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
     subtile_array.attrs["epsg"] = crs.to_epsg()
     # this is required for rioxarray to figure out the crs
     subtile_array.attrs["crs"] = crs
+    # set stac_item, required for harmonization
+    subtile_array.attrs["stac_item"] = stac_item
 
     # determine bounds based on subtile window and tile transform
     subtile_bounds_utm = windows.bounds(intersecting_windows, transform)
@@ -246,14 +248,19 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
     # TODO add atenea kwargs
     subtile_array = atenea.process(
         subtile_array,
-        source="cubo",
+        source="sentle",
         # TODO need to add padding and then reactivate cloud filtering
         # dont reduce time otherwise timesteps will be broken
         reduce_time=False,
         mask_clouds=kwargs_atenea["mask_clouds"],
         return_cloud_classification_layer=True,
         stac=stac_endpoint,
-        quiet=True)
+        quiet=True,
+        cloud_mask_device="cuda")
+
+    # drop all attributes --> only needed to atenea
+    del subtile_array.attrs["epsg"]
+    del subtile_array.attrs["stac_item"]
 
     if "mask_clouds" in kwargs_atenea and kwargs_atenea["mask_clouds"]:
         assert subtile_array.x.shape == (736, ) and subtile_array.y.shape == (
