@@ -26,6 +26,7 @@ import os
 from dask.distributed import Client, Variable
 from termcolor import colored
 import matplotlib.pyplot as plt
+from numcodecs import Blosc
 
 
 def recrop_write_window(win, overall_height, overall_width):
@@ -643,14 +644,16 @@ def process(zarr_path: str,
 
     store = zarr.storage.DirectoryStore(zarr_path, dimension_separator=".")
 
-    # TODO some sort of compression
-    out_array.rename("S2").to_zarr(
-        store=store,
-        mode="w-",
-        compute=True,
-        encoding={"S2": {
-            "write_empty_chunks": False
-        }})
+    # NOTE the compression may not be optimal, need to benchmark
+    out_array.rename("S2").to_zarr(store=store,
+                                   mode="w-",
+                                   compute=True,
+                                   encoding={
+                                       "S2": {
+                                           "write_empty_chunks": False,
+                                           "compressor": Blosc(cname="zstd"),
+                                       }
+                                   })
 
 
 if __name__ == "__main__":
