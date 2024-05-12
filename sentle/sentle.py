@@ -710,7 +710,7 @@ def process(
                                 right=bound_right,
                                 top=bound_top))
 
-    timesteps = [i.datetime for i in search.item_collection()]
+    timesteps = sorted(list(set([i.datetime for i in search.item_collection()])))
 
     # chunks with one per timestep -> many empty timesteps for specific areas,
     # because we have all the timesteps for Germany
@@ -811,7 +811,7 @@ if __name__ == "__main__":
         # datetime="2020/2023",
         processing_tile_size=4000,
         target_resolution=10,
-        zarr_path="/net/scratch/cmosig/halle_leipzig.zarr",
+        zarr_path="/net/scratch/cmosig/halle_leipzig_2.zarr",
         num_workers=50,
         threads_per_worker=1,
         # less then 3GB per worker will likely not work
