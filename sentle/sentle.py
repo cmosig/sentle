@@ -8,7 +8,7 @@ from atenea import atenea
 import itertools
 import numpy as np
 from rasterio import warp, windows, transform
-from shapely.geometry import box
+from shapely.geometry import box, Polygon
 from rasterio.crs import CRS
 import zarr
 import rasterio.warp
@@ -113,15 +113,13 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
 
     # load sentinel grid
     s2grid = Variable("s2gridfile").get()
+    assert s2grid.crs == "EPSG:4326"
 
-    # convert box to sentinel grid crs
-    transformed_bounds = box(
-        *rasterio.warp.transform_bounds(src_crs=target_crs,
-                                        dst_crs=s2grid.crs,
-                                        left=left,
-                                        bottom=bottom,
-                                        right=right,
-                                        top=top))
+    # convert bounds to sentinel grid crs
+    transformed_bounds = Polygon(*warp.transform_geom(
+        src_crs=target_crs,
+        dst_crs=s2grid.crs,
+        geom=box(left, bottom, right, top))["coordinates"])
 
     # extract overlapping sentinel tiles
     s2grid = s2grid[s2grid["geometry"].intersects(transformed_bounds)]
@@ -133,20 +131,32 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
                 0, 10980, subtile_size))
     ]
 
-    # get polygon in respective row-column domain of sentinel tile assuming 10m
-    # resolution
-    s2grid["bounds_rowcol"] = s2grid["geometry"].apply(
-        lambda geom: windows.from_bounds(
-            *transformed_bounds.bounds,
-            transform.from_bounds(*geom.bounds, 10980, 10980)))
+    # reproject s2 footprint to local utm footprint
+    s2grid["s2_footprint_utm"] = s2grid[[
+        "geometry", "crs"
+    ]].apply(lambda ser: Polygon(*warp.transform_geom(
+        src_crs=s2grid.crs, dst_crs=ser["crs"], geom=ser["geometry"].geoms[0])[
+            "coordinates"]),
+             axis=1)
 
-    # iterate through subtiles of each sentinel tile and determine whether they
-    # overlap with the bounds
-    s2grid["intersecting_windows"] = s2grid["bounds_rowcol"].apply(
-        lambda win_bound: [
+    # obtain transform of each sentinel 2 tile in local utm crs
+    s2grid["tile_transform"] = s2grid["s2_footprint_utm"].apply(
+        lambda x: rasterio.transform.from_bounds(
+            *x.bounds, width=10980, height=10980))
+
+    # convert read window to polygon in S2 local CRS, then transform to
+    # s2grid.crs and check overlap with transformed bounds
+    s2grid["intersecting_windows"] = s2grid[["tile_transform", "crs"]].apply(
+        lambda ser: [
             win_subtile for win_subtile in general_subtile_windows
-            if windows.intersect([win_bound, win_subtile])
-        ])
+            if transformed_bounds.intersects(
+                Polygon(*warp.transform_geom(
+                    src_crs=ser["crs"],
+                    dst_crs=s2grid.crs,
+                    geom=box(*windows.bounds(win_subtile, ser["tile_transform"]
+                                             )))["coordinates"]))
+        ],
+        axis=1)
 
     # each line contains one subtile of a sentinel that we want to download and
     # process because it intersects the specified bounds to download
@@ -238,7 +248,6 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
     ys_utm = np.arange(start=subtile_bounds_utm[1],
                        stop=subtile_bounds_utm[3],
                        step=10)
-
     subtile_array = subtile_array.assign_coords(dict(x=xs_utm, y=ys_utm))
 
     if mask_clouds:
@@ -337,16 +346,21 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
                   nodata=np.nan,
                   resampling=Resampling.bilinear)
 
-    # nearest neighbor reprojection
-    subtile_array_NN = subtile_array.sel(band=NN_BANDS).rio.reproject(
-        dst_crs=target_crs,
-        transform=subtile_repr_transform,
-        shape=(subtile_repr_height, subtile_repr_width),
-        nodata=np.nan,
-        resampling=Resampling.nearest)
+    # TODO generalize maybe
+    if mask_snow:
+        # nearest neighbor reprojection
+        subtile_array_NN = subtile_array.sel(band=NN_BANDS).rio.reproject(
+            dst_crs=target_crs,
+            transform=subtile_repr_transform,
+            shape=(subtile_repr_height, subtile_repr_width),
+            nodata=np.nan,
+            resampling=Resampling.nearest)
 
-    # merge again
-    subtile_array = xr.concat([subtile_array_BL, subtile_array_NN], dim="band")
+        # merge again
+        subtile_array = xr.concat([subtile_array_BL, subtile_array_NN],
+                                  dim="band")
+    else:
+        subtile_array = subtile_array_BL
 
     # change center to coordinates to top-left coords (rioxarray caveat)
     # TODO file an issue with rioxarray to it a parameter how coords are
@@ -359,6 +373,7 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
     write_win = windows.from_bounds(
         *subtile_bounds_tcrs,
         transform=ptile_transform).round_offsets().round_lengths()
+
     write_win, local_win = recrop_write_window(write_win, ptile_height,
                                                ptile_width)
 
@@ -459,7 +474,13 @@ def process_ptile(
     for i, st in enumerate(subtiles.itertuples(index=False, name="subtile")):
         subdf = items[items["tile"] == st.name]
         # there should only be one S2 tile for the timestamp
-        assert subdf.shape[0] == 1
+        assert subdf.shape[
+            0] <= 1, f"unexpected number of items:\n {subdf} \n {items} \n {st.name}"
+
+        if subdf.empty:
+            # can happen with orbit edges, because we filter stac with bounds
+            continue
+
         stac_item = subdf["item"].iloc[0]
 
         subtile_array_xr, write_win = process_subtile(
@@ -534,7 +555,6 @@ def process_ptile(
         # save cloud classes layer
         subtile_array = np.concatenate([subtile_array, cloud_class], axis=0)
         subtile_array_bands.append("cloud_classification_layer")
-
 
     # ... and set all such pixels to nan (of which some are already nan because
     # of divide by zero)
@@ -656,7 +676,7 @@ def process(
     Variable("s2gridfile").set(
         gpd.read_file(
             pkg_resources.resource_filename(
-                __name__, "data/sentinel2_grid_stripped.gpkg")))
+                __name__, "data/sentinel2_grid_stripped_with_epsg.gpkg")))
 
     # setup zarr storage
     # determine width and height based on bounds and resolution
@@ -766,7 +786,7 @@ if __name__ == "__main__":
         # datetime="2020/2023",
         processing_tile_size=4000,
         target_resolution=10,
-        zarr_path="bigout_parallel_test_4.zarr",
+        zarr_path="bigout_parallel_test_5.zarr",
         num_workers=1,
         threads_per_worker=1,
         # less then 3GB per worker will likely not work
@@ -777,6 +797,30 @@ if __name__ == "__main__":
         return_cloud_classification_layer=True,
         compute_nbar=False,
         mask_clouds_device="cuda")
+
+    # x = process(
+    #     target_crs=CRS.from_string("EPSG:8857"),
+    #     bound_left=921070,
+    #     bound_bottom=6101250,
+    #     bound_right=977630,
+    #     bound_top=6144550,
+    #     datetime="2023-11",
+    #     # datetime="2023-11-11/2023-12-01",
+    #     # datetime="2023-11",
+    #     # datetime="2020/2023",
+    #     processing_tile_size=4000,
+    #     target_resolution=10,
+    #     zarr_path="halle_leipzig.zarr",
+    #     num_workers=1,
+    #     threads_per_worker=1,
+    #     # less then 3GB per worker will likely not work
+    #     memory_limit_per_worker="5GB",
+    #     mask_clouds=False,
+    #     mask_snow=False,
+    #     return_cloud_probabilities=False,
+    #     return_cloud_classification_layer=False,
+    #     compute_nbar=False,
+    #     mask_clouds_device="cuda")
 
     # x = process(
     #     target_crs=CRS.from_string("EPSG:8857"),
