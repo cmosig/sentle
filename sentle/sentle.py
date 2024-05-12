@@ -23,7 +23,7 @@ import xarray as xr
 import warnings
 from tqdm import tqdm
 import os
-from dask.distributed import Client, Variable
+from dask.distributed import Client, Variable, LocalCluster
 from termcolor import colored
 import matplotlib.pyplot as plt
 from numcodecs import Blosc
@@ -667,9 +667,10 @@ def process(
             "shadow_probability",
         ]
 
-    client = Client(n_workers=num_workers,
+    cluster = LocalCluster(dashboard_address="127.0.0.1:9988", n_workers=num_workers,
                     threads_per_worker=threads_per_worker,
                     memory_limit=memory_limit_per_worker)
+    client = Client(cluster)
     print(client.dashboard_link)
 
     # load Sentinel 2 grid
@@ -774,53 +775,53 @@ if __name__ == "__main__":
     print("------------------------------------")
     print("------------------------------------")
 
-    x = process(
-        target_crs=CRS.from_string("EPSG:8857"),
-        bound_left=767300,
-        bound_bottom=7290000,
-        bound_right=776000,
-        bound_top=7315000,
-        datetime="2023-11-16",
-        # datetime="2023-11-11/2023-12-01",
-        # datetime="2023-11",
-        # datetime="2020/2023",
-        processing_tile_size=4000,
-        target_resolution=10,
-        zarr_path="bigout_parallel_test_5.zarr",
-        num_workers=1,
-        threads_per_worker=1,
-        # less then 3GB per worker will likely not work
-        memory_limit_per_worker="8GB",
-        mask_clouds=True,
-        mask_snow=True,
-        return_cloud_probabilities=True,
-        return_cloud_classification_layer=True,
-        compute_nbar=False,
-        mask_clouds_device="cuda")
-
     # x = process(
     #     target_crs=CRS.from_string("EPSG:8857"),
-    #     bound_left=921070,
-    #     bound_bottom=6101250,
-    #     bound_right=977630,
-    #     bound_top=6144550,
-    #     datetime="2023-11",
+    #     bound_left=767300,
+    #     bound_bottom=7290000,
+    #     bound_right=776000,
+    #     bound_top=7315000,
+    #     datetime="2023-11-16",
     #     # datetime="2023-11-11/2023-12-01",
     #     # datetime="2023-11",
     #     # datetime="2020/2023",
     #     processing_tile_size=4000,
     #     target_resolution=10,
-    #     zarr_path="halle_leipzig.zarr",
+    #     zarr_path="bigout_parallel_test_5.zarr",
     #     num_workers=1,
     #     threads_per_worker=1,
     #     # less then 3GB per worker will likely not work
-    #     memory_limit_per_worker="5GB",
-    #     mask_clouds=False,
-    #     mask_snow=False,
-    #     return_cloud_probabilities=False,
-    #     return_cloud_classification_layer=False,
+    #     memory_limit_per_worker="8GB",
+    #     mask_clouds=True,
+    #     mask_snow=True,
+    #     return_cloud_probabilities=True,
+    #     return_cloud_classification_layer=True,
     #     compute_nbar=False,
     #     mask_clouds_device="cuda")
+
+    x = process(
+        target_crs=CRS.from_string("EPSG:8857"),
+        bound_left=921070,
+        bound_bottom=6101250,
+        bound_right=977630,
+        bound_top=6144550,
+        datetime="2023-11",
+        # datetime="2023-11-11/2023-12-01",
+        # datetime="2023-11",
+        # datetime="2020/2023",
+        processing_tile_size=4000,
+        target_resolution=10,
+        zarr_path="/net/scratch/cmosig/halle_leipzig.zarr",
+        num_workers=50,
+        threads_per_worker=1,
+        # less then 3GB per worker will likely not work
+        memory_limit_per_worker="8GB",
+        mask_clouds=False,
+        mask_snow=False,
+        return_cloud_probabilities=False,
+        return_cloud_classification_layer=False,
+        compute_nbar=False,
+        mask_clouds_device="cuda")
 
     # x = process(
     #     target_crs=CRS.from_string("EPSG:8857"),
