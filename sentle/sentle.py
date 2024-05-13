@@ -209,6 +209,11 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
                                 out_shape=(subtile_size, subtile_size),
                                 out_dtype=np.float32)
 
+            # harmonization
+            if float(stac_item.properties["s2:processing_baseline"]) >= 4.0:
+                # adjust reflectance for non-zero values
+                read_data[read_data != 0] -= 1000
+
             # save
             subtile_array[i] = read_data
 
