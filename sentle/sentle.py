@@ -174,7 +174,12 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
                     return_cloud_probabilities: bool, compute_nbar: bool,
                     mask_clouds_device: str):
 
+    # TODO entirely remove skip atenea
+
+    # TODO can we completely stick to uint16 here to save memory?
+
     # init array that needs to be filled
+    # TODO why is there no x/y coordinate here?
     subtile_array = xr.DataArray(data=np.empty(
         (1, len(S2_RAW_BANDS), subtile_size, subtile_size), dtype=np.float32),
                                  dims=["time", "band", "y", "x"],
@@ -245,9 +250,9 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
     xs_utm = np.arange(start=subtile_bounds_utm[0],
                        stop=subtile_bounds_utm[2],
                        step=10)
-    ys_utm = np.arange(start=subtile_bounds_utm[1],
-                       stop=subtile_bounds_utm[3],
-                       step=10)
+    ys_utm = np.arange(start=subtile_bounds_utm[3],
+                       stop=subtile_bounds_utm[1],
+                       step=-10)
     subtile_array = subtile_array.assign_coords(dict(x=xs_utm, y=ys_utm))
 
     if mask_clouds:
@@ -627,6 +632,7 @@ def process(
     # TODO update docstring
     # TODO move out dask client init and zarr store and return lazy dask array
     # -> also make this into class with to_zarr function ?
+    # TODO provide function to aggregate by timeperiod and before that filter clouds
 
     # derive bands to save from arguments
     bands_to_save = [
@@ -667,9 +673,10 @@ def process(
             "shadow_probability",
         ]
 
-    cluster = LocalCluster(dashboard_address="127.0.0.1:9988", n_workers=num_workers,
-                    threads_per_worker=threads_per_worker,
-                    memory_limit=memory_limit_per_worker)
+    cluster = LocalCluster(dashboard_address="127.0.0.1:9988",
+                           n_workers=num_workers,
+                           threads_per_worker=threads_per_worker,
+                           memory_limit=memory_limit_per_worker)
     client = Client(cluster)
     print(client.dashboard_link)
 
@@ -710,7 +717,8 @@ def process(
                                 right=bound_right,
                                 top=bound_top))
 
-    timesteps = sorted(list(set([i.datetime for i in search.item_collection()])))
+    timesteps = sorted(
+        list(set([i.datetime for i in search.item_collection()])))
 
     # chunks with one per timestep -> many empty timesteps for specific areas,
     # because we have all the timesteps for Germany
@@ -805,13 +813,13 @@ if __name__ == "__main__":
         bound_bottom=6101250,
         bound_right=977630,
         bound_top=6144550,
-        datetime="2023-11",
-        # datetime="2023-11-11/2023-12-01",
+        datetime="2023-06-10",
+        # datetime="2023-06-01/2023-12-01",
         # datetime="2023-11",
         # datetime="2020/2023",
         processing_tile_size=4000,
         target_resolution=10,
-        zarr_path="/net/scratch/cmosig/halle_leipzig_2.zarr",
+        zarr_path="/net/scratch/cmosig/halle_leipzig_5.zarr",
         num_workers=50,
         threads_per_worker=1,
         # less then 3GB per worker will likely not work
