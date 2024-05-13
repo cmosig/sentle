@@ -28,6 +28,7 @@ from termcolor import colored
 import matplotlib.pyplot as plt
 from numcodecs import Blosc
 import scipy.ndimage as sc
+from snow_mask import compute_potential_snow_layer
 
 
 def recrop_write_window(win, overall_height, overall_width):
@@ -276,7 +277,7 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
         quiet=True,
         mask_clouds_device=mask_clouds_device,
         nbar=compute_nbar,
-        mask_snow=mask_snow,
+        mask_snow=False,
     )
 
     # drop all attributes --> only needed to atenea
@@ -340,32 +341,15 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
         width=subtile_repr_width,
         resolution=target_resolution)
 
-    NN_BANDS = ["snow_mask"]
-    # billinear reprojection for everything but the NN bands
-    subtile_array_BL = subtile_array.sel(
-        band=[x for x in subtile_array.band.data
-              if x not in NN_BANDS]).rio.reproject(
-                  dst_crs=target_crs,
-                  transform=subtile_repr_transform,
-                  shape=(subtile_repr_height, subtile_repr_width),
-                  nodata=np.nan,
-                  resampling=Resampling.bilinear)
-
-    # TODO generalize maybe
-    if mask_snow:
-        # nearest neighbor reprojection
-        subtile_array_NN = subtile_array.sel(band=NN_BANDS).rio.reproject(
-            dst_crs=target_crs,
-            transform=subtile_repr_transform,
-            shape=(subtile_repr_height, subtile_repr_width),
-            nodata=np.nan,
-            resampling=Resampling.nearest)
-
-        # merge again
-        subtile_array = xr.concat([subtile_array_BL, subtile_array_NN],
-                                  dim="band")
-    else:
-        subtile_array = subtile_array_BL
+    # billinear reprojection for everything
+    # TODO maybe don't use rioxarray at all and use raw numpy with rasterio for reprojection,
+    # coordinates are not used later anyway
+    subtile_array = subtile_array.rio.reproject(
+        dst_crs=target_crs,
+        transform=subtile_repr_transform,
+        shape=(subtile_repr_height, subtile_repr_width),
+        nodata=np.nan,
+        resampling=Resampling.bilinear)
 
     # change center to coordinates to top-left coords (rioxarray caveat)
     # TODO file an issue with rioxarray to it a parameter how coords are
@@ -464,6 +448,8 @@ def process_ptile(
     num_bands = da.shape[1]
     if return_cloud_classification_layer:
         num_bands -= 1
+    if mask_snow:
+        num_bands -= 1
 
     # intiate one array representing the entire subtile for that timestamp
     subtile_array = np.full(shape=(num_bands, da.shape[2], da.shape[3]),
@@ -522,8 +508,6 @@ def process_ptile(
                             write_win.width] += ~np.isnan(
                                 subtile_array_xr.data)
 
-    # TODO do snow mask computation outside atenea too -> easier merging?
-
     # determine nodata mask based on where values are zero -> mean nodata for S2...
     # (need to do this here, because after computing mean there will be nans
     # from divide by zero)
@@ -561,6 +545,17 @@ def process_ptile(
         subtile_array = np.concatenate([subtile_array, cloud_class], axis=0)
         subtile_array_bands.append("cloud_classification_layer")
 
+    if mask_snow:
+        subtile_array = np.concatenate([
+            subtile_array,
+            np.expand_dims(compute_potential_snow_layer(
+                B03=subtile_array[subtile_array_bands.index("B03")],
+                B11=subtile_array[subtile_array_bands.index("B11")],
+                B08=subtile_array[subtile_array_bands.index("B08")]),
+                           axis=0)
+        ])
+        subtile_array_bands.append("snow_mask")
+
     # ... and set all such pixels to nan (of which some are already nan because
     # of divide by zero)
     subtile_array[:, nodata_mask_S2_raw] = np.nan
@@ -594,6 +589,7 @@ def process(
     threads_per_worker: int = 1,
     subtile_size: int = 732,
     memory_limit_per_worker: str = "4GB",
+    # TODO make wording consistent with return_...
     mask_snow: bool = False,
     mask_clouds: bool = False,
     mask_clouds_device="cuda",
@@ -783,53 +779,53 @@ if __name__ == "__main__":
     print("------------------------------------")
     print("------------------------------------")
 
-    # x = process(
-    #     target_crs=CRS.from_string("EPSG:8857"),
-    #     bound_left=767300,
-    #     bound_bottom=7290000,
-    #     bound_right=776000,
-    #     bound_top=7315000,
-    #     datetime="2023-11-16",
-    #     # datetime="2023-11-11/2023-12-01",
-    #     # datetime="2023-11",
-    #     # datetime="2020/2023",
-    #     processing_tile_size=4000,
-    #     target_resolution=10,
-    #     zarr_path="bigout_parallel_test_5.zarr",
-    #     num_workers=1,
-    #     threads_per_worker=1,
-    #     # less then 3GB per worker will likely not work
-    #     memory_limit_per_worker="8GB",
-    #     mask_clouds=True,
-    #     mask_snow=True,
-    #     return_cloud_probabilities=True,
-    #     return_cloud_classification_layer=True,
-    #     compute_nbar=False,
-    #     mask_clouds_device="cuda")
-
     x = process(
         target_crs=CRS.from_string("EPSG:8857"),
-        bound_left=921070,
-        bound_bottom=6101250,
-        bound_right=977630,
-        bound_top=6144550,
-        datetime="2023-06-10",
-        # datetime="2023-06-01/2023-12-01",
+        bound_left=767300,
+        bound_bottom=7290000,
+        bound_right=776000,
+        bound_top=7315000,
+        datetime="2023-11-16",
+        # datetime="2023-11-11/2023-12-01",
         # datetime="2023-11",
         # datetime="2020/2023",
         processing_tile_size=4000,
         target_resolution=10,
-        zarr_path="/net/scratch/cmosig/halle_leipzig_5.zarr",
-        num_workers=50,
+        zarr_path="bigout_parallel_test_5.zarr",
+        num_workers=1,
         threads_per_worker=1,
         # less then 3GB per worker will likely not work
         memory_limit_per_worker="8GB",
         mask_clouds=False,
-        mask_snow=False,
+        mask_snow=True,
         return_cloud_probabilities=False,
         return_cloud_classification_layer=False,
         compute_nbar=False,
         mask_clouds_device="cuda")
+
+    # x = process(
+    #     target_crs=CRS.from_string("EPSG:8857"),
+    #     bound_left=921070,
+    #     bound_bottom=6101250,
+    #     bound_right=977630,
+    #     bound_top=6144550,
+    #     datetime="2023-06-10",
+    #     # datetime="2023-06-01/2023-12-01",
+    #     # datetime="2023-11",
+    #     # datetime="2020/2023",
+    #     processing_tile_size=4000,
+    #     target_resolution=10,
+    #     zarr_path="/net/scratch/cmosig/halle_leipzig_5.zarr",
+    #     num_workers=50,
+    #     threads_per_worker=1,
+    #     # less then 3GB per worker will likely not work
+    #     memory_limit_per_worker="8GB",
+    #     mask_clouds=False,
+    #     mask_snow=False,
+    #     return_cloud_probabilities=False,
+    #     return_cloud_classification_layer=False,
+    #     compute_nbar=False,
+    #     mask_clouds_device="cuda")
 
     # x = process(
     #     target_crs=CRS.from_string("EPSG:8857"),
