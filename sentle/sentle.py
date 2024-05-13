@@ -1,6 +1,4 @@
 import dask.array
-import logging
-import rioxarray as rxr
 from affine import Affine
 import pandas as pd
 from rasterio.enums import Resampling
