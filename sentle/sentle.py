@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 from numcodecs import Blosc
 import scipy.ndimage as sc
 from snow_mask import compute_potential_snow_layer
-from cloud_mask import compute_cloud_mask
+from cloud_mask import compute_cloud_mask, load_cloudsen_model
 
 
 def recrop_write_window(win, overall_height, overall_width):
@@ -171,10 +171,9 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
                     subtile_size: int, target_crs: CRS,
                     target_resolution: float, stac_endpoint: str,
                     ptile_transform, ptile_width: int, ptile_height: int,
-                    mask_snow: bool, mask_clouds: bool,
-                    return_cloud_classification_layer: bool,
+                    mask_snow: bool, cloud_classification: bool,
                     return_cloud_probabilities: bool, compute_nbar: bool,
-                    mask_clouds_device: str):
+                    mask_clouds_device: str, cloud_mask_model):
 
     # TODO entirely remove skip atenea
 
@@ -183,7 +182,7 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
     # init array that needs to be filled
     subtile_array = np.empty((len(S2_RAW_BANDS), subtile_size, subtile_size),
                              dtype=np.float32)
-    band_names = S2_RAW_BANDS
+    band_names = S2_RAW_BANDS.copy()
 
     # save CRS of downloaded sentinel tiles
     s2_crs = None
@@ -232,13 +231,6 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
         subtile_bounds_utm[3] - subtile_bounds_utm[1]
     ) // 10 == subtile_size, "mismatch between subtile size and bounds on y-axis"
 
-    if mask_clouds:
-        assert subtile_size == 732, "cloud masking only works with subtile size of 732 at the moment"
-        # add padding of 2 pixels around the edge
-        subtile_array = subtile_array.pad(pad_width=dict(x=(2, 2), y=(2, 2)))
-        assert subtile_array.x.shape == (736, ) and subtile_array.y.shape == (
-            736, ), "unexpected shape after padding"
-
     # 2 push that tile through atenea
     # subtile_array = atenea.process(
     #     subtile_array,
@@ -247,7 +239,7 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
     #     mask_clouds=mask_clouds,
     #     # we compute classification ourselves based on the returned probabilities
     #     return_cloud_probabilities=True,
-    #     return_cloud_classification_layer=False,
+    #     cloud_classification=False,
     #     return_clear_sky_mask=False,
     #     stac=stac_endpoint,
     #     quiet=True,
@@ -256,16 +248,13 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
     #     mask_snow=False,
     # )
 
-    if mask_clouds:
-
-        # crop subtile array to original shape
-        assert subtile_array.x.shape == (736, ) and subtile_array.y.shape == (
-            736,
-        ), f"unexpected shape before padding removal {subtile_array.sizes}"
-        subtile_array = subtile_array[:, :, 2:-2, 2:-2]
-        assert subtile_array.x.shape == (732, ) and subtile_array.y.shape == (
-            732,
-        ), f"unexpected shape after padding removal{subtile_array.sizes}"
+    if cloud_classification or return_cloud_probabilities:
+        cloud_bands, result_probs = compute_cloud_mask(
+            subtile_array,
+            cloud_mask_model,
+            mask_clouds_device=mask_clouds_device)
+        band_names += cloud_bands
+        subtile_array = np.concatenate([subtile_array, result_probs])
 
     # 3 reproject to target_crs for each band
     # determine transform --> round to target resolution so that reprojected
@@ -340,6 +329,8 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
                                             col_off:local_win.col_off +
                                             local_win.width]
 
+    # TODO harmonize
+
     return subtile_array_repr, write_win, band_names
 
 
@@ -352,8 +343,7 @@ def process_ptile(
     mask_clouds_device: str,
     subtile_size: int = 732,
     mask_snow: bool = False,
-    mask_clouds: bool = False,
-    return_cloud_classification_layer: bool = False,
+    cloud_classification: bool = False,
     return_cloud_probabilities: bool = False,
     compute_nbar: bool = False,
 ):
@@ -413,10 +403,13 @@ def process_ptile(
 
     # cloud classification layer is added later
     num_bands = da.shape[1]
-    if return_cloud_classification_layer:
+    if cloud_classification:
         num_bands -= 1
     if mask_snow:
         num_bands -= 1
+    if not return_cloud_probabilities and cloud_classification:
+        # we need the probs here, will remove when returning
+        num_bands += 4
 
     # intiate one array representing the entire subtile for that timestamp
     subtile_array = np.full(shape=(num_bands, da.shape[2], da.shape[3]),
@@ -427,6 +420,9 @@ def process_ptile(
     subtile_array_count = np.full(shape=(num_bands, da.shape[2], da.shape[3]),
                                   fill_value=0,
                                   dtype=np.uint8)
+
+    # load cloudsen model
+    cloudsen_model = load_cloudsen_model(mask_clouds_device)
 
     subtile_array_bands = None
     for i, st in enumerate(subtiles.itertuples(index=False, name="subtile")):
@@ -453,11 +449,11 @@ def process_ptile(
             ptile_width=ptile_width,
             ptile_height=ptile_height,
             mask_snow=mask_snow,
-            mask_clouds=mask_clouds,
-            return_cloud_classification_layer=return_cloud_classification_layer,
+            cloud_classification=cloud_classification,
             return_cloud_probabilities=return_cloud_probabilities,
             compute_nbar=compute_nbar,
-            mask_clouds_device=mask_clouds_device)
+            mask_clouds_device=mask_clouds_device,
+            cloud_mask_model=cloudsen_model)
 
         # also replace nan with 0 so that the mean computation works
         # (this is reverted later)
@@ -484,7 +480,7 @@ def process_ptile(
         warnings.simplefilter("ignore")
         subtile_array /= subtile_array_count
 
-    if return_cloud_classification_layer:
+    if cloud_classification:
 
         # compute cloud classification layer
         cloud_prob_bands = [
@@ -506,7 +502,7 @@ def process_ptile(
 
         # save cloud classes layer
         subtile_array = np.concatenate([subtile_array, cloud_class], axis=0)
-        subtile_array_bands.append("cloud_classification_layer")
+        subtile_array_bands.append("cloud_classification")
 
     if mask_snow:
         subtile_array = np.concatenate([
@@ -554,9 +550,8 @@ def process(
     memory_limit_per_worker: str = "4GB",
     # TODO make wording consistent with return_...
     mask_snow: bool = False,
-    mask_clouds: bool = False,
     mask_clouds_device="cuda",
-    return_cloud_classification_layer: bool = False,
+    cloud_classification: bool = False,
     return_cloud_probabilities: bool = False,
     compute_nbar: bool = False,
 ):
@@ -622,8 +617,8 @@ def process(
             "NBAR_B11",
             "NBAR_B12",
         ]
-    if return_cloud_classification_layer:
-        bands_to_save.append("cloud_classification_layer")
+    if cloud_classification:
+        bands_to_save.append("cloud_classification")
     if return_cloud_probabilities:
         bands_to_save += [
             "clear_sky_probability",
@@ -708,8 +703,7 @@ def process(
             catalog=catalog,
             stac_endpoint=stac_endpoint,
             mask_snow=mask_snow,
-            mask_clouds=mask_clouds,
-            return_cloud_classification_layer=return_cloud_classification_layer,
+            cloud_classification=cloud_classification,
             return_cloud_probabilities=return_cloud_probabilities,
             compute_nbar=compute_nbar,
             mask_clouds_device=mask_clouds_device,
@@ -759,10 +753,9 @@ if __name__ == "__main__":
     #     threads_per_worker=1,
     #     # less then 3GB per worker will likely not work
     #     memory_limit_per_worker="8GB",
-    #     mask_clouds=False,
     #     mask_snow=True,
     #     return_cloud_probabilities=False,
-    #     return_cloud_classification_layer=False,
+    #     cloud_classification=False,
     #     compute_nbar=False,
     #     mask_clouds_device="cuda")
 
@@ -783,10 +776,9 @@ if __name__ == "__main__":
         threads_per_worker=1,
         # less then 3GB per worker will likely not work
         memory_limit_per_worker="8GB",
-        mask_clouds=False,
         mask_snow=True,
         return_cloud_probabilities=False,
-        return_cloud_classification_layer=False,
+        cloud_classification=True,
         compute_nbar=False,
         mask_clouds_device="cuda")
 
@@ -807,10 +799,9 @@ if __name__ == "__main__":
     #     threads_per_worker=1,
     #     # less then 3GB per worker will likely not work
     #     memory_limit_per_worker="8GB",
-    #     mask_clouds=False,
     #     mask_snow=False,
     #     return_cloud_probabilities=False,
-    #     return_cloud_classification_layer=False,
+    #     cloud_classification=False,
     #     compute_nbar=False,
     #     mask_clouds_device="cuda")
 
