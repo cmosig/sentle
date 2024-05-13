@@ -29,6 +29,7 @@ import matplotlib.pyplot as plt
 from numcodecs import Blosc
 import scipy.ndimage as sc
 from snow_mask import compute_potential_snow_layer
+from cloud_mask import compute_cloud_mask
 
 
 def recrop_write_window(win, overall_height, overall_width):
@@ -180,22 +181,16 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
     # TODO can we completely stick to uint16 here to save memory?
 
     # init array that needs to be filled
-    # TODO why is there no x/y coordinate here?
-    subtile_array = xr.DataArray(data=np.empty(
-        (1, len(S2_RAW_BANDS), subtile_size, subtile_size), dtype=np.float32),
-                                 dims=["time", "band", "y", "x"],
-                                 coords=dict(band=S2_RAW_BANDS,
-                                             time=[timestamp],
-                                             id=("time", [stac_item.id])),
-                                 attrs=dict(stac=stac_endpoint,
-                                            collection="sentinel-2-l2a"))
+    subtile_array = np.empty((len(S2_RAW_BANDS), subtile_size, subtile_size),
+                             dtype=np.float32)
+    band_names = S2_RAW_BANDS
 
     # save CRS of downloaded sentinel tiles
-    crs = None
+    s2_crs = None
     # save transformation of sentinel tile for later processing
-    transform = None
+    s2_tile_transform = None
     # retrieve each band for subtile in sentinel tile
-    for band in S2_RAW_BANDS:
+    for i, band in enumerate(S2_RAW_BANDS):
         href = stac_item.assets[band].href
         with rasterio.open(href) as dr:
 
@@ -215,46 +210,27 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
                                 out_shape=(subtile_size, subtile_size),
                                 out_dtype=np.float32)
 
-            # replace 0 with NaN -> important for merging
-            # 0 means in sentinel2 nodata
-            read_data[read_data == 0] = np.nan
-
-            subtile_array.loc[dict(band=band)] = read_data
+            # save
+            subtile_array[i] = read_data
 
             # save and validate epsg
-            assert (crs is None) or (
-                crs == dr.crs), "CRS mismatch within one sentinel tile"
-            crs = dr.crs
+            assert (s2_crs is None) or (
+                s2_crs == dr.crs), "CRS mismatch within one sentinel tile"
+            s2_crs = dr.crs
 
             # save transform for a 10m band tile
             if band == "B02":
-                transform = dr.transform
-
-    # this is required for atenea
-    if compute_nbar:
-        subtile_array.attrs["epsg"] = crs.to_epsg()
-    # this is required for rioxarray to figure out the crs
-    subtile_array.attrs["crs"] = crs
-    # set stac_item, required for harmonization
-    subtile_array.attrs["stac_item"] = stac_item
+                s2_tile_transform = dr.transform
 
     # determine bounds based on subtile window and tile transform
-    subtile_bounds_utm = windows.bounds(intersecting_windows, transform)
+    subtile_bounds_utm = windows.bounds(intersecting_windows,
+                                        s2_tile_transform)
     assert (
         subtile_bounds_utm[2] - subtile_bounds_utm[0]
     ) // 10 == subtile_size, "mismatch between subtile size and bounds on x-axis"
     assert (
         subtile_bounds_utm[3] - subtile_bounds_utm[1]
     ) // 10 == subtile_size, "mismatch between subtile size and bounds on y-axis"
-
-    # set array coordindates based on bounds and standard resolution of 10m
-    xs_utm = np.arange(start=subtile_bounds_utm[0],
-                       stop=subtile_bounds_utm[2],
-                       step=10)
-    ys_utm = np.arange(start=subtile_bounds_utm[3],
-                       stop=subtile_bounds_utm[1],
-                       step=-10)
-    subtile_array = subtile_array.assign_coords(dict(x=xs_utm, y=ys_utm))
 
     if mask_clouds:
         assert subtile_size == 732, "cloud masking only works with subtile size of 732 at the moment"
@@ -264,26 +240,21 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
             736, ), "unexpected shape after padding"
 
     # 2 push that tile through atenea
-    subtile_array = atenea.process(
-        subtile_array,
-        source="sentle",
-        reduce_time=False,
-        mask_clouds=mask_clouds,
-        # we compute classification ourselves based on the returned probabilities
-        return_cloud_probabilities=True,
-        return_cloud_classification_layer=False,
-        return_clear_sky_mask=False,
-        stac=stac_endpoint,
-        quiet=True,
-        mask_clouds_device=mask_clouds_device,
-        nbar=compute_nbar,
-        mask_snow=False,
-    )
-
-    # drop all attributes --> only needed to atenea
-    if compute_nbar:
-        del subtile_array.attrs["epsg"]
-    del subtile_array.attrs["stac_item"]
+    # subtile_array = atenea.process(
+    #     subtile_array,
+    #     source="sentle",
+    #     reduce_time=False,
+    #     mask_clouds=mask_clouds,
+    #     # we compute classification ourselves based on the returned probabilities
+    #     return_cloud_probabilities=True,
+    #     return_cloud_classification_layer=False,
+    #     return_clear_sky_mask=False,
+    #     stac=stac_endpoint,
+    #     quiet=True,
+    #     mask_clouds_device=mask_clouds_device,
+    #     nbar=compute_nbar,
+    #     mask_snow=False,
+    # )
 
     if mask_clouds:
 
@@ -296,20 +267,14 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
             732,
         ), f"unexpected shape after padding removal{subtile_array.sizes}"
 
-    # remove time dimension, only needed for ateana
-    subtile_array = subtile_array.loc[dict(time=timestamp)]
-
-    # make sure that x and y are the correct spatial resolutions
-    subtile_array = subtile_array.rio.set_spatial_dims(x_dim="x", y_dim="y")
-
     # 3 reproject to target_crs for each band
     # determine transform --> round to target resolution so that reprojected
     # subtiles align across subtiles
     subtile_repr_transform, subtile_repr_width, subtile_repr_height = rasterio.warp.calculate_default_transform(
-        src_crs=crs,
+        src_crs=s2_crs,
         dst_crs=target_crs,
-        width=subtile_array.sizes["x"],
-        height=subtile_array.sizes["y"],
+        width=subtile_array.shape[1],
+        height=subtile_array.shape[0],
         left=subtile_bounds_utm[0],
         bottom=subtile_bounds_utm[1],
         right=subtile_bounds_utm[2],
@@ -334,29 +299,30 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
     subtile_repr_width += 1
     subtile_repr_height += 1
 
+    # billinear reprojection for everything
+    subtile_array_repr = np.empty(
+        (len(band_names), subtile_repr_height, subtile_repr_width),
+        dtype=np.float32)
+    warp.reproject(source=subtile_array,
+                   destination=subtile_array_repr,
+                   src_transform=transform.from_bounds(*subtile_bounds_utm,
+                                                       width=subtile_size,
+                                                       height=subtile_size),
+                   src_crs=s2_crs,
+                   dst_crs=target_crs,
+                   src_nodata=0,
+                   dst_nodata=0,
+                   dst_transform=subtile_repr_transform,
+                   resampling=Resampling.bilinear)
+    # explicit clear
+    del subtile_array
+
     # compute bounds in target crs based on rounded transform
     subtile_bounds_tcrs = bounds_from_transform_height_width_res(
         transform=subtile_repr_transform,
         height=subtile_repr_height,
         width=subtile_repr_width,
         resolution=target_resolution)
-
-    # billinear reprojection for everything
-    # TODO maybe don't use rioxarray at all and use raw numpy with rasterio for reprojection,
-    # coordinates are not used later anyway
-    subtile_array = subtile_array.rio.reproject(
-        dst_crs=target_crs,
-        transform=subtile_repr_transform,
-        shape=(subtile_repr_height, subtile_repr_width),
-        nodata=np.nan,
-        resampling=Resampling.bilinear)
-
-    # change center to coordinates to top-left coords (rioxarray caveat)
-    # TODO file an issue with rioxarray to it a parameter how coords are
-    # represented
-    subtile_array = subtile_array.assign_coords(
-        dict(x=subtile_array.x.data - (target_resolution / 2),
-             y=subtile_array.y.data + (target_resolution / 2)))
 
     # figure out where to write the subtile within the overall bounds
     write_win = windows.from_bounds(
@@ -368,12 +334,13 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
 
     # crop subtile_array based on computed local win because it could overlap
     # with the overall bounds
-    subtile_array = subtile_array[:, local_win.row_off:local_win.height +
-                                  local_win.row_off,
-                                  local_win.col_off:local_win.col_off +
-                                  local_win.width]
+    subtile_array_repr = subtile_array_repr[:, local_win.
+                                            row_off:local_win.height +
+                                            local_win.row_off, local_win.
+                                            col_off:local_win.col_off +
+                                            local_win.width]
 
-    return subtile_array, write_win
+    return subtile_array_repr, write_win, band_names
 
 
 def process_ptile(
@@ -474,7 +441,7 @@ def process_ptile(
 
         stac_item = subdf["item"].iloc[0]
 
-        subtile_array_xr, write_win = process_subtile(
+        subtile_array_ret, write_win, subtile_array_bands = process_subtile(
             intersecting_windows=st.intersecting_windows,
             stac_item=stac_item,
             timestamp=timestamp,
@@ -492,21 +459,17 @@ def process_ptile(
             compute_nbar=compute_nbar,
             mask_clouds_device=mask_clouds_device)
 
-        # save band order
-        subtile_array_bands = list(subtile_array_xr.band.data)
-
         # also replace nan with 0 so that the mean computation works
         # (this is reverted later)
         subtile_array[:,
                       write_win.row_off:write_win.row_off + write_win.height,
                       write_win.col_off:write_win.col_off +
-                      write_win.width] += subtile_array_xr.fillna(0).data
+                      write_win.width] += subtile_array_ret
 
         subtile_array_count[:, write_win.row_off:write_win.row_off +
                             write_win.height,
                             write_win.col_off:write_win.col_off +
-                            write_win.width] += ~np.isnan(
-                                subtile_array_xr.data)
+                            write_win.width] += ~(subtile_array_ret == 0)
 
     # determine nodata mask based on where values are zero -> mean nodata for S2...
     # (need to do this here, because after computing mean there will be nans
@@ -779,19 +742,43 @@ if __name__ == "__main__":
     print("------------------------------------")
     print("------------------------------------")
 
+    # x = process(
+    #     target_crs=CRS.from_string("EPSG:8857"),
+    #     bound_left=767300,
+    #     bound_bottom=7290000,
+    #     bound_right=776000,
+    #     bound_top=7315000,
+    #     datetime="2023-11-16",
+    #     # datetime="2023-11-11/2023-12-01",
+    #     # datetime="2023-11",
+    #     # datetime="2020/2023",
+    #     processing_tile_size=4000,
+    #     target_resolution=10,
+    #     zarr_path="bigout_parallel_test_5.zarr",
+    #     num_workers=1,
+    #     threads_per_worker=1,
+    #     # less then 3GB per worker will likely not work
+    #     memory_limit_per_worker="8GB",
+    #     mask_clouds=False,
+    #     mask_snow=True,
+    #     return_cloud_probabilities=False,
+    #     return_cloud_classification_layer=False,
+    #     compute_nbar=False,
+    #     mask_clouds_device="cuda")
+
     x = process(
         target_crs=CRS.from_string("EPSG:8857"),
-        bound_left=767300,
-        bound_bottom=7290000,
-        bound_right=776000,
-        bound_top=7315000,
-        datetime="2023-11-16",
-        # datetime="2023-11-11/2023-12-01",
+        bound_left=931070,
+        bound_bottom=6111250,
+        bound_right=957630,
+        bound_top=6134550,
+        datetime="2023-06-10",
+        # datetime="2023-06-01/2023-12-01",
         # datetime="2023-11",
         # datetime="2020/2023",
         processing_tile_size=4000,
         target_resolution=10,
-        zarr_path="bigout_parallel_test_5.zarr",
+        zarr_path="halle_leipzig_6.zarr",
         num_workers=1,
         threads_per_worker=1,
         # less then 3GB per worker will likely not work
