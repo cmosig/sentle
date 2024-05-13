@@ -4,7 +4,6 @@ import rioxarray as rxr
 from affine import Affine
 import pandas as pd
 from rasterio.enums import Resampling
-from atenea import atenea
 import itertools
 import numpy as np
 from rasterio import warp, windows, transform
@@ -175,8 +174,6 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
                     return_cloud_probabilities: bool, compute_nbar: bool,
                     mask_clouds_device: str, cloud_mask_model):
 
-    # TODO entirely remove skip atenea
-
     # TODO can we completely stick to uint16 here to save memory?
 
     # init array that needs to be filled
@@ -235,23 +232,6 @@ def process_subtile(intersecting_windows, stac_item, timestamp,
     assert (
         subtile_bounds_utm[3] - subtile_bounds_utm[1]
     ) // 10 == subtile_size, "mismatch between subtile size and bounds on y-axis"
-
-    # 2 push that tile through atenea
-    # subtile_array = atenea.process(
-    #     subtile_array,
-    #     source="sentle",
-    #     reduce_time=False,
-    #     mask_clouds=mask_clouds,
-    #     # we compute classification ourselves based on the returned probabilities
-    #     return_cloud_probabilities=True,
-    #     cloud_classification=False,
-    #     return_clear_sky_mask=False,
-    #     stac=stac_endpoint,
-    #     quiet=True,
-    #     mask_clouds_device=mask_clouds_device,
-    #     nbar=compute_nbar,
-    #     mask_snow=False,
-    # )
 
     if cloud_classification or return_cloud_probabilities:
         cloud_bands, result_probs = compute_cloud_mask(
