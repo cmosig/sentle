@@ -34,7 +34,7 @@ class Sentle():
     def __init__(self,
                  num_workers: int = 1,
                  threads_per_worker: int = 1,
-                 memory_limit_per_worker: str = "5GB",
+                 memory_limit_per_worker: str = "8GB",
                  dashboard_address: str = "127.0.0.1:9988"):
 
         if threads_per_worker > 1:
@@ -722,21 +722,69 @@ class Sentle():
             print("No data proccessed, nothing to save.")
             return
 
-        # convert Timestamp object to UTC timestamp float so that it can be stored in zarr
-        out_array = self.da.assign_coords(
-            dict(time=[int(t.timestamp()) for t in self.da.time.data]))
-
         # TODO maybe cast to uint16 at the end again
         store = zarr.storage.DirectoryStore(path, dimension_separator=".")
 
         # NOTE the compression may not be optimal, need to benchmark
-        out_array.rename("S2").to_zarr(store=store,
-                                       mode="w-",
-                                       compute=True,
-                                       encoding={
-                                           "S2": {
-                                               "write_empty_chunks": False,
-                                               "compressor":
-                                               Blosc(cname="zstd"),
-                                           }
-                                       })
+        self.da.rename("S2").to_zarr(store=store,
+                                     mode="w-",
+                                     compute=True,
+                                     encoding={
+                                         "S2": {
+                                             "write_empty_chunks": False,
+                                             "compressor": Blosc(cname="zstd"),
+                                         }
+                                     })
+
+    def create_time_composite(self,
+                              ndays: int = 7,
+                              use_cloud_class_mask: bool = True,
+                              use_snow_mask: bool = True,
+                              cloud_mask_max_class: int = 0):
+
+        if use_snow_mask and "snow_mask" not in self.da.band:
+            warnings.warn(
+                "use_snow_mask set to True for time composite, but no snow_mask in bands."
+            )
+
+        if use_cloud_class_mask and "cloud_classification" not in self.da.band:
+            warnings.warn(
+                "use_cloud_class_mask set to True for time composite, but no cloud_classification in bands."
+            )
+
+        def _mask_chunk(dc):
+            if use_cloud_class_mask:
+                cloud_mask = (dc.sel(band="cloud_classification")
+                              <= cloud_mask_max_class)
+
+            if use_snow_mask:
+                snow_mask = (dc.sel(band="snow_mask") == 1)
+
+                if use_cloud_class_mask:
+                    mask = snow_mask & cloud_mask
+            else:
+                mask = cloud_mask
+
+            return dc.where(mask, other=np.nan)
+
+        # setting all values to nan that are snow/clouds
+        self.da = self.da.map_blocks(_mask_chunk, template=self.da)
+
+        # create groupby index where we place
+        seconds_in_day = 86400
+        index = xr.IndexVariable(
+            dims="time",
+            data=np.array(
+                list(
+                    map(
+                        lambda x: pd.Timestamp.fromtimestamp(
+                            (x.timestamp() -
+                             (x.timestamp() % (seconds_in_day * ndays))) + (
+                                 (seconds_in_day / 2) * ndays)),
+                        self.da.time.data.tolist()))))
+
+        # do nan mean for each group
+        sub_bands = self.da.band[(self.da.band == "snow_mask")
+                                 & (self.da.band == "cloud_classification")]
+        self.da = self.da.sel(band=sub_bands).groupby(index).mean(dim="time",
+                                                                  skipna=True)
