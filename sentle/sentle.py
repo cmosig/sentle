@@ -198,7 +198,7 @@ class Sentle():
                         ptile_transform, ptile_width: int, ptile_height: int,
                         mask_snow: bool, cloud_classification: bool,
                         return_cloud_probabilities: bool, compute_nbar: bool,
-                        mask_clouds_device: str, cloud_mask_model):
+                        cloud_classification_device: str, cloud_mask_model):
 
         # TODO can we completely stick to uint16 here to save memory?
 
@@ -264,7 +264,7 @@ class Sentle():
             cloud_bands, result_probs = compute_cloud_mask(
                 subtile_array,
                 cloud_mask_model,
-                mask_clouds_device=mask_clouds_device)
+                cloud_classification_device=cloud_classification_device)
             band_names += cloud_bands
             subtile_array = np.concatenate([subtile_array, result_probs])
 
@@ -353,7 +353,7 @@ class Sentle():
         target_resolution: float,
         catalog,
         stac_endpoint: str,
-        mask_clouds_device: str,
+        cloud_classification_device: str,
         subtile_size: int = 732,
         mask_snow: bool = False,
         cloud_classification: bool = False,
@@ -437,7 +437,7 @@ class Sentle():
                                       dtype=np.uint8)
 
         # load cloudsen model
-        cloudsen_model = load_cloudsen_model(mask_clouds_device)
+        cloudsen_model = load_cloudsen_model(cloud_classification_device)
 
         subtile_array_bands = None
         for i, st in enumerate(subtiles.itertuples(index=False,
@@ -470,7 +470,7 @@ class Sentle():
                 cloud_classification=cloud_classification,
                 return_cloud_probabilities=return_cloud_probabilities,
                 compute_nbar=compute_nbar,
-                mask_clouds_device=mask_clouds_device,
+                cloud_classification_device=cloud_classification_device,
                 cloud_mask_model=cloudsen_model)
 
             # also replace nan with 0 so that the mean computation works
@@ -561,12 +561,11 @@ class Sentle():
         bound_right: float,
         bound_top: float,
         datetime: DatetimeLike,
-        processing_tile_size: int,
+        processing_tile_size: int = 4000,,
         subtile_size: int = 732,
-        # TODO make wording consistent with return_...
         mask_snow: bool = False,
-        mask_clouds_device="cpu",
         cloud_classification: bool = False,
+        cloud_classification_device="cpu",
         return_cloud_probabilities: bool = False,
         compute_nbar: bool = False,
     ):
@@ -710,7 +709,7 @@ class Sentle():
                 cloud_classification=cloud_classification,
                 return_cloud_probabilities=return_cloud_probabilities,
                 compute_nbar=compute_nbar,
-                mask_clouds_device=mask_clouds_device,
+                cloud_classification_device=cloud_classification_device,
             ),
             template=out_array)
 
