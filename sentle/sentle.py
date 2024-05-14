@@ -48,7 +48,7 @@ class Sentle():
                                threads_per_worker=threads_per_worker,
                                memory_limit=memory_limit_per_worker)
         client = Client(cluster)
-        print("Client dashboard link:", client.dashboard_link)
+        print("Dask client dashboard link:", client.dashboard_link)
 
         # load Sentinel 2 grid
         Variable("s2gridfile").set(
@@ -442,15 +442,17 @@ class Sentle():
         subtile_array_bands = None
         for i, st in enumerate(subtiles.itertuples(index=False,
                                                    name="subtile")):
+
+            # filter items by sentinel tile name
             subdf = items[items["tile"] == st.name]
-            # there should only be one S2 tile for the timestamp
-            assert subdf.shape[
-                0] <= 1, f"unexpected number of items:\n {subdf} \n {items} \n {st.name}"
 
             if subdf.empty:
                 # can happen with orbit edges, because we filter stac with bounds
                 continue
 
+            # NOTE it is possible that multiple items are returned for one
+            # timestamp and a sentinel tile. These are duplicates and a bug in
+            # sentinel2 repository
             stac_item = subdf["item"].iloc[0]
 
             subtile_array_ret, write_win, subtile_array_bands = self.process_subtile(
