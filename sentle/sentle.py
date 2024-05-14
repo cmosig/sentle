@@ -200,8 +200,6 @@ class Sentle():
                         return_cloud_probabilities: bool, compute_nbar: bool,
                         cloud_classification_device: str, cloud_mask_model):
 
-        # TODO can we completely stick to uint16 here to save memory?
-
         # init array that needs to be filled
         subtile_array = np.empty(
             (len(S2_RAW_BANDS), subtile_size, subtile_size), dtype=np.float32)
@@ -341,8 +339,6 @@ class Sentle():
                                                 local_win.row_off, local_win.
                                                 col_off:local_win.col_off +
                                                 local_win.width]
-
-        # TODO harmonize
 
         return subtile_array_repr, write_win, band_names
 
@@ -561,7 +557,7 @@ class Sentle():
         bound_right: float,
         bound_top: float,
         datetime: DatetimeLike,
-        processing_tile_size: int = 4000,,
+        processing_tile_size: int = 4000,
         subtile_size: int = 732,
         mask_snow: bool = False,
         cloud_classification: bool = False,
@@ -587,19 +583,23 @@ class Sentle():
             Top bound of area that is supposed to be covered. Unit is in `target_crs`.
         datetime: DatetimeLike
             Specifies time range of data to be downloaded. This is forwarded to the respective stac interface.
-        subtile_size: int, default=732
-            Specifies the size of each subtile. The maximum is the size of a sentinel tile (10980). If cloud filtering is enabled the minimum tilesize is 256, otherwise 16. It also needs to be a divisor of 10980, so that each sentinel tile can be segmented without overlaps.
-        num_cores: int, default = 1
-            Number of CPU cores across which subtile processing is supposed to be distributed.
+        subtile_size: int, default = 732
+            Specifies the size of each subtile. The maximum is the size of a sentinel tile (10980). If cloud filtering is enabled the minimum tilesize is 256, otherwise 16. It also needs to be a divisor of 10980, so that each sentinel tile can be segmented without overlaps. At the moment this package only supports the default subtile_size of 732.
+        mask_snow: bool, default = False,
+            Whether to create a snow mask. Based on https://doi.org/10.1016/j.rse.2011.10.028.
+        cloud_classification: bool = False,
+            Whether to create cloud classification layer, where `0=clear sky`, `2=thick cloud`, `3=thin cloud`, `4=shadow`.
+        cloud_classification_device="cpu",
+            On which device to run cloud classification. Either `cpu` or `cuda`.
+        return_cloud_probabilities: bool = False,
+            Whether to return raw cloud probabilities which were used to determine the cloud classes.
+        compute_nbar: bool = False,
+            Whether to compute NBAR using the sen2nbar package. Coming soon.
         """
 
         assert subtile_size == 732, "Unsupported subtile size."
 
-        # TODO support to save subset of bands in lazy dask array
-
-        # TODO update docstring
-
-        # TODO provide function to aggregate by timeperiod and before that filter clouds
+        # TODO support to only download subset of bands (mutually exclusive with cloud classification and partially snow_mask)
 
         # derive bands to save from arguments
         bands_to_save = [
@@ -721,17 +721,15 @@ class Sentle():
             print("No data proccessed, nothing to save.")
             return
 
-        # TODO maybe cast to uint16 at the end again
-        store = zarr.storage.DirectoryStore(path, dimension_separator=".")
-
         # NOTE the compression may not be optimal, need to benchmark
+        store = zarr.storage.DirectoryStore(path, dimension_separator=".")
         self.da.rename("S2").to_zarr(store=store,
                                      mode="w-",
                                      compute=True,
                                      encoding={
                                          "S2": {
                                              "write_empty_chunks": False,
-                                             "compressor": Blosc(cname="zstd"),
+                                             "compressor": Blosc(cname="lz4"),
                                          }
                                      })
 
@@ -783,7 +781,7 @@ class Sentle():
                         self.da.time.data.tolist()))))
 
         # do nan mean for each group
-        sub_bands = self.da.band[(self.da.band == "snow_mask")
-                                 & (self.da.band == "cloud_classification")]
+        sub_bands = self.da.band[~((self.da.band == "snow_mask") |
+                                   (self.da.band == "cloud_classification"))]
         self.da = self.da.sel(band=sub_bands).groupby(index).mean(dim="time",
                                                                   skipna=True)
