@@ -717,6 +717,8 @@ class Sentle():
         self.da = out_array
 
     def save_as_zarr(self, path: str):
+        # TODO add documentation
+
         if self.da is None:
             print("No data proccessed, nothing to save.")
             return
@@ -738,6 +740,8 @@ class Sentle():
                               use_cloud_class_mask: bool = True,
                               use_snow_mask: bool = True,
                               cloud_mask_max_class: int = 0):
+        # TODO add documentation
+        # TODO split up into masking and composite
 
         if use_snow_mask and "snow_mask" not in self.da.band:
             warnings.warn(
