@@ -38,8 +38,6 @@ pip install -e .
 
 ### Quick Tour
 
-Using the package involves a 3-5 step process. 
-
 **(1) Initiate the `Sentle` class.** This initiates a [dask](https://www.dask.org/) cluster (don't be scared of the word cluster, this can also mean 1 CPU core) in the background. Each worker needs at most 8GB RAM in default settings. 
 
 ```
