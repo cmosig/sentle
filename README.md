@@ -18,13 +18,13 @@ detection, snow masking, harmonization, merging, and temporal composites.</em>
 ---
  
 
-### Prerequisites
+## Prerequisites
 
 If you download larger areas or longer timeseries you'll need to obtain a
 subscription key from [Planetary Computer](https://planetarycomputer.microsoft.com/account/request). 
 Configure it in your shell with: `export PC_SDK_SUBSCRIPTION_KEY=xxxxyourkeyxxxx`
 
-### Installing
+## Installing
 
 ```
 pip install sentle
@@ -36,7 +36,7 @@ cd sentle
 pip install -e .
 ```
 
-### Quick Tour
+## Quick Tour
 
 **(1) Initiate the `Sentle` class.** This initiates a [dask](https://www.dask.org/) cluster (don't be scared of the word cluster, this can also mean 1 CPU core) in the background. Each worker needs at most 8GB RAM in default settings. 
 
@@ -56,7 +56,7 @@ sen.process(
     bound_bottom=6111250,
     bound_right=957630,
     bound_top=6134550,
-    datetime="2023-07-01/2023-07-14",
+    datetime="2023-08-01/2023-08-07",
     mask_snow=True,
     cloud_classification=True,
     cloud_classification_device="cuda")
@@ -82,6 +82,15 @@ This executes the built-up dask graph and saves the data to an optimized Zarr fo
 sen.save_as_zarr("my_cube.zarr")
 ```
 Alternatively, you can call `sen.da.compute()` and use the generated cube directly, without saving it to your drive.
+
+## Questions you may (or should?) have
+
+#### Where can I watch the progress of the download?
+Upon class initialization, `sentle` prints a link to a [dask dashboard](https://docs.dask.org/en/latest/dashboard.html). Check the bottom right pane in the Status tab for a progress bar. 
+A variety of other stats are also visible there. If you are working on a remote machine you may need to use [port forwarding](https://help.ubuntu.com/community/SSH/OpenSSH/PortForwarding) to access the remote dashboard.
+
+#### How do I scale this program?
+Increase the number of workers using the `num_workers` parameter when setting up the `Sentle` class. You should plan with about 8GB of memory per worker at peak times.
 
 ## Contributing
 
