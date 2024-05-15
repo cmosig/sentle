@@ -569,31 +569,31 @@ class Sentle():
         Parameters
         ----------
 
-        target_crs: CRS
+        target_crs : CRS
             Specifies the target CRS that all data will be reprojected to.
-        target_resolution: float
+        target_resolution : float
             Determines the resolution that all data is reprojected to in the `target_crs`.
-        bound_left: float
+        bound_left : float
             Left bound of area that is supposed to be covered. Unit is in `target_crs`.
-        bound_bottom: float
+        bound_bottom : float
             Bottom bound of area that is supposed to be covered. Unit is in `target_crs`.
-        bound_right: float
+        bound_right : float
             Right bound of area that is supposed to be covered. Unit is in `target_crs`.
-        bound_top: float
+        bound_top : float
             Top bound of area that is supposed to be covered. Unit is in `target_crs`.
-        datetime: DatetimeLike
+        datetime : DatetimeLike
             Specifies time range of data to be downloaded. This is forwarded to the respective stac interface.
-        subtile_size: int, default = 732
+        subtile_size : int, default=732
             Specifies the size of each subtile. The maximum is the size of a sentinel tile (10980). If cloud filtering is enabled the minimum tilesize is 256, otherwise 16. It also needs to be a divisor of 10980, so that each sentinel tile can be segmented without overlaps. At the moment this package only supports the default subtile_size of 732.
-        mask_snow: bool, default = False,
+        mask_snow : bool, default=False
             Whether to create a snow mask. Based on https://doi.org/10.1016/j.rse.2011.10.028.
-        cloud_classification: bool = False,
+        cloud_classification : bool, default=False
             Whether to create cloud classification layer, where `0=clear sky`, `2=thick cloud`, `3=thin cloud`, `4=shadow`.
-        cloud_classification_device="cpu",
+        cloud_classification_device : str, default="cpu"
             On which device to run cloud classification. Either `cpu` or `cuda`.
-        return_cloud_probabilities: bool = False,
+        return_cloud_probabilities : bool, default=False
             Whether to return raw cloud probabilities which were used to determine the cloud classes.
-        compute_nbar: bool = False,
+        compute_nbar : bool, default=False
             Whether to compute NBAR using the sen2nbar package. Coming soon.
         """
 
@@ -717,7 +717,16 @@ class Sentle():
         self.da = out_array
 
     def save_as_zarr(self, path: str):
-        # TODO add documentation
+        """
+        Triggers dask compute and saves chunks whenever they have been
+        processed. Empty chunks are not written. Chunks are compressed with
+        lz4. 
+
+        Parameters
+        ----------
+        path : str
+            Specifies where save path of the zarr file.    
+        """
 
         if self.da is None:
             print("No data proccessed, nothing to save.")
@@ -735,13 +744,22 @@ class Sentle():
                                          }
                                      })
 
-    def create_time_composite(self,
-                              ndays: int = 7,
-                              use_cloud_class_mask: bool = True,
-                              use_snow_mask: bool = True,
-                              cloud_mask_max_class: int = 0):
-        # TODO add documentation
-        # TODO split up into masking and composite
+    def mask_array(self,
+                   use_cloud_class_mask: bool = True,
+                   use_snow_mask: bool = True,
+                   cloud_mask_max_class: int = 0):
+        """
+        Replaces pixels with clouds or snow with `np.nan`. Extends dask graph after calling `process()`.
+
+        Parameters
+        ----------
+        use_cloud_class_mask : bool, default=True
+            Whether to use the generated cloud mask. Requires `cloud_classification=True` in `process()`.
+        use_snow_mask : bool, default=True  
+            Whether to use the generated snow mask. Requires `mask_snow=True` in `process()`.
+        cloud_mask_max_class : int, default=0
+            Specifies the maximum acceptable class. `0` only uses clear sky. See notes in `process()` for other classes.
+        """
 
         if use_snow_mask and "snow_mask" not in self.da.band:
             warnings.warn(
@@ -770,6 +788,16 @@ class Sentle():
 
         # setting all values to nan that are snow/clouds
         self.da = self.da.map_blocks(_mask_chunk, template=self.da)
+
+    def create_time_composite(self, ndays: int = 7):
+        """
+        Creates a (nan)mean across each time interval for each band.
+
+        Parameters
+        ----------
+        ndays : int, default=7
+            Number of days to perform mean on.
+        """
 
         # create groupby index where we place
         seconds_in_day = 86400
