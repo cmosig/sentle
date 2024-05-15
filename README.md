@@ -10,13 +10,13 @@
     <img src="https://img.shields.io/badge/code_style-pep8-blue" alt="Black">
 </a>
 </p>
+<p align="center">
+    <em>Download Sentinel-2 data cubes of any scale (larger-than-memory) on any machine with integrated cloud
+detection, snow masking, harmonization, merging, and temporal composites.</em>
+</p>
 
 ---
-
-# SENTLE
-
-Download Sentinel-2 data cubes of any scale (larger-than-memory) on any machine with integrated cloud
-detection, snow masking, harmonization, merging, and temporal composites. 
+ 
 
 ### Prerequisites
 
