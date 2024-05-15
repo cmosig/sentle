@@ -1,3 +1,18 @@
+<p align="center">
+  <a href="https://github.com/cmosig/sentle/"><img src="https://github.com/cmosig/sentle/raw/main/docs/logo.png" alt="sentle"></a>
+</p>
+
+<p align="center">
+<a href="https://opensource.org/licenses/MIT" target="_blank">
+    <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License">
+</a>
+<a href="https://peps.python.org/pep-0008/" target="_blank">
+    <img src="https://img.shields.io/badge/code_style-pep8-blue" alt="Black">
+</a>
+</p>
+
+---
+
 # SENTLE
 
 Download Sentinel-2 data cubes of any scale (larger-than-memory) on any machine with integrated cloud
