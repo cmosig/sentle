@@ -18,7 +18,6 @@ import pystac_client
 import planetary_computer
 import xarray as xr
 import warnings
-from tqdm import tqdm
 import os
 from dask.distributed import Client, Variable, LocalCluster
 from termcolor import colored
@@ -393,7 +392,6 @@ class Sentle():
         if len(item_list) == 0:
             # if there is nothing within the bounds and for that timestamp return.
             # possible and normal
-            print(colored("empty ptile, returning input da", "green"))
             return da
 
         items = pd.DataFrame()
@@ -481,14 +479,6 @@ class Sentle():
                                 write_win.col_off:write_win.col_off +
                                 write_win.width] += ~(subtile_array_ret == 0)
 
-        # determine nodata mask based on where values are zero -> mean nodata for S2...
-        # (need to do this here, because after computing mean there will be nans
-        # from divide by zero)
-        nodata_mask_S2_raw = np.any(subtile_array[[
-            subtile_array_bands.index(band) for band in S2_RAW_BANDS
-        ]] == 0,
-                                    axis=0)
-
         with warnings.catch_warnings():
             # filter out divide by zero warning, this is expected here
             warnings.simplefilter("ignore")
@@ -532,7 +522,15 @@ class Sentle():
 
         # ... and set all such pixels to nan (of which some are already nan because
         # of divide by zero)
-        subtile_array[:, nodata_mask_S2_raw] = np.nan
+        # determine nodata mask based on where values are zero -> mean nodata for S2...
+        # (need to do this here, because after computing mean there will be nans
+        # from divide by zero)
+        subtile_array[:,
+                      np.any(subtile_array[[
+                          subtile_array_bands.index(band)
+                          for band in S2_RAW_BANDS
+                      ]] == 0,
+                             axis=0)] = np.nan
 
         # expand dimensions -> one timestep
         subtile_array = np.expand_dims(subtile_array, axis=0)
@@ -679,7 +677,8 @@ class Sentle():
 
         # chunks with one per timestep -> many empty timesteps for specific areas,
         # because we have all the timesteps for Germany
-        out_array = xr.DataArray(
+        # TODO do Dataset instead of Dataarray
+        self.da = xr.DataArray(
             data=dask.array.full(
                 shape=(len(timesteps), len(bands_to_save), height, width),
                 chunks=(1, len(bands_to_save), processing_tile_size,
@@ -697,7 +696,7 @@ class Sentle():
                 y=np.arange(bound_top, bound_bottom,
                             -target_resolution).astype(np.float32)))
 
-        out_array = out_array.map_blocks(
+        self.da = self.da.map_blocks(
             self.process_ptile,
             kwargs=dict(
                 target_crs=target_crs,
@@ -711,10 +710,7 @@ class Sentle():
                 compute_nbar=compute_nbar,
                 cloud_classification_device=cloud_classification_device,
             ),
-            template=out_array)
-
-        # TODO do Dataset instead of Dataarray
-        self.da = out_array
+            template=self.da)
 
     def save_as_zarr(self, path: str):
         """
