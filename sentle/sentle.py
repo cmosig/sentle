@@ -193,9 +193,9 @@ class Sentle():
 
     def process_subtile(self, intersecting_windows, stac_item, timestamp,
                         subtile_size: int, target_crs: CRS,
-                        target_resolution: float, stac_endpoint: str,
-                        ptile_transform, ptile_width: int, ptile_height: int,
-                        mask_snow: bool, cloud_classification: bool,
+                        target_resolution: float, ptile_transform,
+                        ptile_width: int, ptile_height: int, mask_snow: bool,
+                        cloud_classification: bool,
                         return_cloud_probabilities: bool, compute_nbar: bool,
                         cloud_classification_device: str, cloud_mask_model):
 
@@ -346,8 +346,6 @@ class Sentle():
         da: xr.DataArray,
         target_crs: CRS,
         target_resolution: float,
-        catalog,
-        stac_endpoint: str,
         cloud_classification_device: str,
         subtile_size: int = 732,
         mask_snow: bool = False,
@@ -376,6 +374,10 @@ class Sentle():
         assert timestamp.shape == (1, )
         timestamp = timestamp[0]
 
+        catalog = pystac_client.Client.open(
+            Variable("stac_endpoint").get(),
+            modifier=planetary_computer.sign_inplace,
+        )
         # retrieve items (possible across multiple sentinel tile) for specified
         # timestamp
         item_list = list(
@@ -434,6 +436,9 @@ class Sentle():
         cloudsen_model = load_cloudsen_model(cloud_classification_device)
 
         subtile_array_bands = None
+
+        # TODO wait here is relative progress of store-map is much less than ptile
+
         for i, st in enumerate(subtiles.itertuples(index=False,
                                                    name="subtile")):
 
@@ -456,7 +461,6 @@ class Sentle():
                 subtile_size=subtile_size,
                 target_crs=target_crs,
                 target_resolution=target_resolution,
-                stac_endpoint=stac_endpoint,
                 ptile_transform=ptile_transform,
                 ptile_width=ptile_width,
                 ptile_height=ptile_height,
@@ -657,6 +661,7 @@ class Sentle():
 
         # sign into planetary computer
         stac_endpoint = "https://planetarycomputer.microsoft.com/api/stac/v1"
+        Variable("stac_endpoint").set(stac_endpoint)
         catalog = pystac_client.Client.open(
             stac_endpoint,
             modifier=planetary_computer.sign_inplace,
@@ -702,8 +707,6 @@ class Sentle():
                 target_crs=target_crs,
                 target_resolution=target_resolution,
                 subtile_size=subtile_size,
-                catalog=catalog,
-                stac_endpoint=stac_endpoint,
                 mask_snow=mask_snow,
                 cloud_classification=cloud_classification,
                 return_cloud_probabilities=return_cloud_probabilities,
