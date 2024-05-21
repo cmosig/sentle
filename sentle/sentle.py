@@ -728,6 +728,13 @@ class Sentle():
             print("No data proccessed, nothing to save.")
             return
 
+        # remove timezone, otherwise crash -> zarr caveat
+        ts_new = np.array(
+            list(
+                map(lambda t: pd.Timestamp.fromtimestamp(t.timestamp()),
+                    self.da.time.data)))
+        self.da = sen.da.assign_coords(dict(time=ts_new))
+
         # NOTE the compression may not be optimal, need to benchmark
         store = zarr.storage.DirectoryStore(path, dimension_separator=".")
         self.da.rename("S2").to_zarr(store=store,
