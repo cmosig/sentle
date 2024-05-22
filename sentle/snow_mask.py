@@ -1,6 +1,7 @@
 import numpy as np
 import xarray as xr
 
+
 def compute_potential_snow_layer(B03, B08, B11):
     """Creates the Potential Snow Layer (PSL) as described by Equation 20 of Zhu and
     Woodcock, 2012 [1]_.

@@ -1,30 +1,31 @@
-import dask.array
-from urllib3 import Retry
-from pystac_client.stac_api_io import StacApiIO
-import rasterio
-from affine import Affine
-import pandas as pd
-from rasterio.enums import Resampling
 import itertools
-import numpy as np
-from rasterio import warp, windows, transform
-from shapely.geometry import box, Polygon
-from rasterio.crs import CRS
-import zarr
-from .utils import *
-from pystac_client.item_search import DatetimeLike
-import geopandas as gpd
-import pkg_resources
-import pystac_client
-import planetary_computer
-import xarray as xr
 import warnings
-import os
-from dask.distributed import Client, Variable, LocalCluster
-from numcodecs import Blosc
+
+import dask.array
+import geopandas as gpd
+import numpy as np
+import pandas as pd
+import pkg_resources
+import planetary_computer
+import pystac_client
+import rasterio
 import scipy.ndimage as sc
-from .snow_mask import compute_potential_snow_layer
+import xarray as xr
+import zarr
+from affine import Affine
+from dask.distributed import Client, LocalCluster, Variable
+from numcodecs import Blosc
+from pystac_client.item_search import DatetimeLike
+from pystac_client.stac_api_io import StacApiIO
+from rasterio import transform, warp, windows
+from rasterio.crs import CRS
+from rasterio.enums import Resampling
+from shapely.geometry import Polygon, box
+from urllib3 import Retry
+
 from .cloud_mask import compute_cloud_mask, load_cloudsen_model
+from .snow_mask import compute_potential_snow_layer
+from .utils import bounds_from_transform_height_width_res
 
 
 class Sentle():
@@ -53,6 +54,9 @@ class Sentle():
             gpd.read_file(
                 pkg_resources.resource_filename(
                     __name__, "data/sentinel2_grid_stripped_with_epsg.gpkg")))
+
+        # define main daskarray
+        self.da = None
 
     @staticmethod
     def recrop_write_window(win, overall_height, overall_width):
@@ -108,11 +112,9 @@ class Sentle():
         assert lwidth <= win.width
         assert lheight <= win.height
         assert lwidth == gwidth
-        assert lheight == lheight
-        assert all([
-            x % 1 == 0 for x in
-            [grow, gcol, gwidth, gheight, lrow, lcol, lwidth, lheight]
-        ])
+        assert lheight == gheight
+        assert all(x % 1 == 0 for x in
+                   [grow, gcol, gwidth, gheight, lrow, lcol, lwidth, lheight])
 
         return windows.Window(
             row_off=grow, col_off=gcol, height=gheight,
@@ -446,8 +448,7 @@ class Sentle():
 
         # TODO wait here is relative progress of store-map is much less than ptile
 
-        for i, st in enumerate(subtiles.itertuples(index=False,
-                                                   name="subtile")):
+        for st in subtiles.itertuples(index=False, name="subtile"):
 
             # filter items by sentinel tile name
             subdf = items[items["tile"] == st.name]

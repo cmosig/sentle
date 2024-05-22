@@ -1,8 +1,9 @@
+import os
+
 import numpy as np
+import pkg_resources
 import torch
 import xarray as xr
-import pkg_resources
-import os
 
 
 def load_cloudsen_model(device: str = "cpu"):
