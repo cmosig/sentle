@@ -11,7 +11,6 @@ from rasterio import warp, windows, transform
 from shapely.geometry import box, Polygon
 from rasterio.crs import CRS
 import zarr
-from typing import Optional, Union
 from .utils import *
 from pystac_client.item_search import DatetimeLike
 import geopandas as gpd
@@ -22,8 +21,6 @@ import xarray as xr
 import warnings
 import os
 from dask.distributed import Client, Variable, LocalCluster
-from termcolor import colored
-import matplotlib.pyplot as plt
 from numcodecs import Blosc
 import scipy.ndimage as sc
 from .snow_mask import compute_potential_snow_layer
