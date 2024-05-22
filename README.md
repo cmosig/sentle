@@ -19,7 +19,7 @@ detection, snow masking, harmonization, merging, and temporal composites.</em>
  
 ## Important Note
 
-The model for cloud detection will be made available within the next couple of weeks. The package also currently has some memory leak which I am working on. This package is in super-early alpha stage. Expect it to be stable the next couple of weeks. If you happen to come across this package and see this message, please give it star and try it out in a couple of weeks :)
+The model for cloud detection will be made available within the next couple of weeks. This package is in super-early alpha stage. Expect it to be stable the next couple of weeks. If you happen to come across this package and see this message, please give it star and try it out in a couple of weeks :)
 
 ## Prerequisites
 
