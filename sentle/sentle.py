@@ -1,4 +1,6 @@
 import dask.array
+from urllib3 import Retry
+from pystac_client.stac_api_io import StacApiIO
 import rasterio
 from affine import Affine
 import pandas as pd
@@ -191,6 +193,14 @@ class Sentle():
 
         return s2grid
 
+    @staticmethod
+    def get_stac_api_io():
+        retry = Retry(total=5,
+                      backoff_factor=1,
+                      status_forcelist=[502, 503, 504],
+                      allowed_methods=None)
+        return StacApiIO(max_retries=retry)
+
     def process_subtile(self, intersecting_windows, stac_item, timestamp,
                         subtile_size: int, target_crs: CRS,
                         target_resolution: float, ptile_transform,
@@ -377,7 +387,7 @@ class Sentle():
         catalog = pystac_client.Client.open(
             Variable("stac_endpoint").get(),
             modifier=planetary_computer.sign_inplace,
-        )
+            stac_io=self.get_stac_api_io())
         # retrieve items (possible across multiple sentinel tile) for specified
         # timestamp
         item_list = list(
@@ -665,7 +675,7 @@ class Sentle():
         catalog = pystac_client.Client.open(
             stac_endpoint,
             modifier=planetary_computer.sign_inplace,
-        )
+            stac_io=self.get_stac_api_io())
 
         # get all items within date range and area
         search = catalog.search(collections=["sentinel-2-l2a"],
