@@ -385,8 +385,7 @@ class Sentle():
 
         return height, width
 
-    @staticmethod
-    def open_catalog():
+    def open_catalog(self):
         return pystac_client.Client.open(
             Variable("stac_endpoint").get(),
             modifier=planetary_computer.sign_inplace,
@@ -437,6 +436,9 @@ class Sentle():
         assert timestamp.shape == (1, )
         timestamp = timestamp[0]
 
+        # compute bounds of ptile
+        ptile_bounds = self.bounds_from_dataarray(da, target_resolution)
+
         # open stac catalog
         catalog = self.open_catalog()
 
@@ -448,10 +450,7 @@ class Sentle():
                            bbox=warp.transform_bounds(
                                src_crs=target_crs,
                                dst_crs="EPSG:4326",
-                               left=bound_left,
-                               bottom=bound_bottom,
-                               right=bound_right,
-                               top=bound_top)).item_collection())
+                               *ptile_bounds).item_collection()))
 
         if len(item_list) == 0:
             # if there is nothing within the bounds and for that timestamp return.
@@ -469,8 +468,6 @@ class Sentle():
                                    fill_value=0,
                                    dtype=np.uint8)
 
-        # compute bounds of ptile
-        ptile_bounds = self.bounds_from_dataarray(da)
 
         # determine ptile dimensions and transform from bounds
         ptile_transform, ptile_height, ptile_width = transform_height_width_from_bounds_res(
@@ -558,7 +555,7 @@ class Sentle():
                                                     da.collection.data)))
 
     @staticmethod
-    def bounds_from_dataarray(da):
+    def bounds_from_dataarray(da, target_resolution):
         # (add target resolution to miny and maxx because we are using top-left
         # coordinates)
         bound_left = da.x.min().item()
@@ -586,7 +583,7 @@ class Sentle():
 
         # compute bounds of ptile
         bound_left, bound_bottom, bound_right, bound_top = self.bounds_from_dataarray(
-            da)
+            da, target_resolution)
 
         # extract the timestamp we are processing. there should only be one
         timestamp = da.time.data
