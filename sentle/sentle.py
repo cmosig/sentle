@@ -407,9 +407,18 @@ class Sentle():
                     S2_return_cloud_probabilities=S2_return_cloud_probabilities,
                     S2_compute_nbar=S2_compute_nbar)
 
+    @staticmethod
+    def open_catalog():
+        return pystac_client.Client.open(
+            Variable("stac_endpoint").get(),
+            modifier=planetary_computer.sign_inplace,
+            stac_io=self.get_stac_api_io())
+
     def process_ptile_S1(self, da: xr.DataArray, target_crs: CRS,
                          target_resolution: float):
-        return da
+
+        # open stac catalog
+        catalog = self.open_catalog()
 
     def process_ptile_S2(
         self,
@@ -423,6 +432,9 @@ class Sentle():
         S2_return_cloud_probabilities: bool = False,
         S2_compute_nbar: bool = False,
     ):
+
+        # TODO TEMP
+        return da
 
         # compute bounds of ptile
         # (add target resolution to miny and maxx because we are using top-left
@@ -438,10 +450,7 @@ class Sentle():
         timestamp = timestamp[0]
 
         # open stac catalog
-        catalog = pystac_client.Client.open(
-            Variable("stac_endpoint").get(),
-            modifier=planetary_computer.sign_inplace,
-            stac_io=self.get_stac_api_io())
+        catalog = self.open_catalog()
 
         # determine ptile dimensions and transform from bounds
         ptile_transform, ptile_height, ptile_width = transform_height_width_from_bounds_res(
@@ -712,10 +721,7 @@ class Sentle():
         # sign into planetary computer
         stac_endpoint = "https://planetarycomputer.microsoft.com/api/stac/v1"
         Variable("stac_endpoint").set(stac_endpoint)
-        catalog = pystac_client.Client.open(
-            stac_endpoint,
-            modifier=planetary_computer.sign_inplace,
-            stac_io=self.get_stac_api_io())
+        catalog = self.open_catalog()
 
         # get all items within date range and area
         collections = ["sentinel-2-l2a"]
