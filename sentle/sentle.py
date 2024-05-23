@@ -25,7 +25,8 @@ from urllib3 import Retry
 
 from .cloud_mask import compute_cloud_mask, load_cloudsen_model
 from .snow_mask import compute_potential_snow_layer
-from .utils import bounds_from_transform_height_width_res, S2_RAW_BANDS, S2_RAW_BAND_RESOLUTION
+from .utils import bounds_from_transform_height_width_res, transform_height_width_from_bounds_res
+from .const import S2_RAW_BANDS, S2_RAW_BAND_RESOLUTION
 
 
 class Sentle():
@@ -370,23 +371,22 @@ class Sentle():
         bound_right = da.x.max().item() + target_resolution
         bound_top = da.y.max().item()
 
-        # obtain sub-sentinel tiles based on supplied bounds and CRS
-        subtiles = self.obtain_subtiles(target_crs,
-                                        bound_left,
-                                        bound_bottom,
-                                        bound_right,
-                                        bound_top,
-                                        subtile_size=subtile_size)
-
         # extract the timestamp we are processing. there should only be one
         timestamp = da.time.data
         assert timestamp.shape == (1, )
         timestamp = timestamp[0]
 
+        # open stac catalog
         catalog = pystac_client.Client.open(
             Variable("stac_endpoint").get(),
             modifier=planetary_computer.sign_inplace,
             stac_io=self.get_stac_api_io())
+
+        # determine ptile dimensions and transform from bounds
+        ptile_transform, ptile_height, ptile_width = transform_height_width_from_bounds_res(
+            bound_left, bound_bottom, bound_right, bound_top,
+            target_resolution)
+
         # retrieve items (possible across multiple sentinel tile) for specified
         # timestamp
         item_list = list(
@@ -409,16 +409,6 @@ class Sentle():
         items["item"] = item_list
         items["tile"] = items["item"].apply(
             lambda x: x.properties["s2:mgrs_tile"])
-
-        # determine ptile transform from bounds
-        ptile_width = (bound_right - bound_left) / target_resolution
-        ptile_height = (bound_top - bound_bottom) / target_resolution
-        ptile_transform = transform.from_bounds(west=bound_left,
-                                                south=bound_bottom,
-                                                east=bound_right,
-                                                north=bound_top,
-                                                width=ptile_width,
-                                                height=ptile_height)
 
         # cloud classification layer is added later
         num_bands = da.shape[1]
@@ -445,10 +435,15 @@ class Sentle():
         cloudsen_model = load_cloudsen_model(
             cloud_classification_device) if cloud_classification else None
 
+        # obtain sub-sentinel2 tiles based on supplied bounds and CRS
+        subtiles = self.obtain_subtiles(target_crs,
+                                        bound_left,
+                                        bound_bottom,
+                                        bound_right,
+                                        bound_top,
+                                        subtile_size=subtile_size)
+
         subtile_array_bands = None
-
-        # TODO wait here is relative progress of store-map is much less than ptile
-
         for st in subtiles.itertuples(index=False, name="subtile"):
 
             # filter items by sentinel tile name
