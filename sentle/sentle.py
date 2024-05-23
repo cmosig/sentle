@@ -201,6 +201,39 @@ class Sentle():
                       allowed_methods=None)
         return StacApiIO(max_retries=retry)
 
+    @staticmethod
+    def calculate_aligned_transform(src_crs, dst_crs, height, width, left,
+                                    bottom, right, top, tres):
+        tf, repr_width, repr_height = warp.calculate_default_transform(
+            src_crs=src_crs,
+            dst_crs=dst_crs,
+            width=width,
+            height=height,
+            left=left,
+            bottom=bottom,
+            right=right,
+            top=top,
+            resolution=tres)
+
+        tf = Affine(
+            tf.a,
+            tf.b,
+            tf.c - (tf.c % tres),
+            tf.d,
+            tf.e,
+            # + target_resolution because upper left corner
+            tf.f - (tf.f % tres) + tres,
+            tf.g,
+            tf.h,
+            tf.i,
+        )
+
+        # include one more pixel because rounding down
+        repr_width += 1
+        repr_height += 1
+
+        return tf, repr_height, repr_width
+
     def process_S2_subtile(
             self, intersecting_windows, stac_item, timestamp,
             S2_subtile_size: int, target_crs: CRS, target_resolution: float,
@@ -280,7 +313,7 @@ class Sentle():
         # 3 reproject to target_crs for each band
         # determine transform --> round to target resolution so that reprojected
         # subtiles align across subtiles
-        subtile_repr_transform, subtile_repr_width, subtile_repr_height = warp.calculate_default_transform(
+        subtile_repr_transform, subtile_repr_height, subtile_repr_width = self.calculate_aligned_transform(
             src_crs=s2_crs,
             dst_crs=target_crs,
             width=subtile_array.shape[1],
@@ -289,25 +322,7 @@ class Sentle():
             bottom=subtile_bounds_utm[1],
             right=subtile_bounds_utm[2],
             top=subtile_bounds_utm[3],
-            resolution=target_resolution)
-        subtile_repr_transform = Affine(
-            subtile_repr_transform.a,
-            subtile_repr_transform.b,
-            subtile_repr_transform.c -
-            (subtile_repr_transform.c % target_resolution),
-            subtile_repr_transform.d,
-            subtile_repr_transform.e,
-            # + target_resolution because upper left corner
-            subtile_repr_transform.f -
-            (subtile_repr_transform.f % target_resolution) + target_resolution,
-            subtile_repr_transform.g,
-            subtile_repr_transform.h,
-            subtile_repr_transform.i,
-        )
-
-        # include one more pixel because rounding down
-        subtile_repr_width += 1
-        subtile_repr_height += 1
+            resolution=tres)
 
         # billinear reprojection for everything
         subtile_array_repr = np.empty(
@@ -370,6 +385,13 @@ class Sentle():
 
         return height, width
 
+    @staticmethod
+    def open_catalog():
+        return pystac_client.Client.open(
+            Variable("stac_endpoint").get(),
+            modifier=planetary_computer.sign_inplace,
+            stac_io=self.get_stac_api_io())
+
     def process_ptile(
         self,
         da: xr.DataArray,
@@ -407,18 +429,144 @@ class Sentle():
                     S2_return_cloud_probabilities=S2_return_cloud_probabilities,
                     S2_compute_nbar=S2_compute_nbar)
 
-    @staticmethod
-    def open_catalog():
-        return pystac_client.Client.open(
-            Variable("stac_endpoint").get(),
-            modifier=planetary_computer.sign_inplace,
-            stac_io=self.get_stac_api_io())
-
     def process_ptile_S1(self, da: xr.DataArray, target_crs: CRS,
                          target_resolution: float):
 
+        # extract the timestamp we are processing. there should only be one
+        timestamp = da.time.data
+        assert timestamp.shape == (1, )
+        timestamp = timestamp[0]
+
         # open stac catalog
         catalog = self.open_catalog()
+
+        # retrieve items (possible across multiple sentinel tile) for specified
+        # timestamp
+        item_list = list(
+            catalog.search(collections=["sentinel-1-rtc"],
+                           datetime=timestamp,
+                           bbox=warp.transform_bounds(
+                               src_crs=target_crs,
+                               dst_crs="EPSG:4326",
+                               left=bound_left,
+                               bottom=bound_bottom,
+                               right=bound_right,
+                               top=bound_top)).item_collection())
+
+        if len(item_list) == 0:
+            # if there is nothing within the bounds and for that timestamp return.
+            # possible and normal
+            return da
+
+        # intiate one array representing the entire subtile for that timestamp
+        tile_array = np.full(shape=(da.shape[1], da.shape[2], da.shape[3]),
+                             fill_value=0,
+                             dtype=np.float32)
+
+        # count how many values we add per pixel to compute mean later
+        tile_array_count = np.full(shape=(da.shape[1], da.shape[2],
+                                          da.shape[3]),
+                                   fill_value=0,
+                                   dtype=np.uint8)
+
+        # compute bounds of ptile
+        ptile_bounds = self.bounds_from_dataarray(da)
+
+        # determine ptile dimensions and transform from bounds
+        ptile_transform, ptile_height, ptile_width = transform_height_width_from_bounds_res(
+            *ptile_bounds, target_resolution)
+
+        for item in item_list:
+            # iterate through items and do windowed reading, reprojection, remember count
+            # convert ptile bounds to read window bounds in sentinel 1 tile
+            # determine transform using custom function (pull that out from the other function)
+            # reproject
+            # determine write window
+            # crop using our custom function
+            # aggregate in subtile array
+            for i, s1_asset in enumerate(da.band.data):
+                with rasterio.open(item.assets[s1_asset].href) as dr:
+                    # reproject ptile bounds to S1 tile CRS
+                    ptile_bounds_local_crs = warp.transform_bounds(
+                        target_crs, dr.crs, *ptile_bounds)
+                    # figure out which area of the image is interesting for us
+                    win = dr.window(*ptile_bounds_local_crs)
+                    # read windowed
+                    data = dr.read(indexes=1, window=win, out_dtype=np.float32)
+
+                    # compute aligned reprojection
+                    tile_repr_transform, tile_repr_height, tile_repr_width = self.calculate_aligned_transform(
+                        dr.crs, target_crs, data.shape[0], data.shape[1],
+                        *ptile_bounds_local_crs, target_resolution)
+
+                    data_repr = np.empty(
+                        (len(da.band.data), tile_repr_height, tile_repr_width),
+                        dtype=np.float32)
+
+                    # billinear reprojection for everything
+                    warp.reproject(source=data,
+                                   destination=data_repr,
+                                   src_transform=transform.from_bounds(
+                                       *ptile_bounds_local_crs,
+                                       height=win.height,
+                                       width=win.width),
+                                   src_crs=dr.crs,
+                                   dst_crs=target_crs,
+                                   src_nodata=dr.nodata,
+                                   dst_nodata=0,
+                                   dst_transform=tile_repr_transform,
+                                   resampling=Resampling.bilinear)
+
+                    # explicit clear
+                    del data
+
+                    # figure out where to write the subtile within the overall bounds
+                    # TODO is this correct??
+                    write_win = windows.from_bounds(
+                        *ptile_bounds, transform=ptile_transform
+                    ).round_offsets().round_lengths()
+
+                    write_win, local_win = self.recrop_write_window(
+                        write_win, ptile_height, ptile_width)
+                    data_repr = data_repr[local_win.row_off:local_win.height +
+                                          local_win.row_off,
+                                          local_win.col_off:local_win.col_off +
+                                          local_win.width]
+
+                    tile_array[:, write_win.row_off:write_win.row_off +
+                               write_win.height,
+                               write_win.col_off:write_win.col_off +
+                               write_win.width] += data_repr
+
+                    tile_array_count[:, write_win.row_off:write_win.row_off +
+                                     write_win.height,
+                                     write_win.col_off:write_win.col_off +
+                                     write_win.width] += ~(data_repr == 0)
+
+        with warnings.catch_warnings():
+            # filter out divide by zero warning, this is expected here
+            warnings.simplefilter("ignore")
+            tile_array /= tile_array_count
+
+        return xr.DataArray(data=tile_array,
+                            dims=["time", "band", "y", "x"],
+                            coords=dict(time=[timestamp],
+                                        band=da.band,
+                                        x=da.x,
+                                        y=da.y,
+                                        collection=("time",
+                                                    da.collection.data)))
+
+    @staticmethod
+    def bounds_from_dataarray(da):
+        # (add target resolution to miny and maxx because we are using top-left
+        # coordinates)
+        bound_left = da.x.min().item()
+        bound_bottom = da.y.min().item() - target_resolution
+        bound_right = da.x.max().item() + target_resolution
+        bound_top = da.y.max().item()
+
+        return (bound_left, bound_bottom, bound_right, bound_top)
 
     def process_ptile_S2(
         self,
@@ -437,12 +585,8 @@ class Sentle():
         return da
 
         # compute bounds of ptile
-        # (add target resolution to miny and maxx because we are using top-left
-        # coordinates)
-        bound_left = da.x.min().item()
-        bound_bottom = da.y.min().item() - target_resolution
-        bound_right = da.x.max().item() + target_resolution
-        bound_top = da.y.max().item()
+        bound_left, bound_bottom, bound_right, bound_top = self.bounds_from_dataarray(
+            da)
 
         # extract the timestamp we are processing. there should only be one
         timestamp = da.time.data
