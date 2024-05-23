@@ -330,7 +330,7 @@ class Sentle():
 
         # compute bounds in target crs based on rounded transform
         subtile_bounds_tcrs = bounds_from_transform_height_width_res(
-            transform=subtile_repr_transform,
+            tf=subtile_repr_transform,
             height=subtile_repr_height,
             width=subtile_repr_width,
             resolution=target_resolution)
@@ -353,6 +353,23 @@ class Sentle():
 
         return subtile_array_repr, write_win, band_names
 
+    @staticmethod
+    def height_width_from_bounds_res(left, bottom, right, top, res):
+        # determine width and height based on bounds and resolution
+        width, w_rem = divmod(abs(right - left), res)
+        height, h_rem = divmod(abs(top - bottom), res)
+
+        if h_rem > 0:
+            warnings.warn(
+                "Specified top/bottom bounds are not perfectly divisable by specified target_resolution. The resulting coverage will be slightly cropped"
+            )
+        if w_rem > 0:
+            warnings.warn(
+                "Specified left/right bounds are not perfectly divisable by specified target_resolution. The resulting coverage will be slightly cropped"
+            )
+
+        return height, width
+
     def process_ptile(
         self,
         da: xr.DataArray,
@@ -365,6 +382,48 @@ class Sentle():
         S2_return_cloud_probabilities: bool = False,
         S2_compute_nbar: bool = False,
     ):
+        """Passing chunk to either sentinel-1 or sentinel-2 processor"""
+
+        # check collection matches bands otherwise return
+        if da.collection.data[0] == "sentinel-1-rtc":
+            if ("vv" in da.band.data or "vh" in da.band.data):
+                return da
+            else:
+                return self.process_ptile_S1(da, target_crs, target_resolution)
+
+        if da.collection.data[0] == "sentinel-2-l2a":
+            if ("vv" in da.band.data and "vh" in da.band.data):
+                return da
+            else:
+                return self.process_ptile_S2(
+                    da=da,
+                    target_crs=target_crs,
+                    target_resolution=target_resolution,
+                    S2_cloud_classification=S2_cloud_classification,
+                    S2_cloud_classification_device=
+                    S2_cloud_classification_device,
+                    S2_subtile_size=S2_subtile_size,
+                    S2_mask_snow=S2_mask_snow,
+                    S2_return_cloud_probabilities=S2_return_cloud_probabilities,
+                    S2_compute_nbar=S2_compute_nbar)
+
+    def process_ptile_S1(self, da: xr.DataArray, target_crs: CRS,
+                         target_resolution: float):
+        return da
+
+    def process_ptile_S2(
+        self,
+        da: xr.DataArray,
+        target_crs: CRS,
+        target_resolution: float,
+        S2_cloud_classification_device: str,
+        S2_subtile_size: int = 732,
+        S2_mask_snow: bool = False,
+        S2_cloud_classification: bool = False,
+        S2_return_cloud_probabilities: bool = False,
+        S2_compute_nbar: bool = False,
+    ):
+
         # compute bounds of ptile
         # (add target resolution to miny and maxx because we are using top-left
         # coordinates)
@@ -547,7 +606,9 @@ class Sentle():
                                  coords=dict(time=[timestamp],
                                              band=subtile_array_bands,
                                              x=da.x,
-                                             y=da.y))
+                                             y=da.y,
+                                             collection=("time",
+                                                         da.collection.data)))
 
         # only return bands that have been requested
         return out_array.sel(band=da.band)
@@ -604,7 +665,7 @@ class Sentle():
 
         assert S2_subtile_size == 732, "Unsupported subtile size."
 
-        # TODO support to only download subset of bands (mutually exclusive with cloud classification and partially snow_mask)
+        # TODO support to only download subset of bands (mutually exclusive with cloud classification and partially snow_mask) -> or no sentinel 2 at all
 
         # derive bands to save from arguments
         bands_to_save = [
@@ -642,25 +703,11 @@ class Sentle():
         if S2_cloud_classification:
             bands_to_save.append("S2_cloud_classification")
         if S2_return_cloud_probabilities:
-            bands_to_save += [
-                "clear_sky_probability",
-                "thick_cloud_probability",
-                "thin_cloud_probability",
-                "shadow_probability",
-            ]
-
-        # determine width and height based on bounds and resolution
-        width, w_rem = divmod(abs(bound_right - bound_left), target_resolution)
-        height, h_rem = divmod(abs(bound_top - bound_bottom),
-                               target_resolution)
-        if h_rem > 0:
-            warnings.warn(
-                "Specified top/bottom bounds are not perfectly divisable by specified target_resolution. The resulting coverage will be slightly cropped"
-            )
-        if w_rem > 0:
-            warnings.warn(
-                "Specified left/right bounds are not perfectly divisable by specified target_resolution. The resulting coverage will be slightly cropped"
-            )
+            bands_to_save += S2_cloud_prob_bands
+        if S1_assets is not None:
+            assert len(set(S1_assets) -
+                       set(["vv", "vh"])) == 0, "Unsupported S1 bands."
+            bands_to_save += S1_assets
 
         # sign into planetary computer
         stac_endpoint = "https://planetarycomputer.microsoft.com/api/stac/v1"
@@ -671,7 +718,10 @@ class Sentle():
             stac_io=self.get_stac_api_io())
 
         # get all items within date range and area
-        search = catalog.search(collections=["sentinel-2-l2a"],
+        collections = ["sentinel-2-l2a"]
+        if S1_assets is not None:
+            collections.append("sentinel-1-rtc")
+        search = catalog.search(collections=collections,
                                 datetime=datetime,
                                 bbox=warp.transform_bounds(src_crs=target_crs,
                                                            dst_crs="EPSG:4326",
@@ -680,29 +730,41 @@ class Sentle():
                                                            right=bound_right,
                                                            top=bound_top))
 
-        timesteps = sorted(
-            list(set([i.datetime for i in search.item_collection()])))
+        # sort timesteps and filter duplicates -> multiple items can have the
+        # exact same timestamp
+        df = pd.DataFrame()
+        items = list(search.item_collection())
+        df["ts"] = [i.datetime for i in items]
+        df["collection"] = [i.collection_id for i in items]
+        df = df.drop_duplicates("ts")
+        assert df.shape[0] == df.drop_duplicates().shape[
+            0], "Never expected that images of S1 are exactly at the same time, please open issue."
 
+        height, width = self.height_width_from_bounds_res(
+            bound_left, bound_bottom, bound_right, bound_top,
+            target_resolution)
+
+        chunk_size_bands = len(bands_to_save) - len(S1_assets)
         # chunks with one per timestep -> many empty timesteps for specific areas,
         # because we have all the timesteps for Germany
-        # TODO do Dataset instead of Dataarray
         self.da = xr.DataArray(
             data=dask.array.full(
-                shape=(len(timesteps), len(bands_to_save), height, width),
-                chunks=(1, len(bands_to_save), processing_spatial_chunk_size,
+                shape=(df.shape[0], len(bands_to_save), height, width),
+                chunks=(1, chunk_size_bands, processing_spatial_chunk_size,
                         processing_spatial_chunk_size),
                 # needs to be float in order to store NaNs
                 dtype=np.float32,
                 fill_value=np.nan),
             dims=["time", "band", "y", "x"],
             coords=dict(
-                time=timesteps,
+                time=df["ts"].tolist(),
                 band=bands_to_save,
                 x=np.arange(bound_left, bound_right,
                             target_resolution).astype(np.float32),
                 # we do y-axis in reverse: top-left coordinate
                 y=np.arange(bound_top, bound_bottom,
-                            -target_resolution).astype(np.float32)))
+                            -target_resolution).astype(np.float32),
+                collection=("time", df["collection"].tolist())))
 
         self.da = self.da.map_blocks(
             self.process_ptile,
