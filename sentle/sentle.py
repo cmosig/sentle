@@ -23,7 +23,7 @@ from rasterio.enums import Resampling
 from shapely.geometry import Polygon, box
 from urllib3 import Retry
 
-from .cloud_mask import compute_cloud_mask, load_cloudsen_model
+from .cloud_mask import compute_cloud_mask, load_cloudsen_model, S2_cloud_prob_bands
 from .snow_mask import compute_potential_snow_layer
 from .utils import bounds_from_transform_height_width_res, transform_height_width_from_bounds_res
 from .const import S2_RAW_BANDS, S2_RAW_BAND_RESOLUTION
@@ -125,7 +125,7 @@ class Sentle():
 
     @staticmethod
     def obtain_subtiles(target_crs: CRS, left: float, bottom: float,
-                        right: float, top: float, subtile_size: int):
+                        right: float, top: float, S2_subtile_size: int):
         """Retrieves the sentinel subtiles that intersect the with the specified
         bounds. The bounds are interpreted based on the given target_crs.
         """
@@ -133,11 +133,11 @@ class Sentle():
         # TODO make it possible to not only use naive bounds but also MultiPolygons
 
         # check if supplied sub_tile_width makes sense
-        assert (subtile_size >= 16) and (
-            subtile_size <= 10980), "subtile_size needs to within 16 and 10980"
-        assert (
-            10980 %
-            subtile_size) == 0, "subtile_size needs to be a divisor of 10980"
+        assert (S2_subtile_size >= 16) and (
+            S2_subtile_size
+            <= 10980), "S2_subtile_size needs to within 16 and 10980"
+        assert (10980 % S2_subtile_size
+                ) == 0, "S2_subtile_size needs to be a divisor of 10980"
 
         # load sentinel grid
         s2grid = Variable("s2gridfile").get()
@@ -153,10 +153,10 @@ class Sentle():
         s2grid = s2grid[s2grid["geometry"].intersects(transformed_bounds)]
 
         general_subtile_windows = [
-            windows.Window(col_off, row_off, subtile_size, subtile_size)
+            windows.Window(col_off, row_off, S2_subtile_size, S2_subtile_size)
             for col_off, row_off in itertools.product(
-                np.arange(0, 10980, subtile_size),
-                np.arange(0, 10980, subtile_size))
+                np.arange(0, 10980, S2_subtile_size),
+                np.arange(0, 10980, S2_subtile_size))
         ]
 
         # reproject s2 footprint to local utm footprint
@@ -201,17 +201,18 @@ class Sentle():
                       allowed_methods=None)
         return StacApiIO(max_retries=retry)
 
-    def process_subtile(self, intersecting_windows, stac_item, timestamp,
-                        subtile_size: int, target_crs: CRS,
-                        target_resolution: float, ptile_transform,
-                        ptile_width: int, ptile_height: int, mask_snow: bool,
-                        cloud_classification: bool,
-                        return_cloud_probabilities: bool, compute_nbar: bool,
-                        cloud_classification_device: str, cloud_mask_model):
+    def process_S2_subtile(
+            self, intersecting_windows, stac_item, timestamp,
+            S2_subtile_size: int, target_crs: CRS, target_resolution: float,
+            ptile_transform, ptile_width: int, ptile_height: int,
+            S2_mask_snow: bool, S2_cloud_classification: bool,
+            S2_return_cloud_probabilities: bool, S2_compute_nbar: bool,
+            S2_cloud_classification_device: str, cloud_mask_model):
 
         # init array that needs to be filled
         subtile_array = np.empty(
-            (len(S2_RAW_BANDS), subtile_size, subtile_size), dtype=np.float32)
+            (len(S2_RAW_BANDS), S2_subtile_size, S2_subtile_size),
+            dtype=np.float32)
         band_names = S2_RAW_BANDS.copy()
 
         # save CRS of downloaded sentinel tiles
@@ -236,7 +237,8 @@ class Sentle():
                 # nearest-neighbor (default)
                 read_data = dr.read(indexes=1,
                                     window=read_window,
-                                    out_shape=(subtile_size, subtile_size),
+                                    out_shape=(S2_subtile_size,
+                                               S2_subtile_size),
                                     out_dtype=np.float32)
 
                 # harmonization
@@ -262,17 +264,17 @@ class Sentle():
                                             s2_tile_transform)
         assert (
             subtile_bounds_utm[2] - subtile_bounds_utm[0]
-        ) // 10 == subtile_size, "mismatch between subtile size and bounds on x-axis"
+        ) // 10 == S2_subtile_size, "mismatch between subtile size and bounds on x-axis"
         assert (
             subtile_bounds_utm[3] - subtile_bounds_utm[1]
-        ) // 10 == subtile_size, "mismatch between subtile size and bounds on y-axis"
+        ) // 10 == S2_subtile_size, "mismatch between subtile size and bounds on y-axis"
 
-        if cloud_classification or return_cloud_probabilities:
-            cloud_bands, result_probs = compute_cloud_mask(
+        if S2_cloud_classification or S2_return_cloud_probabilities:
+            result_probs = compute_cloud_mask(
                 subtile_array,
                 cloud_mask_model,
-                cloud_classification_device=cloud_classification_device)
-            band_names += cloud_bands
+                S2_cloud_classification_device=S2_cloud_classification_device)
+            band_names += S2_cloud_prob_bands
             subtile_array = np.concatenate([subtile_array, result_probs])
 
         # 3 reproject to target_crs for each band
@@ -315,8 +317,8 @@ class Sentle():
                        destination=subtile_array_repr,
                        src_transform=transform.from_bounds(
                            *subtile_bounds_utm,
-                           width=subtile_size,
-                           height=subtile_size),
+                           width=S2_subtile_size,
+                           height=S2_subtile_size),
                        src_crs=s2_crs,
                        dst_crs=target_crs,
                        src_nodata=0,
@@ -356,12 +358,12 @@ class Sentle():
         da: xr.DataArray,
         target_crs: CRS,
         target_resolution: float,
-        cloud_classification_device: str,
-        subtile_size: int = 732,
-        mask_snow: bool = False,
-        cloud_classification: bool = False,
-        return_cloud_probabilities: bool = False,
-        compute_nbar: bool = False,
+        S2_cloud_classification_device: str,
+        S2_subtile_size: int = 732,
+        S2_mask_snow: bool = False,
+        S2_cloud_classification: bool = False,
+        S2_return_cloud_probabilities: bool = False,
+        S2_compute_nbar: bool = False,
     ):
         # compute bounds of ptile
         # (add target resolution to miny and maxx because we are using top-left
@@ -412,11 +414,11 @@ class Sentle():
 
         # cloud classification layer is added later
         num_bands = da.shape[1]
-        if cloud_classification:
+        if S2_cloud_classification:
             num_bands -= 1
-        if mask_snow:
+        if S2_mask_snow:
             num_bands -= 1
-        if not return_cloud_probabilities and cloud_classification:
+        if not S2_return_cloud_probabilities and S2_cloud_classification:
             # we need the probs here, will remove when returning
             num_bands += 4
 
@@ -433,7 +435,8 @@ class Sentle():
 
         # load cloudsen model
         cloudsen_model = load_cloudsen_model(
-            cloud_classification_device) if cloud_classification else None
+            S2_cloud_classification_device
+        ) if S2_cloud_classification else None
 
         # obtain sub-sentinel2 tiles based on supplied bounds and CRS
         subtiles = self.obtain_subtiles(target_crs,
@@ -441,7 +444,7 @@ class Sentle():
                                         bound_bottom,
                                         bound_right,
                                         bound_top,
-                                        subtile_size=subtile_size)
+                                        S2_subtile_size=S2_subtile_size)
 
         subtile_array_bands = None
         for st in subtiles.itertuples(index=False, name="subtile"):
@@ -458,21 +461,21 @@ class Sentle():
             # sentinel2 repository
             stac_item = subdf["item"].iloc[0]
 
-            subtile_array_ret, write_win, subtile_array_bands = self.process_subtile(
+            subtile_array_ret, write_win, subtile_array_bands = self.process_S2_subtile(
                 intersecting_windows=st.intersecting_windows,
                 stac_item=stac_item,
                 timestamp=timestamp,
-                subtile_size=subtile_size,
+                S2_subtile_size=S2_subtile_size,
                 target_crs=target_crs,
                 target_resolution=target_resolution,
                 ptile_transform=ptile_transform,
                 ptile_width=ptile_width,
                 ptile_height=ptile_height,
-                mask_snow=mask_snow,
-                cloud_classification=cloud_classification,
-                return_cloud_probabilities=return_cloud_probabilities,
-                compute_nbar=compute_nbar,
-                cloud_classification_device=cloud_classification_device,
+                S2_mask_snow=S2_mask_snow,
+                S2_cloud_classification=S2_cloud_classification,
+                S2_return_cloud_probabilities=S2_return_cloud_probabilities,
+                S2_compute_nbar=S2_compute_nbar,
+                S2_cloud_classification_device=S2_cloud_classification_device,
                 cloud_mask_model=cloudsen_model)
 
             # also replace nan with 0 so that the mean computation works
@@ -492,17 +495,12 @@ class Sentle():
             warnings.simplefilter("ignore")
             subtile_array /= subtile_array_count
 
-        if cloud_classification:
-
-            # compute cloud classification layer
-            cloud_prob_bands = [
-                "clear_sky_probability", "thick_cloud_probability",
-                "thin_cloud_probability", "shadow_probability"
-            ]
+        # compute cloud classification layer
+        if S2_cloud_classification:
 
             # select cloud class based on maximum probability
             cloud_class = np.argmax(subtile_array[[
-                subtile_array_bands.index(band) for band in cloud_prob_bands
+                subtile_array_bands.index(band) for band in S2_cloud_prob_bands
             ]],
                                     axis=0,
                                     keepdims=True)
@@ -515,9 +513,9 @@ class Sentle():
             # save cloud classes layer
             subtile_array = np.concatenate([subtile_array, cloud_class],
                                            axis=0)
-            subtile_array_bands.append("cloud_classification")
+            subtile_array_bands.append("S2_cloud_classification")
 
-        if mask_snow:
+        if S2_mask_snow:
             subtile_array = np.concatenate([
                 subtile_array,
                 np.expand_dims(compute_potential_snow_layer(
@@ -563,13 +561,14 @@ class Sentle():
         bound_right: float,
         bound_top: float,
         datetime: DatetimeLike,
-        processing_tile_size: int = 4000,
-        subtile_size: int = 732,
-        mask_snow: bool = False,
-        cloud_classification: bool = False,
-        cloud_classification_device="cpu",
-        return_cloud_probabilities: bool = False,
-        compute_nbar: bool = False,
+        processing_spatial_chunk_size: int = 4000,
+        S1_assets: list[str] = ["vh", "vv"],
+        S2_subtile_size: int = 732,
+        S2_mask_snow: bool = False,
+        S2_cloud_classification: bool = False,
+        S2_cloud_classification_device="cpu",
+        S2_return_cloud_probabilities: bool = False,
+        S2_compute_nbar: bool = False,
     ):
         """
         Parameters
@@ -589,21 +588,21 @@ class Sentle():
             Top bound of area that is supposed to be covered. Unit is in `target_crs`.
         datetime : DatetimeLike
             Specifies time range of data to be downloaded. This is forwarded to the respective stac interface.
-        subtile_size : int, default=732
-            Specifies the size of each subtile. The maximum is the size of a sentinel tile (10980). If cloud filtering is enabled the minimum tilesize is 256, otherwise 16. It also needs to be a divisor of 10980, so that each sentinel tile can be segmented without overlaps. At the moment this package only supports the default subtile_size of 732.
-        mask_snow : bool, default=False
+        S2_subtile_size : int, default=732
+            Specifies the size of each subtile. The maximum is the size of a sentinel tile (10980). If cloud filtering is enabled the minimum tilesize is 256, otherwise 16. It also needs to be a divisor of 10980, so that each sentinel tile can be segmented without overlaps. At the moment this package only supports the default S2_subtile_size of 732.
+        S2_mask_snow : bool, default=False
             Whether to create a snow mask. Based on https://doi.org/10.1016/j.rse.2011.10.028.
-        cloud_classification : bool, default=False
+        S2_cloud_classification : bool, default=False
             Whether to create cloud classification layer, where `0=clear sky`, `2=thick cloud`, `3=thin cloud`, `4=shadow`.
-        cloud_classification_device : str, default="cpu"
+        S2_cloud_classification_device : str, default="cpu"
             On which device to run cloud classification. Either `cpu` or `cuda`.
-        return_cloud_probabilities : bool, default=False
+        S2_return_cloud_probabilities : bool, default=False
             Whether to return raw cloud probabilities which were used to determine the cloud classes.
-        compute_nbar : bool, default=False
+        S2_compute_nbar : bool, default=False
             Whether to compute NBAR using the sen2nbar package. Coming soon.
         """
 
-        assert subtile_size == 732, "Unsupported subtile size."
+        assert S2_subtile_size == 732, "Unsupported subtile size."
 
         # TODO support to only download subset of bands (mutually exclusive with cloud classification and partially snow_mask)
 
@@ -622,13 +621,13 @@ class Sentle():
             "B11",
             "B12",
         ]
-        if mask_snow:
+        if S2_mask_snow:
             bands_to_save.append("snow_mask")
-        if compute_nbar:
+        if S2_compute_nbar:
             warnings.warn(
                 "NBAR computation currently not supported. Coming Soon. Ignoring..."
             )
-            compute_nbar = False
+            S2_compute_nbar = False
             # bands_to_save += [
             #     "NBAR_B02",
             #     "NBAR_B03",
@@ -640,9 +639,9 @@ class Sentle():
             #     "NBAR_B11",
             #     "NBAR_B12",
             # ]
-        if cloud_classification:
-            bands_to_save.append("cloud_classification")
-        if return_cloud_probabilities:
+        if S2_cloud_classification:
+            bands_to_save.append("S2_cloud_classification")
+        if S2_return_cloud_probabilities:
             bands_to_save += [
                 "clear_sky_probability",
                 "thick_cloud_probability",
@@ -690,8 +689,8 @@ class Sentle():
         self.da = xr.DataArray(
             data=dask.array.full(
                 shape=(len(timesteps), len(bands_to_save), height, width),
-                chunks=(1, len(bands_to_save), processing_tile_size,
-                        processing_tile_size),
+                chunks=(1, len(bands_to_save), processing_spatial_chunk_size,
+                        processing_spatial_chunk_size),
                 # needs to be float in order to store NaNs
                 dtype=np.float32,
                 fill_value=np.nan),
@@ -710,12 +709,12 @@ class Sentle():
             kwargs=dict(
                 target_crs=target_crs,
                 target_resolution=target_resolution,
-                subtile_size=subtile_size,
-                mask_snow=mask_snow,
-                cloud_classification=cloud_classification,
-                return_cloud_probabilities=return_cloud_probabilities,
-                compute_nbar=compute_nbar,
-                cloud_classification_device=cloud_classification_device,
+                S2_subtile_size=S2_subtile_size,
+                S2_mask_snow=S2_mask_snow,
+                S2_cloud_classification=S2_cloud_classification,
+                S2_return_cloud_probabilities=S2_return_cloud_probabilities,
+                S2_compute_nbar=S2_compute_nbar,
+                S2_cloud_classification_device=S2_cloud_classification_device,
             ),
             template=self.da)
 
@@ -764,9 +763,9 @@ class Sentle():
         Parameters
         ----------
         use_cloud_class_mask : bool, default=True
-            Whether to use the generated cloud mask. Requires `cloud_classification=True` in `process()`.
+            Whether to use the generated cloud mask. Requires `S2_cloud_classification=True` in `process()`.
         use_snow_mask : bool, default=True  
-            Whether to use the generated snow mask. Requires `mask_snow=True` in `process()`.
+            Whether to use the generated snow mask. Requires `S2_mask_snow=True` in `process()`.
         cloud_mask_max_class : int, default=0
             Specifies the maximum acceptable class. `0` only uses clear sky. See notes in `process()` for other classes.
         """
@@ -776,14 +775,14 @@ class Sentle():
                 "use_snow_mask set to True for time composite, but no snow_mask in bands."
             )
 
-        if use_cloud_class_mask and "cloud_classification" not in self.da.band:
+        if use_cloud_class_mask and "S2_cloud_classification" not in self.da.band:
             warnings.warn(
-                "use_cloud_class_mask set to True for time composite, but no cloud_classification in bands."
+                "use_cloud_class_mask set to True for time composite, but no S2_cloud_classification in bands."
             )
 
         def _mask_chunk(dc):
             if use_cloud_class_mask:
-                cloud_mask = (dc.sel(band="cloud_classification")
+                cloud_mask = (dc.sel(band="S2_cloud_classification")
                               <= cloud_mask_max_class)
 
             if use_snow_mask:
@@ -825,8 +824,9 @@ class Sentle():
                         self.da.time.data.tolist()))))
 
         # do nan mean for each group
-        sub_bands = self.da.band[~((self.da.band == "snow_mask") |
-                                   (self.da.band == "cloud_classification"))]
+        sub_bands = self.da.band[~(
+            (self.da.band == "snow_mask") |
+            (self.da.band == "S2_cloud_classification"))]
 
         self.da = self.da.sel(band=sub_bands).groupby(index)
 

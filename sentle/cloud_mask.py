@@ -17,8 +17,14 @@ def load_cloudsen_model(device: str = "cpu"):
     return cloudsen_model
 
 
+S2_cloud_prob_bands = [
+    "S2_clear_sky_probability", "S2_thick_cloud_probability",
+    "S2_thin_cloud_probability", "S2_shadow_probability"
+]
+
+
 def compute_cloud_mask(array: np.array, model: torch.jit.ScriptModule,
-                       cloud_classification_device: str):
+                       S2_cloud_classification_device: str):
 
     assert array.shape == (
         12, 732,
@@ -41,14 +47,7 @@ def compute_cloud_mask(array: np.array, model: torch.jit.ScriptModule,
     with torch.no_grad():
         cloud_probabilities = model(tensor.type(torch.float32)).cpu().numpy()
 
-    band_names = [
-        "clear_sky_probability",
-        "thick_cloud_probability",
-        "thin_cloud_probability",
-        "shadow_probability",
-    ]
-
     # remove padding again
     cloud_probabilities = cloud_probabilities[0, :, 2:-2, 2:-2]
 
-    return band_names, cloud_probabilities
+    return cloud_probabilities
