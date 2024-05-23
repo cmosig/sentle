@@ -33,7 +33,7 @@ class Sentle():
     def __init__(self,
                  num_workers: int = 1,
                  threads_per_worker: int = 1,
-                 memory_limit_per_worker: str = "8GB",
+                 memory_limit_per_worker: str = "6GB",
                  dashboard_address: str = "127.0.0.1:9988"):
 
         if threads_per_worker > 1:

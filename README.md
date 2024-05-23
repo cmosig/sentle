@@ -41,7 +41,7 @@ pip install -e .
 
 ## Quick Tour
 
-**(1) Initiate the `Sentle` class.** This initiates a [dask](https://www.dask.org/) cluster (don't be scared of the word cluster, this can also mean 1 CPU core) in the background. Each worker needs at most 8GB RAM in default settings. 
+**(1) Initiate the `Sentle` class.** This initiates a [dask](https://www.dask.org/) cluster (don't be scared of the word cluster, this can also mean 1 CPU core) in the background. Each worker needs in practice about 2.3GB RAM in default settings.
 
 ```
 sen = Sentle(num_workers=3)
@@ -93,7 +93,7 @@ Upon class initialization, `sentle` prints a link to a [dask dashboard](https://
 A variety of other stats are also visible there. If you are working on a remote machine you may need to use [port forwarding](https://help.ubuntu.com/community/SSH/OpenSSH/PortForwarding) to access the remote dashboard.
 
 #### How do I scale this program?
-Increase the number of workers using the `num_workers` parameter when setting up the `Sentle` class. You should plan with about 8GB of memory per worker at peak times.
+Increase the number of workers using the `num_workers` parameter when setting up the `Sentle` class. You should give each worker 6GB of memory, even if it only needs 2.3GB in practise in default settings.
 
 ## Contributing
 
