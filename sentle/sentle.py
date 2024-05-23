@@ -442,7 +442,8 @@ class Sentle():
                                       dtype=np.uint8)
 
         # load cloudsen model
-        cloudsen_model = load_cloudsen_model(cloud_classification_device) if cloud_classification else None
+        cloudsen_model = load_cloudsen_model(
+            cloud_classification_device) if cloud_classification else None
 
         subtile_array_bands = None
 
@@ -803,7 +804,7 @@ class Sentle():
         # setting all values to nan that are snow/clouds
         self.da = self.da.map_blocks(_mask_chunk, template=self.da)
 
-    def create_time_composite(self, ndays: int = 7):
+    def create_time_composite(self, ndays: int = 7, method: str = "median"):
         """
         Creates a (nan)mean across each time interval for each band.
 
@@ -811,6 +812,8 @@ class Sentle():
         ----------
         ndays : int, default=7
             Number of days to perform mean on.
+        method : str, default="median"
+            Method to aggregate data across time. Can be either "mean" or "median".
         """
 
         # create groupby index where we place
@@ -829,5 +832,14 @@ class Sentle():
         # do nan mean for each group
         sub_bands = self.da.band[~((self.da.band == "snow_mask") |
                                    (self.da.band == "cloud_classification"))]
-        self.da = self.da.sel(band=sub_bands).groupby(index).mean(dim="time",
-                                                                  skipna=True)
+
+        self.da = self.da.sel(band=sub_bands).groupby(index)
+
+        if method == "median":
+            self.da = self.da.median(dim="time", skipna=True)
+        elif method == "mean":
+            self.da = self.da.mean(dim="time", skipna=True)
+        else:
+            raise NotImplementedError(
+                "Aggregation methods other than mean or median are not implemented."
+            )
