@@ -442,7 +442,7 @@ class Sentle():
                                       dtype=np.uint8)
 
         # load cloudsen model
-        cloudsen_model = load_cloudsen_model(cloud_classification_device)
+        cloudsen_model = load_cloudsen_model(cloud_classification_device) if cloud_classification else None
 
         subtile_array_bands = None
 
