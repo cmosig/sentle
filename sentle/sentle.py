@@ -25,7 +25,7 @@ from urllib3 import Retry
 
 from .cloud_mask import compute_cloud_mask, load_cloudsen_model
 from .snow_mask import compute_potential_snow_layer
-from .utils import bounds_from_transform_height_width_res
+from .utils import bounds_from_transform_height_width_res, S2_RAW_BANDS, S2_RAW_BAND_RESOLUTION
 
 
 class Sentle():
