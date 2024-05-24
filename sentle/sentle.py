@@ -322,7 +322,7 @@ class Sentle():
             bottom=subtile_bounds_utm[1],
             right=subtile_bounds_utm[2],
             top=subtile_bounds_utm[3],
-            resolution=tres)
+            tres=target_resolution)
 
         # billinear reprojection for everything
         subtile_array_repr = np.empty(
@@ -535,7 +535,7 @@ class Sentle():
                                           local_win.col_off:local_win.col_off +
                                           local_win.width]
 
-                    # save it 
+                    # save it
                     tile_array[i, write_win.row_off:write_win.row_off +
                                write_win.height,
                                write_win.col_off:write_win.col_off +
