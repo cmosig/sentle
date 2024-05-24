@@ -476,13 +476,7 @@ class Sentle():
             *ptile_bounds, target_resolution)
 
         for item in item_list:
-            # iterate through items and do windowed reading, reprojection, remember count
-            # convert ptile bounds to read window bounds in sentinel 1 tile
-            # determine transform using custom function (pull that out from the other function)
-            # reproject
-            # determine write window
-            # crop using our custom function
-            # aggregate in subtile array
+            # iterate through S1 assets
             for i, s1_asset in enumerate(da.band.data):
                 with rasterio.open(item.assets[s1_asset].href) as dr:
                     # reproject ptile bounds to S1 tile CRS
@@ -520,9 +514,17 @@ class Sentle():
                     # explicit clear
                     del data
 
+                    # compute bounds of reprojected tile in target crs
+                    # this will have nans and so on
+                    tile_bounds_trcs = bounds_from_transform_height_width_res(
+                        tf=tile_repr_transform,
+                        height=tile_repr_height,
+                        width=tile_repr_width,
+                        resolution=target_resolution)
+
                     # figure out where to write the subtile within the overall bounds
                     write_win = windows.from_bounds(
-                        *ptile_bounds, transform=ptile_transform
+                        *tile_bounds_trcs, transform=ptile_transform
                     ).round_offsets().round_lengths()
 
                     # determine crop to avoid out of bounds
