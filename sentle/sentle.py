@@ -521,24 +521,27 @@ class Sentle():
                     del data
 
                     # figure out where to write the subtile within the overall bounds
-                    # TODO is this correct??
                     write_win = windows.from_bounds(
                         *ptile_bounds, transform=ptile_transform
                     ).round_offsets().round_lengths()
 
+                    # determine crop to avoid out of bounds
                     write_win, local_win = self.recrop_write_window(
                         write_win, ptile_height, ptile_width)
 
+                    # crop reprojected downlaoded data
                     data_repr = data_repr[local_win.row_off:local_win.height +
                                           local_win.row_off,
                                           local_win.col_off:local_win.col_off +
                                           local_win.width]
 
+                    # save it 
                     tile_array[i, write_win.row_off:write_win.row_off +
                                write_win.height,
                                write_win.col_off:write_win.col_off +
                                write_win.width] += data_repr
 
+                    # save where we have NaNs
                     tile_array_count[i, write_win.row_off:write_win.row_off +
                                      write_win.height,
                                      write_win.col_off:write_win.col_off +
@@ -548,6 +551,9 @@ class Sentle():
             # filter out divide by zero warning, this is expected here
             warnings.simplefilter("ignore")
             tile_array /= tile_array_count
+
+        # replace zeros with nans
+        tile_array[tile_array == 0] = np.nan
 
         return xr.DataArray(data=np.expand_dims(tile_array, axis=0),
                             dims=["time", "band", "y", "x"],
@@ -581,9 +587,6 @@ class Sentle():
         S2_return_cloud_probabilities: bool = False,
         S2_compute_nbar: bool = False,
     ):
-
-        # TODO TEMP
-        return da
 
         # compute bounds of ptile
         bound_left, bound_bottom, bound_right, bound_top = self.bounds_from_dataarray(
