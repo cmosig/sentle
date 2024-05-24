@@ -407,7 +407,7 @@ class Sentle():
 
         # check collection matches bands otherwise return
         if da.collection.data[0] == "sentinel-1-rtc":
-            if ("vv" in da.band.data or "vh" in da.band.data):
+            if ("vv" not in da.band.data or "vh" not in da.band.data):
                 return da
             else:
                 return self.process_ptile_S1(da, target_crs, target_resolution)
@@ -450,7 +450,10 @@ class Sentle():
                            bbox=warp.transform_bounds(
                                src_crs=target_crs,
                                dst_crs="EPSG:4326",
-                               *ptile_bounds).item_collection()))
+                               left=ptile_bounds[0],
+                               bottom=ptile_bounds[1],
+                               right=ptile_bounds[2],
+                               top=ptile_bounds[3])).item_collection())
 
         if len(item_list) == 0:
             # if there is nothing within the bounds and for that timestamp return.
@@ -467,7 +470,6 @@ class Sentle():
                                           da.shape[3]),
                                    fill_value=0,
                                    dtype=np.uint8)
-
 
         # determine ptile dimensions and transform from bounds
         ptile_transform, ptile_height, ptile_width = transform_height_width_from_bounds_res(
@@ -487,26 +489,27 @@ class Sentle():
                     ptile_bounds_local_crs = warp.transform_bounds(
                         target_crs, dr.crs, *ptile_bounds)
                     # figure out which area of the image is interesting for us
-                    win = dr.window(*ptile_bounds_local_crs)
+                    read_win = dr.window(*ptile_bounds_local_crs)
                     # read windowed
-                    data = dr.read(indexes=1, window=win, out_dtype=np.float32)
+                    data = dr.read(indexes=1,
+                                   window=read_win,
+                                   out_dtype=np.float32)
 
                     # compute aligned reprojection
                     tile_repr_transform, tile_repr_height, tile_repr_width = self.calculate_aligned_transform(
                         dr.crs, target_crs, data.shape[0], data.shape[1],
                         *ptile_bounds_local_crs, target_resolution)
 
-                    data_repr = np.empty(
-                        (len(da.band.data), tile_repr_height, tile_repr_width),
-                        dtype=np.float32)
+                    data_repr = np.empty((tile_repr_height, tile_repr_width),
+                                         dtype=np.float32)
 
                     # billinear reprojection for everything
                     warp.reproject(source=data,
                                    destination=data_repr,
                                    src_transform=transform.from_bounds(
                                        *ptile_bounds_local_crs,
-                                       height=win.height,
-                                       width=win.width),
+                                       height=read_win.height,
+                                       width=read_win.width),
                                    src_crs=dr.crs,
                                    dst_crs=target_crs,
                                    src_nodata=dr.nodata,
@@ -525,17 +528,18 @@ class Sentle():
 
                     write_win, local_win = self.recrop_write_window(
                         write_win, ptile_height, ptile_width)
+
                     data_repr = data_repr[local_win.row_off:local_win.height +
                                           local_win.row_off,
                                           local_win.col_off:local_win.col_off +
                                           local_win.width]
 
-                    tile_array[:, write_win.row_off:write_win.row_off +
+                    tile_array[i, write_win.row_off:write_win.row_off +
                                write_win.height,
                                write_win.col_off:write_win.col_off +
                                write_win.width] += data_repr
 
-                    tile_array_count[:, write_win.row_off:write_win.row_off +
+                    tile_array_count[i, write_win.row_off:write_win.row_off +
                                      write_win.height,
                                      write_win.col_off:write_win.col_off +
                                      write_win.width] += ~(data_repr == 0)
@@ -545,7 +549,7 @@ class Sentle():
             warnings.simplefilter("ignore")
             tile_array /= tile_array_count
 
-        return xr.DataArray(data=tile_array,
+        return xr.DataArray(data=np.expand_dims(tile_array, axis=0),
                             dims=["time", "band", "y", "x"],
                             coords=dict(time=[timestamp],
                                         band=da.band,
