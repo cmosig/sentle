@@ -742,7 +742,7 @@ class Sentle():
                     B08=subtile_array[subtile_array_bands.index("B08")]),
                                axis=0)
             ])
-            subtile_array_bands.append("snow_mask")
+            subtile_array_bands.append("S2_snow_mask")
 
         # ... and set all such pixels to nan (of which some are already nan because
         # of divide by zero)
@@ -842,7 +842,7 @@ class Sentle():
             "B12",
         ]
         if S2_mask_snow:
-            bands_to_save.append("snow_mask")
+            bands_to_save.append("S2_snow_mask")
         if S2_compute_nbar:
             warnings.warn(
                 "NBAR computation currently not supported. Coming Soon. Ignoring..."
@@ -890,6 +890,8 @@ class Sentle():
         # exact same timestamp
         df = pd.DataFrame()
         items = list(search.item_collection())
+        # remove timezone, otherwise crash -> zarr caveat
+        # ... and use numpy.datetime64 with second precision
         df["ts"] = [i.datetime for i in items]
         df["collection"] = [i.collection_id for i in items]
         df = df.drop_duplicates("ts")
@@ -900,13 +902,18 @@ class Sentle():
             bound_left, bound_bottom, bound_right, bound_top,
             target_resolution)
 
-        chunk_size_bands = len(bands_to_save) - len(S1_assets)
+        # figure out band chunk shape
+        if S1_assets is not None:
+            band_chunks = len(bands_to_save) - len(S1_assets)
+        else:
+            band_chunks = (len(bands_to_save) - len(S1_assets), len(S1_assets))
+
         # chunks with one per timestep -> many empty timesteps for specific areas,
         # because we have all the timesteps for Germany
         self.da = xr.DataArray(
             data=dask.array.full(
                 shape=(df.shape[0], len(bands_to_save), height, width),
-                chunks=(1, chunk_size_bands, processing_spatial_chunk_size,
+                chunks=(1, band_chunks, processing_spatial_chunk_size,
                         processing_spatial_chunk_size),
                 # needs to be float in order to store NaNs
                 dtype=np.float32,
@@ -936,6 +943,14 @@ class Sentle():
             ),
             template=self.da)
 
+        # remove timezone, otherwise crash -> zarr caveat
+        # ... and use numpy.datetime64 with second precision
+        self.da.assign_coords(
+            dict(time=[
+                pd.Timestamp(i.replace(tzinfo=None)).to_datetime64()
+                for i in self.da.time.data
+            ]))
+
     def save_as_zarr(self, path: str):
         """
         Triggers dask compute and saves chunks whenever they have been
@@ -952,13 +967,6 @@ class Sentle():
             print("No data proccessed, nothing to save.")
             return
 
-        # remove timezone, otherwise crash -> zarr caveat
-        ts_new = np.array(
-            list(
-                map(lambda t: pd.Timestamp.fromtimestamp(t.timestamp()),
-                    self.da.time.data)))
-        self.da = self.da.assign_coords(dict(time=ts_new))
-
         # NOTE the compression may not be optimal, need to benchmark
         store = zarr.storage.DirectoryStore(path, dimension_separator=".")
         self.da.rename("S2").to_zarr(store=store,
@@ -974,7 +982,11 @@ class Sentle():
     def mask_array(self,
                    use_cloud_class_mask: bool = True,
                    use_snow_mask: bool = True,
-                   cloud_mask_max_class: int = 0):
+                   cloud_mask_max_class: int = 0,
+                   bands_to_mask: list[str] = [
+                       'B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08',
+                       'B8A', 'B09', 'B11', 'B12'
+                   ]):
         """
         Replaces pixels with clouds or snow with `np.nan`. Extends dask graph after calling `process()`.
 
@@ -988,7 +1000,7 @@ class Sentle():
             Specifies the maximum acceptable class. `0` only uses clear sky. See notes in `process()` for other classes.
         """
 
-        if use_snow_mask and "snow_mask" not in self.da.band:
+        if use_snow_mask and "S2_snow_mask" not in self.da.band:
             warnings.warn(
                 "use_snow_mask set to True for time composite, but no snow_mask in bands."
             )
@@ -999,15 +1011,27 @@ class Sentle():
             )
 
         def _mask_chunk(dc):
+            band_intersection = set(dc.band.data).intersection(
+                set(bands_to_mask))
+            if len(band_intersection) == 0:
+                return dc
+
             if use_cloud_class_mask:
+                assert "S2_cloud_classification" in dc.band.data, "A chunk where cloud masking is supposed to be applied, but no cloud class layer exists. Please open GitHub issue."
+
                 cloud_mask = (dc.sel(band="S2_cloud_classification")
                               <= cloud_mask_max_class)
 
             if use_snow_mask:
-                snow_mask = (dc.sel(band="snow_mask") == 1)
+                assert "S2_snow_mask" in dc.band.data, "A chunk where snow masking is supposed to be applied, but no snow layer exists. Bug. Please open GitHub issue."
+
+                snow_mask = (dc.sel(band="S2_snow_mask") == 1)
 
                 if use_cloud_class_mask:
                     mask = snow_mask & cloud_mask
+                else:
+                    mask = snow_mask
+
             else:
                 mask = cloud_mask
 
@@ -1016,7 +1040,7 @@ class Sentle():
         # setting all values to nan that are snow/clouds
         self.da = self.da.map_blocks(_mask_chunk, template=self.da)
 
-    def create_time_composite(self, ndays: int = 7, method: str = "median"):
+    def create_time_composite(self, freq: str = "7d", method: str = "median"):
         """
         Creates a (nan)mean across each time interval for each band.
 
@@ -1034,20 +1058,17 @@ class Sentle():
             dims="time",
             data=np.array(
                 list(
-                    map(
-                        lambda x: pd.Timestamp.fromtimestamp(
-                            (x.timestamp() -
-                             (x.timestamp() % (seconds_in_day * ndays))) + (
-                                 (seconds_in_day / 2) * ndays)),
-                        self.da.time.data.tolist()))))
+                    map(lambda x: pd.Timestamp(x).round(freq).to_datetime64(),
+                        self.da.time.data))))
 
-        # do nan mean for each group
+        # drop cloud / snow
         sub_bands = self.da.band[~(
-            (self.da.band == "snow_mask") |
+            (self.da.band == "S2_snow_mask") |
             (self.da.band == "S2_cloud_classification"))]
 
         self.da = self.da.sel(band=sub_bands).groupby(index)
 
+        # do nan mean/median for each group
         if method == "median":
             self.da = self.da.median(dim="time", skipna=True)
         elif method == "mean":
