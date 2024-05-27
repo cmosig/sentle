@@ -945,7 +945,7 @@ class Sentle():
 
         # remove timezone, otherwise crash -> zarr caveat
         # ... and use numpy.datetime64 with second precision
-        self.da.assign_coords(
+        self.da = self.da.assign_coords(
             dict(time=[
                 pd.Timestamp(i.replace(tzinfo=None)).to_datetime64()
                 for i in self.da.time.data
@@ -1052,15 +1052,6 @@ class Sentle():
             Method to aggregate data across time. Can be either "mean" or "median".
         """
 
-        # create groupby index where we place
-        seconds_in_day = 86400
-        index = xr.IndexVariable(
-            dims="time",
-            data=np.array(
-                list(
-                    map(lambda x: pd.Timestamp(x).round(freq).to_datetime64(),
-                        self.da.time.data))))
-
         # drop cloud / snow
         sub_bands = self.da.band[~(
             (self.da.band == "S2_snow_mask") |
@@ -1070,7 +1061,16 @@ class Sentle():
         # save chunk layout to apply it after aggregation again
         chunks_before_groupby = self.da.chunks
 
-        # croup by rounded timestamps
+        # create groupby index where we place
+        seconds_in_day = 86400
+        index = xr.IndexVariable(
+            dims="time",
+            data=np.array(
+                list(
+                    map(lambda x: pd.Timestamp(x).round(freq).to_datetime64(),
+                        self.da.time.data))))
+
+        # group by rounded timestamps
         self.da = self.da.groupby(index)
 
         # do nan mean/median for each group
@@ -1084,4 +1084,6 @@ class Sentle():
             )
 
         # rechunk to original format
-        self.da = self.da.chunk((1, *chunks_before_groupby[1:]))
+        self.da = self.da.chunk(
+            (1, sum(chunks_before_groupby[1]), chunks_before_groupby[2],
+             chunks_before_groupby[3]))
