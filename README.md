@@ -25,7 +25,7 @@ detection, snow masking, harmonization, merging, and temporal composites.</em>
 ## Prerequisites
 
 If you download larger areas or longer timeseries you'll need to obtain a
-subscription key from [Planetary Computer](https://planetarycomputer.microsoft.com/account/request). 
+subscription key from [Planetary Computer](https://planetarycomputer.microsoft.com/). 
 Configure it in your shell with: `export PC_SDK_SUBSCRIPTION_KEY=xxxxyourkeyxxxx`
 
 ## Installing
