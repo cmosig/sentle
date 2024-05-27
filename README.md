@@ -67,7 +67,7 @@ sen.process(
     bound_right=957630,
     bound_top=6134550,
     target_resolution=10,
-    datetime="2023-08-01/2023-08-07",
+    datetime="2023-06-01/2023-06-14",
     S2_mask_snow=True,
     S2_cloud_classification=True,
     S2_cloud_classification_device="cuda",
@@ -88,6 +88,8 @@ If temporal accuracy down to a single day is not relevant to your project, this 
 sen.create_time_composite(freq="14d")
 ```
 
+Note: this step is not stable at the moment, likely because it is working across chunks. It works fine for <1GiB cubes, but may strain memory with larger cubes.  
+
 **(5) Save to zarr.**
 This executes the built-up dask graph and saves the data to an optimized Zarr format.  
 ```
@@ -100,6 +102,8 @@ Alternatively, you can call `sen.da.compute()` and use the generated cube direct
 #### Where can I watch the progress of the download?
 Upon class initialization, `sentle` prints a link to a [dask dashboard](https://docs.dask.org/en/latest/dashboard.html). Check the bottom right pane in the Status tab for a progress bar. 
 A variety of other stats are also visible there. If you are working on a remote machine you may need to use [port forwarding](https://help.ubuntu.com/community/SSH/OpenSSH/PortForwarding) to access the remote dashboard.
+![image](https://github.com/cmosig/sentle/assets/32590522/c20516b5-7a9e-4e99-953a-9c8325edea7b)
+
 
 #### How do I scale this program?
 Increase the number of workers using the `num_workers` parameter when setting up the `Sentle` class. You should give each worker 6GB of memory, even if it only needs 3GB in practise in default settings.
