@@ -1061,6 +1061,10 @@ class Sentle():
         # save chunk layout to apply it after aggregation again
         chunks_before_groupby = self.da.chunks
 
+        # create on chunk per band
+        self.da = self.da.chunk(
+            (1, 1, chunks_before_groupby[2], chunks_before_groupby[3]))
+
         # create groupby index where we place
         seconds_in_day = 86400
         index = xr.IndexVariable(
