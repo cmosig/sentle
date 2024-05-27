@@ -57,7 +57,7 @@ The below code sets up the dask task graph and saves a lazy dask array internall
 
 The resulting dask array has the shape `(#timesteps, #bands, #pixelsy, #pixelsx)`. There is one timestep for each timestamp where there is data available anywhere within the specified bounding box. This will result in spatially very sparse timesteps and handled internally.
 
-CRS: For local studies, I recommend the local [UTM zone](https://www.dmap.co.uk/utmworld.htm). For continental-scale studies, you may want to use EPSG:8857 or EPSG:3857. 
+CRS: For local studies, I recommend the local [UTM zone](https://www.dmap.co.uk/utmworld.htm) and pick the [EPSG code](https://docs.up42.com/data/reference/utm). For continental-scale studies, you may want to use EPSG:8857 or EPSG:3857. 
 
 ```
 sen.process(
