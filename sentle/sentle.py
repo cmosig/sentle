@@ -904,9 +904,9 @@ class Sentle():
 
         # figure out band chunk shape
         if S1_assets is not None:
-            band_chunks = len(bands_to_save) - len(S1_assets)
-        else:
             band_chunks = (len(bands_to_save) - len(S1_assets), len(S1_assets))
+        else:
+            band_chunks = len(bands_to_save)
 
         # chunks with one per timestep -> many empty timesteps for specific areas,
         # because we have all the timesteps for Germany
@@ -1065,8 +1065,13 @@ class Sentle():
         sub_bands = self.da.band[~(
             (self.da.band == "S2_snow_mask") |
             (self.da.band == "S2_cloud_classification"))]
+        self.da = self.da.sel(band=sub_bands)
 
-        self.da = self.da.sel(band=sub_bands).groupby(index)
+        # save chunk layout to apply it after aggregation again
+        chunks_before_groupby = self.da.chunks
+
+        # croup by rounded timestamps
+        self.da = self.da.groupby(index)
 
         # do nan mean/median for each group
         if method == "median":
@@ -1077,3 +1082,6 @@ class Sentle():
             raise NotImplementedError(
                 "Aggregation methods other than mean or median are not implemented."
             )
+
+        # rechunk to original format
+        self.da = self.da.chunk((1, *chunks_before_groupby[1:]))
