@@ -969,11 +969,11 @@ class Sentle():
 
         # NOTE the compression may not be optimal, need to benchmark
         store = zarr.storage.DirectoryStore(path, dimension_separator=".")
-        self.da.rename("S2").to_zarr(store=store,
+        self.da.rename("sentle").to_zarr(store=store,
                                      mode="w-",
                                      compute=True,
                                      encoding={
-                                         "S2": {
+                                         "sentle": {
                                              "write_empty_chunks": False,
                                              "compressor": Blosc(cname="lz4"),
                                          }
@@ -1078,14 +1078,18 @@ class Sentle():
         self.da = self.da.groupby(index)
 
         # do nan mean/median for each group
-        if method == "median":
-            self.da = self.da.median(dim="time", skipna=True)
-        elif method == "mean":
-            self.da = self.da.mean(dim="time", skipna=True)
-        else:
-            raise NotImplementedError(
-                "Aggregation methods other than mean or median are not implemented."
-            )
+        with warnings.catch_warnings():
+            # this is expected, no warning needed
+            warnings.filterwarnings('ignore', r'All-NaN (slice|axis) encountered')
+
+            if method == "median":
+                self.da = self.da.median(dim="time", skipna=True)
+            elif method == "mean":
+                self.da = self.da.mean(dim="time", skipna=True)
+            else:
+                raise NotImplementedError(
+                    "Aggregation methods other than mean or median are not implemented."
+                )
 
         # rechunk to original format
         self.da = self.da.chunk(
