@@ -41,7 +41,7 @@ def compute_cloud_mask(array: np.array, model: torch.jit.ScriptModule,
     tensor = torch.from_numpy(array) / 10000
 
     # move to device
-    tensor = tensor.to(cloud_classification_device)
+    tensor = tensor.to(S2_cloud_classification_device)
 
     # Compute the cloud mask
     with torch.no_grad():
