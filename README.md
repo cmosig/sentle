@@ -73,6 +73,10 @@ sen.process(
     S2_cloud_classification_device="cuda",
     S1_assets=["vv", "vh"])
 ```
+<p align="center">
+<img src="https://github.com/cmosig/sentle/assets/32590522/1da22165-9fef-480f-8643-88ba58c18574" width="600">
+</p>
+
 **(3) (Optional) Mask out clouds and snow (extends task graph).** 
 
 This removes clouds/snow based on the generated masks, i.e., setting the respective pixels to `nan`.
@@ -107,6 +111,9 @@ A variety of other stats are also visible there. If you are working on a remote 
 
 #### How do I scale this program?
 Increase the number of workers using the `num_workers` parameter when setting up the `Sentle` class. You should give each worker 6GB of memory, even if it only needs 3GB in practise in default settings.
+
+#### My dask graph is too big, what do I do?
+Increase the `processing_spatial_chunk_size` from `4000` to something higher in the `process` function. This will increase spatial chunk sizes, but will also increase worker memory requirements. Increase worker memory with `memory_limit_per_worker` when initiating the `Sentle` object.
 
 ## Contributing
 
