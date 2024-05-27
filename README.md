@@ -45,6 +45,9 @@ pip install -e .
 **(1) Initiate the `Sentle` class.** This initiates a [dask](https://www.dask.org/) cluster (don't be scared of the word cluster, this can also mean 1 CPU core) in the background. Each worker needs in practice about 3GB RAM in default settings.
 
 ```
+from sentle.sentle import Sentle
+from rasterio.crs import CRS
+
 sen = Sentle(num_workers=3)
 ```
 
@@ -63,10 +66,11 @@ sen.process(
     bound_bottom=6111250,
     bound_right=957630,
     bound_top=6134550,
+    target_resolution=10,
     datetime="2023-08-01/2023-08-07",
     S2_mask_snow=True,
     S2_cloud_classification=True,
-    S2_cloud_classification_device="cuda"
+    S2_cloud_classification_device="cuda",
     S1_assets=["vv", "vh"])
 ```
 **(3) (Optional) Mask out clouds and snow (extends task graph).** 
