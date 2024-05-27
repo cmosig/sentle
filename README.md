@@ -25,7 +25,7 @@ detection, snow masking, harmonization, merging, and temporal composites.</em>
 ## Prerequisites
 
 If you download larger areas or longer timeseries you'll need to obtain a
-subscription key from [Planetary Computer](https://planetarycomputer.microsoft.com/account/request). 
+subscription key from [Planetary Computer](https://planetarycomputer.microsoft.com/). 
 Configure it in your shell with: `export PC_SDK_SUBSCRIPTION_KEY=xxxxyourkeyxxxx`
 
 ## Installing
@@ -92,7 +92,7 @@ If temporal accuracy down to a single day is not relevant to your project, this 
 sen.create_time_composite(freq="14d")
 ```
 
-Note: this step is not stable at the moment, likely because it is working across chunks. It works fine for <1GiB cubes, but may strain memory with larger cubes.  
+Note: this step is not stable at the moment and consumes more memory than I'd like. If you happen to run into crashes because workers run out of memory, try to reduce the `processing_spatial_chunk_size` to 2000 in the `process` function.  
 
 **(5) Save to zarr.**
 This executes the built-up dask graph and saves the data to an optimized Zarr format.  
