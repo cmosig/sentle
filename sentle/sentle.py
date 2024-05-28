@@ -208,7 +208,6 @@ def process_S2_subtile(intersecting_windows, stac_item, timestamp,
                        target_crs: CRS, target_resolution: float,
                        ptile_transform, ptile_width: int, ptile_height: int,
                        S2_mask_snow: bool, S2_cloud_classification: bool,
-                       S2_return_cloud_probabilities: bool,
                        S2_compute_nbar: bool,
                        S2_cloud_classification_device: str, cloud_mask_model):
 
@@ -270,7 +269,7 @@ def process_S2_subtile(intersecting_windows, stac_item, timestamp,
         subtile_bounds_utm[3] - subtile_bounds_utm[1]
     ) // 10 == S2_subtile_size, "mismatch between subtile size and bounds on y-axis"
 
-    if S2_cloud_classification or S2_return_cloud_probabilities:
+    if S2_cloud_classification:
         result_probs = compute_cloud_mask(
             subtile_array,
             cloud_mask_model,
@@ -364,6 +363,10 @@ def process_ptile(
     target_crs: CRS,
     target_resolution: float,
     S2_cloud_classification_device: str,
+    time_composite_freq: str,
+    processing_spatial_chunk_size: int,
+    S2_apply_snow_mask: bool,
+    S2_apply_cloud_mask: bool,
     S2_mask_snow: bool = False,
     S2_cloud_classification: bool = False,
     S2_return_cloud_probabilities: bool = False,
@@ -371,26 +374,26 @@ def process_ptile(
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
-    # check collection matches bands otherwise return
-    if da.collection.data[0] == "sentinel-1-rtc":
-        if ("vv" not in da.band.data or "vh" not in da.band.data):
-            return da
-        else:
-            return process_ptile_S1(da, target_crs, target_resolution)
+    # TODO add assert to mutually exclude chunks where both s1 and s2 bands are present
 
-    if da.collection.data[0] == "sentinel-2-l2a":
-        if ("vv" in da.band.data and "vh" in da.band.data):
-            return da
-        else:
-            return process_ptile_S2(
-                da=da,
-                target_crs=target_crs,
-                target_resolution=target_resolution,
-                S2_cloud_classification=S2_cloud_classification,
-                S2_cloud_classification_device=S2_cloud_classification_device,
-                S2_mask_snow=S2_mask_snow,
-                S2_return_cloud_probabilities=S2_return_cloud_probabilities,
-                S2_compute_nbar=S2_compute_nbar)
+    # check collection matches bands otherwise return
+    if ("vv" in da.band.data or "vh" in da.band.data):
+        return process_ptile_S1(da, target_crs, target_resolution,
+                                time_composite_freq)
+    else:
+        return process_ptile_S2_dispatcher(
+            da=da,
+            target_crs=target_crs,
+            target_resolution=target_resolution,
+            processing_spatial_chunk_size=processing_spatial_chunk_size,
+            S2_cloud_classification=S2_cloud_classification,
+            S2_cloud_classification_device=S2_cloud_classification_device,
+            S2_mask_snow=S2_mask_snow,
+            S2_return_cloud_probabilities=S2_return_cloud_probabilities,
+            S2_compute_nbar=S2_compute_nbar,
+            time_composite_freq=time_composite_freq,
+            S2_apply_snow_mask=S2_apply_snow_mask,
+            S2_apply_cloud_mask=S2_apply_cloud_mask)
 
 
 def process_ptile_S1(da: xr.DataArray, target_crs: CRS,
@@ -541,11 +544,15 @@ def bounds_from_dataarray(da, target_resolution):
     return (bound_left, bound_bottom, bound_right, bound_top)
 
 
-def process_ptile_S2(
+def process_ptile_S2_dispatcher(
     da: xr.DataArray,
     target_crs: CRS,
     target_resolution: float,
     S2_cloud_classification_device: str,
+    processing_spatial_chunk_size: int,
+    time_composite_freq: str,
+    S2_apply_snow_mask: bool,
+    S2_apply_cloud_mask: bool,
     S2_mask_snow: bool = False,
     S2_cloud_classification: bool = False,
     S2_return_cloud_probabilities: bool = False,
@@ -556,23 +563,32 @@ def process_ptile_S2(
     bound_left, bound_bottom, bound_right, bound_top = bounds_from_dataarray(
         da, target_resolution)
 
-    # extract the timestamp we are processing. there should only be one
-    timestamp = da.time.data
-    assert timestamp.shape == (1, )
-    timestamp = timestamp[0]
-
     # open stac catalog
     catalog = open_catalog()
+
+    # obtain sub-sentinel2 tiles based on supplied bounds and CRS
+    subtiles = obtain_subtiles(target_crs, bound_left, bound_bottom,
+                               bound_right, bound_top)
 
     # determine ptile dimensions and transform from bounds
     ptile_transform, ptile_height, ptile_width = transform_height_width_from_bounds_res(
         bound_left, bound_bottom, bound_right, bound_top, target_resolution)
 
+    # timestamp
+    if time_composite_freq is None:
+        datetime_range = da.time.data[0]
+    else:
+        timestamp_center = da.time.data[0]
+        datetime_range = [
+            timestamp_center - (pd.Timedelta(time_composite_freq) / 2),
+            timestamp_center + (pd.Timedelta(time_composite_freq) / 2)
+        ]
+
     # retrieve items (possible across multiple sentinel tile) for specified
     # timestamp
     item_list = list(
         catalog.search(collections=["sentinel-2-l2a"],
-                       datetime=timestamp,
+                       datetime=datetime_range,
                        bbox=warp.transform_bounds(
                            src_crs=target_crs,
                            dst_crs="EPSG:4326",
@@ -581,46 +597,149 @@ def process_ptile_S2(
                            right=bound_right,
                            top=bound_top)).item_collection())
 
-    if len(item_list) == 0:
-        # if there is nothing within the bounds and for that timestamp return.
-        # possible and normal
-        return da
-
     items = pd.DataFrame()
     items["item"] = item_list
     items["tile"] = items["item"].apply(lambda x: x.properties["s2:mgrs_tile"])
-
-    # cloud classification layer is added later
-    num_bands = da.shape[1]
-    if S2_cloud_classification:
-        num_bands -= 1
-    if S2_mask_snow:
-        num_bands -= 1
-    if not S2_return_cloud_probabilities and S2_cloud_classification:
-        # we need the probs here, will remove when returning
-        num_bands += 4
-
-    # intiate one array representing the entire subtile for that timestamp
-    subtile_array = np.full(shape=(num_bands, da.shape[2], da.shape[3]),
-                            fill_value=0,
-                            dtype=np.float32)
-
-    # count how many values we add per pixel to compute mean later
-    subtile_array_count = np.full(shape=(num_bands, da.shape[2], da.shape[3]),
-                                  fill_value=0,
-                                  dtype=np.uint8)
+    items["ts"] = items["item"].apply(lambda x: x.datetime)
 
     # load cloudsen model
     cloudsen_model = load_cloudsen_model(
         S2_cloud_classification_device) if S2_cloud_classification else None
 
-    # obtain sub-sentinel2 tiles based on supplied bounds and CRS
-    subtiles = obtain_subtiles(target_crs, bound_left, bound_bottom,
-                               bound_right, bound_top)
+    # intiate one array representing the entire subtile for that timestamp
+    num_bands = da.shape[1]
+
+    ptile_array = np.full(shape=(num_bands, da.shape[2], da.shape[3]),
+                          fill_value=0,
+                          dtype=np.float32)
+
+    # count how many values we add per pixel to compute mean later
+    ptile_array_count = np.full(shape=(num_bands, da.shape[2], da.shape[3]),
+                                fill_value=0,
+                                dtype=np.uint8)
+
+    ptile_array_bands = None
+    timestamps_it = items["ts"].drop_duplicates().tolist()
+    assert (len(timestamps_it) == 1 and time_composite_freq is None) or (
+        len(timestamps_it) >= 1 and time_composite_freq is not None)
+    for ts in timestamps_it:
+        ptile_timestamp, ptile_array_bands = process_ptile_S2(
+            timestamp=ts,
+            target_crs=target_crs,
+            target_resolution=target_resolution,
+            S2_cloud_classification=S2_cloud_classification,
+            S2_cloud_classification_device=S2_cloud_classification_device,
+            S2_mask_snow=S2_mask_snow,
+            S2_return_cloud_probabilities=S2_return_cloud_probabilities,
+            S2_compute_nbar=S2_compute_nbar,
+            processing_spatial_chunk_size=processing_spatial_chunk_size,
+            subtiles=subtiles,
+            catalog=catalog,
+            ptile_transform=ptile_transform,
+            ptile_width=ptile_width,
+            ptile_height=ptile_height,
+            cloudsen_model=cloudsen_model,
+            items=items[items["ts"] == ts])
+
+        # apply masks and drop classification layers if doing temporal aggregation
+        if S2_apply_snow_mask:
+            snow_index = ptile_array_bands.index("S2_snow_mask")
+            ptile_timestamp *= ptile_timestamp[snow_index]
+
+            if time_composite_freq is not None:
+                ptile_timestamp = np.delete(ptile_timestamp,
+                                            snow_index,
+                                            axis=0)
+
+        if S2_apply_cloud_mask:
+            cloud_index = ptile_array_bands.index("S2_cloud_classification")
+            ptile_timestamp *= (ptile_timestamp[cloud_index] > 0)
+
+            if time_composite_freq is not None:
+                ptile_timestamp = np.delete(ptile_timestamp,
+                                            cloud_index,
+                                            axis=0)
+
+        # save new data
+        ptile_array += ptile_timestamp
+
+        # count where we added data
+        ptile_array_count += ~(ptile_timestamp == 0)
+
+    if S2_apply_snow_mask:
+        ptile_array_bands.remove("S2_snow_mask")
+    if S2_apply_cloud_mask:
+        ptile_array_bands.remove("S2_cloud_classification")
+
+    # ... and set all such pixels to nan (of which some are already nan because
+    # of divide by zero)
+    # determine nodata mask based on where values are zero -> mean nodata for S2...
+    # (need to do this here, because after computing mean there will be nans
+    # from divide by zero)
+    ptile_array[:,
+                np.any(ptile_array[
+                    [ptile_array_bands.index(band)
+                     for band in S2_RAW_BANDS]] == 0,
+                       axis=0)] = np.nan
+
+    # expand dimensions -> one timestep
+    ptile_array = np.expand_dims(ptile_array, axis=0)
+
+    # wrap numpy array into xarray again
+    out_array = xr.DataArray(data=ptile_array,
+                             dims=["time", "band", "y", "x"],
+                             coords=dict(time=[da.time.data[0]],
+                                         band=ptile_array_bands,
+                                         x=da.x,
+                                         y=da.y,
+                                         collection=("time",
+                                                     da.collection.data)))
+
+    # only return bands that have been requested
+    return out_array.sel(band=da.band)
+
+
+def process_ptile_S2(
+    timestamp,
+    target_crs: CRS,
+    target_resolution: float,
+    S2_cloud_classification_device: str,
+    subtiles,
+    catalog,
+    ptile_transform,
+    ptile_height,
+    ptile_width,
+    cloudsen_model,
+    items,
+    processing_spatial_chunk_size,
+    S2_mask_snow: bool = False,
+    S2_cloud_classification: bool = False,
+    S2_return_cloud_probabilities: bool = False,
+    S2_compute_nbar: bool = False,
+):
+
+    # cloud classification layer and snow mask is added later
+    num_bands = len(S2_RAW_BANDS)
+
+    if S2_cloud_classification:
+        # we need the probs here, will remove when returning
+        num_bands += 4
+
+    # intiate one array representing the entire subtile for that timestamp
+    subtile_array = np.full(shape=(num_bands, processing_spatial_chunk_size,
+                                   processing_spatial_chunk_size),
+                            fill_value=0,
+                            dtype=np.float32)
+
+    # count how many values we add per pixel to compute mean later
+    subtile_array_count = np.full(shape=(num_bands,
+                                         processing_spatial_chunk_size,
+                                         processing_spatial_chunk_size),
+                                  fill_value=0,
+                                  dtype=np.uint8)
 
     subtile_array_bands = None
     for st in subtiles.itertuples(index=False, name="subtile"):
-
         # filter items by sentinel tile name
         subdf = items[items["tile"] == st.name]
 
@@ -644,7 +763,6 @@ def process_ptile_S2(
             ptile_height=ptile_height,
             S2_mask_snow=S2_mask_snow,
             S2_cloud_classification=S2_cloud_classification,
-            S2_return_cloud_probabilities=S2_return_cloud_probabilities,
             S2_compute_nbar=S2_compute_nbar,
             S2_cloud_classification_device=S2_cloud_classification_device,
             cloud_mask_model=cloudsen_model)
@@ -669,10 +787,12 @@ def process_ptile_S2(
     # compute cloud classification layer
     if S2_cloud_classification:
 
-        # select cloud class based on maximum probability
-        cloud_class = np.argmax(subtile_array[[
+        cloud_prob_indices = [
             subtile_array_bands.index(band) for band in S2_cloud_prob_bands
-        ]],
+        ]
+
+        # select cloud class based on maximum probability
+        cloud_class = np.argmax(subtile_array[cloud_prob_indices],
                                 axis=0,
                                 keepdims=True)
 
@@ -685,6 +805,13 @@ def process_ptile_S2(
         subtile_array = np.concatenate([subtile_array, cloud_class], axis=0)
         subtile_array_bands.append("S2_cloud_classification")
 
+        if not S2_return_cloud_probabilities:
+            subtile_array = np.delete(subtile_array,
+                                      cloud_prob_indices,
+                                      axis=0)
+            for band in S2_cloud_prob_bands:
+                del subtile_array_bands[subtile_array_bands.index(band)]
+
     if S2_mask_snow:
         subtile_array = np.concatenate([
             subtile_array,
@@ -696,32 +823,7 @@ def process_ptile_S2(
         ])
         subtile_array_bands.append("S2_snow_mask")
 
-    # ... and set all such pixels to nan (of which some are already nan because
-    # of divide by zero)
-    # determine nodata mask based on where values are zero -> mean nodata for S2...
-    # (need to do this here, because after computing mean there will be nans
-    # from divide by zero)
-    subtile_array[:,
-                  np.any(subtile_array[[
-                      subtile_array_bands.index(band) for band in S2_RAW_BANDS
-                  ]] == 0,
-                         axis=0)] = np.nan
-
-    # expand dimensions -> one timestep
-    subtile_array = np.expand_dims(subtile_array, axis=0)
-
-    # wrap numpy array into xarray again
-    out_array = xr.DataArray(data=subtile_array,
-                             dims=["time", "band", "y", "x"],
-                             coords=dict(time=[timestamp],
-                                         band=subtile_array_bands,
-                                         x=da.x,
-                                         y=da.y,
-                                         collection=("time",
-                                                     da.collection.data)))
-
-    # only return bands that have been requested
-    return out_array.sel(band=da.band)
+    return subtile_array, subtile_array_bands
 
 
 def process(target_crs: CRS,
@@ -741,7 +843,10 @@ def process(target_crs: CRS,
             num_workers: int = 1,
             threads_per_worker: int = 1,
             memory_limit_per_worker: str = "6GB",
-            dashboard_address: str = "127.0.0.1:9988"):
+            dashboard_address: str = "127.0.0.1:9988",
+            time_composite_freq: str = None,
+            S2_apply_snow_mask: bool = True,
+            S2_apply_cloud_mask: bool = True):
     """
     Parameters
     ----------
@@ -810,7 +915,7 @@ def process(target_crs: CRS,
         "B11",
         "B12",
     ]
-    if S2_mask_snow:
+    if S2_mask_snow and not S2_apply_snow_mask:
         bands_to_save.append("S2_snow_mask")
     if S2_compute_nbar:
         warnings.warn(
@@ -828,7 +933,7 @@ def process(target_crs: CRS,
         #     "NBAR_B11",
         #     "NBAR_B12",
         # ]
-    if S2_cloud_classification:
+    if S2_cloud_classification and not S2_apply_cloud_mask:
         bands_to_save.append("S2_cloud_classification")
     if S2_return_cloud_probabilities:
         bands_to_save += S2_cloud_prob_bands
@@ -859,13 +964,16 @@ def process(target_crs: CRS,
     # exact same timestamp
     df = pd.DataFrame()
     items = list(search.item_collection())
-    # remove timezone, otherwise crash -> zarr caveat
-    # ... and use numpy.datetime64 with second precision
-    df["ts"] = [i.datetime for i in items]
+    df["ts_raw"] = [i.datetime for i in items]
     df["collection"] = [i.collection_id for i in items]
+
+    if time_composite_freq is not None:
+        df["ts"] = df["ts_raw"].dt.round(freq=time_composite_freq)
+    else:
+        df["ts"] = df["ts_raw"]
+
+    # remove duplicates for timeaxis
     df = df.drop_duplicates("ts")
-    assert df.shape[0] == df.drop_duplicates().shape[
-        0], "Never expected that images of S1 are exactly at the same time, please open issue."
 
     height, width = height_width_from_bounds_res(bound_left, bound_bottom,
                                                  bound_right, bound_top,
@@ -881,7 +989,7 @@ def process(target_crs: CRS,
     # because we have all the timesteps for Germany
     da = xr.DataArray(
         data=dask.array.full(
-            shape=(df.shape[0], len(bands_to_save), height, width),
+            shape=(df["ts"].nunique(), len(bands_to_save), height, width),
             chunks=(1, band_chunks, processing_spatial_chunk_size,
                     processing_spatial_chunk_size),
             # needs to be float in order to store NaNs
@@ -908,6 +1016,10 @@ def process(target_crs: CRS,
             S2_return_cloud_probabilities=S2_return_cloud_probabilities,
             S2_compute_nbar=S2_compute_nbar,
             S2_cloud_classification_device=S2_cloud_classification_device,
+            time_composite_freq=time_composite_freq,
+            processing_spatial_chunk_size=processing_spatial_chunk_size,
+            S2_apply_snow_mask=S2_apply_snow_mask,
+            S2_apply_cloud_mask=S2_apply_cloud_mask,
         ),
         template=da)
 
@@ -943,118 +1055,3 @@ def save_as_zarr(da, path: str):
                                         "compressor": Blosc(cname="lz4"),
                                     }
                                 })
-
-
-def mask_array(da,
-               use_cloud_class_mask: bool = True,
-               use_snow_mask: bool = True,
-               cloud_mask_max_class: int = 0,
-               bands_to_mask: list[str] = [
-                   'B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08',
-                   'B8A', 'B09', 'B11', 'B12'
-               ]):
-    """
-    Replaces pixels with clouds or snow with `np.nan`. Extends dask graph after calling `process()`.
-
-    Parameters
-    ----------
-    use_cloud_class_mask : bool, default=True
-        Whether to use the generated cloud mask. Requires `S2_cloud_classification=True` in `process()`.
-    use_snow_mask : bool, default=True  
-        Whether to use the generated snow mask. Requires `S2_mask_snow=True` in `process()`.
-    cloud_mask_max_class : int, default=0
-        Specifies the maximum acceptable class. `0` only uses clear sky. See notes in `process()` for other classes.
-    """
-
-    if use_snow_mask and "S2_snow_mask" not in da.band:
-        warnings.warn(
-            "use_snow_mask set to True for time composite, but no snow_mask in bands."
-        )
-
-    if use_cloud_class_mask and "S2_cloud_classification" not in da.band:
-        warnings.warn(
-            "use_cloud_class_mask set to True for time composite, but no S2_cloud_classification in bands."
-        )
-
-    def _mask_chunk(dc):
-        band_intersection = set(dc.band.data).intersection(set(bands_to_mask))
-        if len(band_intersection) == 0:
-            return dc
-
-        if use_cloud_class_mask:
-            assert "S2_cloud_classification" in dc.band.data, "A chunk where cloud masking is supposed to be applied, but no cloud class layer exists. Please open GitHub issue."
-
-            cloud_mask = (dc.sel(band="S2_cloud_classification")
-                          <= cloud_mask_max_class)
-
-        if use_snow_mask:
-            assert "S2_snow_mask" in dc.band.data, "A chunk where snow masking is supposed to be applied, but no snow layer exists. Bug. Please open GitHub issue."
-
-            snow_mask = (dc.sel(band="S2_snow_mask") == 1)
-
-            if use_cloud_class_mask:
-                mask = snow_mask & cloud_mask
-            else:
-                mask = snow_mask
-
-        else:
-            mask = cloud_mask
-
-        return dc.where(mask, other=np.nan)
-
-    # setting all values to nan that are snow/clouds
-    return da.map_blocks(_mask_chunk, template=da)
-
-
-def create_time_composite(da, freq: str = "7d", method: str = "median"):
-    """
-    Creates a (nan)mean across each time interval for each band.
-
-    Parameters
-    ----------
-    ndays : int, default=7
-        Number of days to perform mean on.
-    method : str, default="median"
-        Method to aggregate data across time. Can be either "mean" or "median".
-    """
-
-    # drop cloud / snow
-    sub_bands = da.band[~((da.band == "S2_snow_mask") |
-                          (da.band == "S2_cloud_classification"))]
-    da = da.sel(band=sub_bands)
-
-    # save chunk layout to apply it after aggregation again
-    chunks_before_groupby = da.chunks
-
-    # create on chunk per band
-    da = da.chunk((1, 1, chunks_before_groupby[2], chunks_before_groupby[3]))
-
-    # create groupby index where we place
-    seconds_in_day = 86400
-    index = xr.IndexVariable(
-        dims="time",
-        data=np.array(
-            list(
-                map(lambda x: pd.Timestamp(x).round(freq).to_datetime64(),
-                    da.time.data))))
-
-    # group by rounded timestamps
-    da = da.groupby(index)
-
-    # do nan mean/median for each group
-    with warnings.catch_warnings():
-        # this is expected, no warning needed
-        warnings.filterwarnings('ignore', r'All-NaN (slice|axis) encountered')
-
-        if method == "median":
-            da = da.median(dim="time", skipna=True)
-        elif method == "mean":
-            da = da.mean(dim="time", skipna=True)
-        else:
-            raise NotImplementedError(
-                "Aggregation methods other than mean or median are not implemented."
-            )
-
-    # rechunk to original format
-    return da.chunk((1, sum(chunks_before_groupby[1]),
-                     chunks_before_groupby[2], chunks_before_groupby[3]))
