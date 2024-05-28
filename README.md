@@ -22,12 +22,6 @@ detection, snow masking, harmonization, merging, and temporal composites.</em>
 1) The model for cloud detection will be made available within the next couple of weeks.
 2) This package is in early alpha stage. If you encounter any error, warning, memory issue, etc. please open a GitHub issue with the code to reproduce.
 
-## Prerequisites
-
-If you download larger areas or longer timeseries you'll need to obtain a
-subscription key from [Planetary Computer](https://planetarycomputer.microsoft.com/). 
-Configure it in your shell with: `export PC_SDK_SUBSCRIPTION_KEY=xxxxyourkeyxxxx`
-
 ## Installing
 
 ```
