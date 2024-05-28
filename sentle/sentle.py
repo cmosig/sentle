@@ -651,7 +651,7 @@ def process_ptile_S2_dispatcher(
 
         if S2_apply_cloud_mask:
             cloud_index = ptile_array_bands.index("S2_cloud_classification")
-            ptile_timestamp *= (ptile_timestamp[cloud_index] > 0)
+            ptile_timestamp *= (ptile_timestamp[cloud_index] == 0)
 
             if time_composite_freq is not None:
                 ptile_timestamp = np.delete(ptile_timestamp,
