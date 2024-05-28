@@ -662,12 +662,18 @@ def process_ptile_S2_dispatcher(
         ptile_array += ptile_timestamp
 
         # count where we added data
-        ptile_array_count += ~(ptile_timestamp == 0)
+        ptile_array_count += ptile_timestamp != 0
 
     if S2_apply_snow_mask:
         ptile_array_bands.remove("S2_snow_mask")
     if S2_apply_cloud_mask:
         ptile_array_bands.remove("S2_cloud_classification")
+
+    # compute mean based on sum and count for each pixel
+    with warnings.catch_warnings():
+        # filter out divide by zero warning, this is expected here
+        warnings.simplefilter("ignore")
+        ptile_array /= ptile_array_count
 
     # ... and set all such pixels to nan (of which some are already nan because
     # of divide by zero)
