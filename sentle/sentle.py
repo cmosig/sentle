@@ -376,7 +376,6 @@ def process_ptile(
 
     # TODO add assert to mutually exclude chunks where both s1 and s2 bands are present
 
-    # check collection matches bands otherwise return
     if ("vv" in da.band.data or "vh" in da.band.data):
         return process_ptile_S1(da, target_crs, target_resolution,
                                 time_composite_freq)
@@ -529,8 +528,7 @@ def process_ptile_S1(da: xr.DataArray, target_crs: CRS,
                         coords=dict(time=[timestamp],
                                     band=da.band,
                                     x=da.x,
-                                    y=da.y,
-                                    collection=("time", da.collection.data)))
+                                    y=da.y))
 
 
 def bounds_from_dataarray(da, target_resolution):
@@ -691,9 +689,7 @@ def process_ptile_S2_dispatcher(
                              coords=dict(time=[da.time.data[0]],
                                          band=ptile_array_bands,
                                          x=da.x,
-                                         y=da.y,
-                                         collection=("time",
-                                                     da.collection.data)))
+                                         y=da.y))
 
     # only return bands that have been requested
     return out_array.sel(band=da.band)
@@ -965,7 +961,6 @@ def process(target_crs: CRS,
     df = pd.DataFrame()
     items = list(search.item_collection())
     df["ts_raw"] = [i.datetime for i in items]
-    df["collection"] = [i.collection_id for i in items]
 
     if time_composite_freq is not None:
         df["ts"] = df["ts_raw"].dt.round(freq=time_composite_freq)
@@ -1003,8 +998,7 @@ def process(target_crs: CRS,
                         target_resolution).astype(np.float32),
             # we do y-axis in reverse: top-left coordinate
             y=np.arange(bound_top, bound_bottom,
-                        -target_resolution).astype(np.float32),
-            collection=("time", df["collection"].tolist())))
+                        -target_resolution).astype(np.float32)))
 
     da = da.map_blocks(
         process_ptile,
