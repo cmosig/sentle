@@ -664,9 +664,8 @@ def process_ptile_S2_dispatcher(
         # count where we added data
         ptile_array_count += ptile_timestamp != 0
 
-    if S2_apply_snow_mask:
+    if time_composite_freq is not None:
         ptile_array_bands.remove("S2_snow_mask")
-    if S2_apply_cloud_mask:
         ptile_array_bands.remove("S2_cloud_classification")
 
     # compute mean based on sum and count for each pixel
@@ -917,7 +916,7 @@ def process(target_crs: CRS,
         "B11",
         "B12",
     ]
-    if S2_mask_snow and not S2_apply_snow_mask:
+    if S2_mask_snow and time_composite_freq is None:
         bands_to_save.append("S2_snow_mask")
     if S2_compute_nbar:
         warnings.warn(
@@ -935,7 +934,7 @@ def process(target_crs: CRS,
         #     "NBAR_B11",
         #     "NBAR_B12",
         # ]
-    if S2_cloud_classification and not S2_apply_cloud_mask:
+    if S2_cloud_classification and time_composite_freq is None:
         bands_to_save.append("S2_cloud_classification")
     if S2_return_cloud_probabilities:
         bands_to_save += S2_cloud_prob_bands
