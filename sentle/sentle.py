@@ -26,7 +26,7 @@ from urllib3 import Retry
 from .cloud_mask import compute_cloud_mask, load_cloudsen_model, S2_cloud_prob_bands
 from .snow_mask import compute_potential_snow_layer
 from .utils import bounds_from_transform_height_width_res, transform_height_width_from_bounds_res
-from .const import S2_RAW_BANDS, S2_RAW_BAND_RESOLUTION
+from .const import S2_RAW_BANDS, S2_RAW_BAND_RESOLUTION, S2_subtile_size
 
 
 class Sentle():
@@ -125,7 +125,7 @@ class Sentle():
 
     @staticmethod
     def obtain_subtiles(target_crs: CRS, left: float, bottom: float,
-                        right: float, top: float, S2_subtile_size: int):
+                        right: float, top: float):
         """Retrieves the sentinel subtiles that intersect the with the specified
         bounds. The bounds are interpreted based on the given target_crs.
         """
@@ -235,12 +235,12 @@ class Sentle():
         return tf, repr_height, repr_width
 
     def process_S2_subtile(
-            self, intersecting_windows, stac_item, timestamp,
-            S2_subtile_size: int, target_crs: CRS, target_resolution: float,
-            ptile_transform, ptile_width: int, ptile_height: int,
-            S2_mask_snow: bool, S2_cloud_classification: bool,
-            S2_return_cloud_probabilities: bool, S2_compute_nbar: bool,
-            S2_cloud_classification_device: str, cloud_mask_model):
+            self, intersecting_windows, stac_item, timestamp, target_crs: CRS,
+            target_resolution: float, ptile_transform, ptile_width: int,
+            ptile_height: int, S2_mask_snow: bool,
+            S2_cloud_classification: bool, S2_return_cloud_probabilities: bool,
+            S2_compute_nbar: bool, S2_cloud_classification_device: str,
+            cloud_mask_model):
 
         # init array that needs to be filled
         subtile_array = np.empty(
@@ -397,7 +397,6 @@ class Sentle():
         target_crs: CRS,
         target_resolution: float,
         S2_cloud_classification_device: str,
-        S2_subtile_size: int = 732,
         S2_mask_snow: bool = False,
         S2_cloud_classification: bool = False,
         S2_return_cloud_probabilities: bool = False,
@@ -423,7 +422,6 @@ class Sentle():
                     S2_cloud_classification=S2_cloud_classification,
                     S2_cloud_classification_device=
                     S2_cloud_classification_device,
-                    S2_subtile_size=S2_subtile_size,
                     S2_mask_snow=S2_mask_snow,
                     S2_return_cloud_probabilities=S2_return_cloud_probabilities,
                     S2_compute_nbar=S2_compute_nbar)
@@ -583,7 +581,6 @@ class Sentle():
         target_crs: CRS,
         target_resolution: float,
         S2_cloud_classification_device: str,
-        S2_subtile_size: int = 732,
         S2_mask_snow: bool = False,
         S2_cloud_classification: bool = False,
         S2_return_cloud_probabilities: bool = False,
@@ -783,7 +780,6 @@ class Sentle():
         datetime: DatetimeLike,
         processing_spatial_chunk_size: int = 4000,
         S1_assets: list[str] = ["vh", "vv"],
-        S2_subtile_size: int = 732,
         S2_mask_snow: bool = False,
         S2_cloud_classification: bool = False,
         S2_cloud_classification_device="cpu",
@@ -821,8 +817,6 @@ class Sentle():
         S2_compute_nbar : bool, default=False
             Whether to compute NBAR using the sen2nbar package. Coming soon.
         """
-
-        assert S2_subtile_size == 732, "Unsupported subtile size."
 
         # TODO support to only download subset of bands (mutually exclusive with cloud classification and partially snow_mask) -> or no sentinel 2 at all
 
@@ -934,7 +928,6 @@ class Sentle():
             kwargs=dict(
                 target_crs=target_crs,
                 target_resolution=target_resolution,
-                S2_subtile_size=S2_subtile_size,
                 S2_mask_snow=S2_mask_snow,
                 S2_cloud_classification=S2_cloud_classification,
                 S2_return_cloud_probabilities=S2_return_cloud_probabilities,
@@ -970,14 +963,15 @@ class Sentle():
         # NOTE the compression may not be optimal, need to benchmark
         store = zarr.storage.DirectoryStore(path, dimension_separator=".")
         self.da.rename("sentle").to_zarr(store=store,
-                                     mode="w-",
-                                     compute=True,
-                                     encoding={
-                                         "sentle": {
-                                             "write_empty_chunks": False,
-                                             "compressor": Blosc(cname="lz4"),
-                                         }
-                                     })
+                                         mode="w-",
+                                         compute=True,
+                                         encoding={
+                                             "sentle": {
+                                                 "write_empty_chunks": False,
+                                                 "compressor":
+                                                 Blosc(cname="lz4"),
+                                             }
+                                         })
 
     def mask_array(self,
                    use_cloud_class_mask: bool = True,
@@ -1080,7 +1074,8 @@ class Sentle():
         # do nan mean/median for each group
         with warnings.catch_warnings():
             # this is expected, no warning needed
-            warnings.filterwarnings('ignore', r'All-NaN (slice|axis) encountered')
+            warnings.filterwarnings('ignore',
+                                    r'All-NaN (slice|axis) encountered')
 
             if method == "median":
                 self.da = self.da.median(dim="time", skipna=True)
