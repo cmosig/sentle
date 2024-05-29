@@ -23,8 +23,8 @@ from rasterio.enums import Resampling
 from shapely.geometry import Polygon, box
 from urllib3 import Retry
 
-from .cloud_mask import compute_cloud_mask, load_cloudsen_model, S2_cloud_prob_bands
-from .snow_mask import compute_potential_snow_layer
+from .cloud_mask import compute_cloud_mask, load_cloudsen_model, S2_cloud_prob_bands, S2_cloud_mask_band
+from .snow_mask import compute_potential_snow_layer, S2_snow_mask_band
 from .utils import bounds_from_transform_height_width_res, transform_height_width_from_bounds_res
 from .const import S2_RAW_BANDS, S2_RAW_BAND_RESOLUTION, S2_subtile_size
 
@@ -650,7 +650,7 @@ def process_ptile_S2_dispatcher(
 
         # apply masks and drop classification layers if doing temporal aggregation
         if S2_apply_snow_mask:
-            snow_index = ptile_array_bands.index("S2_snow_mask")
+            snow_index = ptile_array_bands.index(S2_snow_mask_band)
             ptile_timestamp *= ptile_timestamp[snow_index]
 
             if time_composite_freq is not None:
@@ -659,7 +659,7 @@ def process_ptile_S2_dispatcher(
                                             axis=0)
 
         if S2_apply_cloud_mask:
-            cloud_index = ptile_array_bands.index("S2_cloud_classification")
+            cloud_index = ptile_array_bands.index(S2_cloud_mask_band)
             ptile_timestamp *= (ptile_timestamp[cloud_index] == 0)
 
             if time_composite_freq is not None:
@@ -674,10 +674,10 @@ def process_ptile_S2_dispatcher(
         ptile_array_count += ptile_timestamp != 0
 
     if time_composite_freq is not None:
-        if "S2_snow_mask" in ptile_array_bands:
-            ptile_array_bands.remove("S2_snow_mask")
-        if "S2_cloud_classification" in ptile_array_bands:
-            ptile_array_bands.remove("S2_cloud_classification")
+        if S2_snow_mask_band in ptile_array_bands:
+            ptile_array_bands.remove(S2_snow_mask_band)
+        if S2_cloud_mask_band in ptile_array_bands:
+            ptile_array_bands.remove(S2_cloud_mask_band)
 
     # compute mean based on sum and count for each pixel
     with warnings.catch_warnings():
@@ -814,7 +814,7 @@ def process_ptile_S2(
 
         # save cloud classes layer
         subtile_array = np.concatenate([subtile_array, cloud_class], axis=0)
-        subtile_array_bands.append("S2_cloud_classification")
+        subtile_array_bands.append(S2_cloud_mask_band)
 
         if not S2_return_cloud_probabilities:
             subtile_array = np.delete(subtile_array,
@@ -832,7 +832,7 @@ def process_ptile_S2(
                 B08=subtile_array[subtile_array_bands.index("B08")]),
                            axis=0)
         ])
-        subtile_array_bands.append("S2_snow_mask")
+        subtile_array_bands.append(S2_snow_mask_band)
 
     return subtile_array, subtile_array_bands
 
@@ -918,22 +918,9 @@ def process(target_crs: CRS,
     # TODO support to only download subset of bands (mutually exclusive with cloud classification and partially snow_mask) -> or no sentinel 2 at all
 
     # derive bands to save from arguments
-    bands_to_save = [
-        "B01",
-        "B02",
-        "B03",
-        "B04",
-        "B05",
-        "B06",
-        "B07",
-        "B08",
-        "B8A",
-        "B09",
-        "B11",
-        "B12",
-    ]
+    bands_to_save = S2_RAW_BANDS.copy() 
     if S2_mask_snow and time_composite_freq is None:
-        bands_to_save.append("S2_snow_mask")
+        bands_to_save.append(S2_snow_mask_band)
     if S2_compute_nbar:
         warnings.warn(
             "NBAR computation currently not supported. Coming Soon. Ignoring..."
@@ -951,7 +938,7 @@ def process(target_crs: CRS,
         #     "NBAR_B12",
         # ]
     if S2_cloud_classification and time_composite_freq is None:
-        bands_to_save.append("S2_cloud_classification")
+        bands_to_save.append(S2_cloud_mask_band)
     if S2_return_cloud_probabilities:
         bands_to_save += S2_cloud_prob_bands
     if S1_assets is not None:

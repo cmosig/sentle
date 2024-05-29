@@ -1,6 +1,8 @@
 import numpy as np
 import xarray as xr
 
+S2_snow_mask_band = "S2_snow_mask"
+
 
 def compute_potential_snow_layer(B03, B08, B11):
     """Creates the Potential Snow Layer (PSL) as described by Equation 20 of Zhu and

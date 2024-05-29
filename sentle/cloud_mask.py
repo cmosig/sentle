@@ -17,6 +17,7 @@ def load_cloudsen_model(device: str = "cpu"):
     return cloudsen_model
 
 
+S2_cloud_mask_band = "S2_cloud_classification"
 S2_cloud_prob_bands = [
     "S2_clear_sky_probability", "S2_thick_cloud_probability",
     "S2_thin_cloud_probability", "S2_shadow_probability"
