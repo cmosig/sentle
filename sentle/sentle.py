@@ -876,8 +876,6 @@ def process(target_crs: CRS,
         Top bound of area that is supposed to be covered. Unit is in `target_crs`.
     datetime : DatetimeLike
         Specifies time range of data to be downloaded. This is forwarded to the respective stac interface.
-    S2_subtile_size : int, default=732
-        Specifies the size of each subtile. The maximum is the size of a sentinel tile (10980). If cloud filtering is enabled the minimum tilesize is 256, otherwise 16. It also needs to be a divisor of 10980, so that each sentinel tile can be segmented without overlaps. At the moment this package only supports the default S2_subtile_size of 732.
     S2_mask_snow : bool, default=False
         Whether to create a snow mask. Based on https://doi.org/10.1016/j.rse.2011.10.028.
     S2_cloud_classification : bool, default=False
@@ -888,6 +886,20 @@ def process(target_crs: CRS,
         Whether to return raw cloud probabilities which were used to determine the cloud classes.
     S2_compute_nbar : bool, default=False
         Whether to compute NBAR using the sen2nbar package. Coming soon.
+    num_workers : int, default=1
+        Number of cores to scale computation across. Plan 4GiB of RAM per worker.
+    threads_per_worker: int, default=1
+        Number threads to use for each worker. Anything >1 has not been tested.
+    memory_limit_per_worker: str, default=None
+        Maximum amount of RAM per worker, passed to dask `LocalCluster`. `None` means no limit and is recommended.
+    dashboard_address: str, default="127.0.0.1:9988"
+        Address where the dask dashboard can be accessed.
+    time_composite_freq: str, default=None
+        Rounding interval across which data is averaged.
+    S2_apply_snow_mask: bool, default=False
+        Whether to replace snow with NaN.  
+    S2_apply_cloud_mask: bool, default=False
+        Whether to replace anything that is not clear sky with NaN.  
     """
 
     if threads_per_worker > 1:
@@ -918,7 +930,7 @@ def process(target_crs: CRS,
     # TODO support to only download subset of bands (mutually exclusive with cloud classification and partially snow_mask) -> or no sentinel 2 at all
 
     # derive bands to save from arguments
-    bands_to_save = S2_RAW_BANDS.copy() 
+    bands_to_save = S2_RAW_BANDS.copy()
     if S2_mask_snow and time_composite_freq is None:
         bands_to_save.append(S2_snow_mask_band)
     if S2_compute_nbar:
