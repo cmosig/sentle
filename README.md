@@ -88,6 +88,14 @@ You either run `.compute()` on the returned dask array or pass the object to
 soon as it's ready. The latter enables an area and temporal range to be
 computed that is much larger than the RAM on your machine. 
 
+**(3 Visualize)**
+
+Load the data with xarray and visualize using for example the awesome [lexcube](https://github.com/msoechting/lexcube) package. Here, band B02 is visualized from the above example. One is able to spot the cloud gaps and the spotty coverage during winter.
+
+<p align="center">
+<img src=https://github.com/cmosig/sentle/assets/32590522/33b7f6a0-532e-453b-80db-748d99e753a2/>
+</p>  
+
 ## Questions you may have
 
 #### Where can I watch the progress of the download?
