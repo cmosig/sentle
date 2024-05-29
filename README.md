@@ -99,16 +99,16 @@ Load the data with xarray and visualize using for example the awesome [lexcube](
 ## Questions you may have
 
 #### Where can I watch the progress of the download?
-Upon class initialization, `sentle` prints a link to a [dask dashboard](https://docs.dask.org/en/latest/dashboard.html). Check the bottom right pane in the Status tab for a progress bar. 
+Upon initialization, `sentle` prints a link to a [dask dashboard](https://docs.dask.org/en/latest/dashboard.html). Check the bottom right pane in the Status tab for a progress bar. 
 A variety of other stats are also visible there. If you are working on a remote machine you may need to use [port forwarding](https://help.ubuntu.com/community/SSH/OpenSSH/PortForwarding) to access the remote dashboard.
 ![image](https://github.com/cmosig/sentle/assets/32590522/c20516b5-7a9e-4e99-953a-9c8325edea7b)
 
 
 #### How do I scale this program?
-Increase the number of workers using the `num_workers` parameter when setting up the `Sentle` class. You should give each worker 6GB of memory, even if it only needs 3GB in practise in default settings.
+Increase the number of workers using the `num_workers` parameter when setting up the `Sentle` class. With default spatial chunk size of 4000, specified by `processing_spatial_chunk_size`, you should plan with 4GiB per worker. At the moment (will change), each worker also initiates its own model on the GPU, meaning more workers will also mean that more GPU VRAM will be used. 
 
 #### My dask graph is too big, what do I do?
-Increase the `processing_spatial_chunk_size` from `4000` to something higher in the `process` function. This will increase spatial chunk sizes, but will also increase worker memory requirements. Increase worker memory with `memory_limit_per_worker` when initiating the `Sentle` object.
+Increase the `processing_spatial_chunk_size` from `4000` to something higher in the `process` function. This will increase spatial chunk sizes, but will also increase worker memory requirements. 
 
 ## Contributing
 
