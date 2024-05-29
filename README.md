@@ -70,6 +70,7 @@ Explanation:
 - `datetime`: Time range that will be downloaded.
 - `S2_mask_snow`: Whether to compute snow mask for Sentinel-2 data.
 - `S2_cloud_classification`: Whether to a cloud classification layer for Sentinel-2 data.
+- `S2_cloud_classification_device`: Where to run cloud classification. If you have an Nvidia GPU then pass `cuda` otherwise `cpu`(default).
 - `S2_apply_*`: Whether to apply the respective mask, i.e., replace values by NaN.
 - `S1_assets`: Which Sentinel-1 assets to download. Disable Sentinel-1 by setting this to `None`.
 - `time_composite_freq`: Rounding interval across which data is averaged. Uses `pandas.Timestamp.round(time_composite_freq)`.
