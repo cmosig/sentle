@@ -11,7 +11,7 @@
 </a>
 </p>
 <p align="center">
-    <em>Download Sentinel-1 & Sentinel-2 data cubes of any scale (larger-than-memory) on any machine with integrated cloud
+    <em>Download Sentinel-1 & Sentinel-2 data cubes of huge-scale (larger-than-memory) on any machine with integrated cloud
 detection, snow masking, harmonization, merging, and temporal composites.</em>
 </p>
 
@@ -36,13 +36,41 @@ pip install -e .
 
 ## Quick Tour
 
-**(1) Initiate the `Sentle` class.** This initiates a [dask](https://www.dask.org/) cluster (don't be scared of the word cluster, this can also mean 1 CPU core) in the background. Each worker needs in practice about 3GB RAM in default settings.
+**(1) Setup**
+
+There are only one important function: `process`. Here, you specify all parameters and the function returns a lazy dask array.
 
 ```
-from sentle.sentle import Sentle
+
+
+**(2) Compute**
+
+You either run `.compute()` on the returned [dask](https://www.dask.org/) array or pass the object to
+`save_to_zarr` which setups zarr storage and saves each chunk as to disk as
+soon as it is ready. The latter enables an area and temporal range to be
+computed that is much larger than the RAM on your machine. 
+
+```
+from sentle import sentle
 from rasterio.crs import CRS
 
-sen = Sentle(num_workers=3)
+da = sentle.process(
+    target_crs=CRS.from_string("EPSG:32633"),
+    bound_left=176000,
+    bound_bottom=5660000,
+    bound_right=216000,
+    bound_top=5700000,
+    datetime="2022-06-10/2023-06-17",
+    target_resolution=10,
+    S2_mask_snow=True,
+    S2_cloud_classification=True,
+    S2_cloud_classification_device="cuda",
+    num_workers=7,
+    time_composite_freq="7d",
+    S1_assets=["vv", "vh"],
+    S2_apply_snow_mask=True,
+    S2_apply_cloud_mask=True,
+)
 ```
 
 **(2) Specify which area you want to download, and in which CRS.** 
