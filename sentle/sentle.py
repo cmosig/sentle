@@ -375,10 +375,11 @@ def process_ptile(
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
     # TODO add assert to mutually exclude chunks where both s1 and s2 bands are present
-
     if ("vv" in da.band.data or "vh" in da.band.data):
-        return process_ptile_S1(da, target_crs, target_resolution,
-                                time_composite_freq)
+        return process_ptile_S1(da=da,
+                                target_crs=target_crs,
+                                target_resolution=target_resolution,
+                                time_composite_freq=time_composite_freq)
     else:
         return process_ptile_S2_dispatcher(
             da=da,
@@ -396,15 +397,20 @@ def process_ptile(
 
 
 def process_ptile_S1(da: xr.DataArray, target_crs: CRS,
-                     target_resolution: float):
-
-    # extract the timestamp we are processing. there should only be one
-    timestamp = da.time.data
-    assert timestamp.shape == (1, )
-    timestamp = timestamp[0]
+                     target_resolution: float, time_composite_freq: str):
 
     # compute bounds of ptile
     ptile_bounds = bounds_from_dataarray(da, target_resolution)
+
+    # timestamp
+    if time_composite_freq is None:
+        datetime_range = da.time.data[0]
+    else:
+        timestamp_center = da.time.data[0]
+        datetime_range = [
+            timestamp_center - (pd.Timedelta(time_composite_freq) / 2),
+            timestamp_center + (pd.Timedelta(time_composite_freq) / 2)
+        ]
 
     # open stac catalog
     catalog = open_catalog()
@@ -413,7 +419,7 @@ def process_ptile_S1(da: xr.DataArray, target_crs: CRS,
     # timestamp
     item_list = list(
         catalog.search(collections=["sentinel-1-rtc"],
-                       datetime=timestamp,
+                       datetime=datetime_range,
                        bbox=warp.transform_bounds(
                            src_crs=target_crs,
                            dst_crs="EPSG:4326",
@@ -525,7 +531,7 @@ def process_ptile_S1(da: xr.DataArray, target_crs: CRS,
 
     return xr.DataArray(data=np.expand_dims(tile_array, axis=0),
                         dims=["time", "band", "y", "x"],
-                        coords=dict(time=[timestamp],
+                        coords=dict(time=[da.time.data[0]],
                                     band=da.band,
                                     x=da.x,
                                     y=da.y))
@@ -594,6 +600,9 @@ def process_ptile_S2_dispatcher(
                            bottom=bound_bottom,
                            right=bound_right,
                            top=bound_top)).item_collection())
+
+    if len(item_list) == 0:
+        return da
 
     items = pd.DataFrame()
     items["item"] = item_list
@@ -665,8 +674,10 @@ def process_ptile_S2_dispatcher(
         ptile_array_count += ptile_timestamp != 0
 
     if time_composite_freq is not None:
-        ptile_array_bands.remove("S2_snow_mask")
-        ptile_array_bands.remove("S2_cloud_classification")
+        if "S2_mask_snow" in ptile_array_bands:
+            ptile_array_bands.remove("S2_snow_mask")
+        if "S2_cloud_classification" in ptile_array_bands:
+            ptile_array_bands.remove("S2_cloud_classification")
 
     # compute mean based on sum and count for each pixel
     with warnings.catch_warnings():
@@ -718,7 +729,6 @@ def process_ptile_S2(
     S2_return_cloud_probabilities: bool = False,
     S2_compute_nbar: bool = False,
 ):
-
     # cloud classification layer and snow mask is added later
     num_bands = len(S2_RAW_BANDS)
 
@@ -846,8 +856,8 @@ def process(target_crs: CRS,
             memory_limit_per_worker: str = "6GB",
             dashboard_address: str = "127.0.0.1:9988",
             time_composite_freq: str = None,
-            S2_apply_snow_mask: bool = True,
-            S2_apply_cloud_mask: bool = True):
+            S2_apply_snow_mask: bool = False,
+            S2_apply_cloud_mask: bool = False):
     """
     Parameters
     ----------
@@ -883,6 +893,12 @@ def process(target_crs: CRS,
     if threads_per_worker > 1:
         warnings.warn(
             "More then one thread per worker may overflow memory. Not tested yet"
+        )
+
+    if time_composite_freq is not None and (not S2_apply_snow_mask
+                                            and not S2_apply_cloud_mask):
+        warnings.warn(
+            "Temporal aggregation is specified, but neither cloud or snow mask is set to be applied. This may yield useless aggregations for Sentinel-2 data."
         )
 
     # setup local processor
@@ -966,6 +982,7 @@ def process(target_crs: CRS,
     df = pd.DataFrame()
     items = list(search.item_collection())
     df["ts_raw"] = [i.datetime for i in items]
+    df["collection"] = [i.collection_id for i in items]
 
     if time_composite_freq is not None:
         df["ts"] = df["ts_raw"].dt.round(freq=time_composite_freq)
