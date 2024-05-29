@@ -50,7 +50,7 @@ da = sentle.process(
     bound_bottom=5660000,
     bound_right=216000,
     bound_top=5700000,
-    datetime="2022-06-10/2023-06-17",
+    datetime="2022-06-17/2023-06-17",
     target_resolution=10,
     S2_mask_snow=True,
     S2_cloud_classification=True,
@@ -62,6 +62,11 @@ da = sentle.process(
     num_workers=7,
 )
 ```
+This code downloads data for a 40km by 40km area with one year of both Sentinel-1 and Sentinel-2. Clouds and snow are detected and replaced with NaNs. Data is also averaged every 7 days. A lazy dask array is returned:
+
+<p align="center">
+<img src="https://github.com/cmosig/sentle/assets/32590522/f487bba1-3c10-42a2-9b10-356ab2b44825" width="600">
+</p>
 
 Explanation:
 - `target_crs`: Specifies the target CRS that all data will be reprojected to.
@@ -73,7 +78,7 @@ Explanation:
 - `S2_cloud_classification_device`: Where to run cloud classification. If you have an Nvidia GPU then pass `cuda` otherwise `cpu`(default).
 - `S2_apply_*`: Whether to apply the respective mask, i.e., replace values by NaN.
 - `S1_assets`: Which Sentinel-1 assets to download. Disable Sentinel-1 by setting this to `None`.
-- `time_composite_freq`: Rounding interval across which data is averaged. Uses `pandas.Timestamp.round(time_composite_freq)`.
+- `time_composite_freq`: Rounding interval across which data is averaged. Uses `pandas.Timestamp.round(time_composite_freq)`. Cloud/snow masks are dropped after masking because they cannot be aggregated.
 - `num_workers`: Number of cores to use. Plan about 4 GiB of memory usage per worker.
 
 **(2) Compute**
