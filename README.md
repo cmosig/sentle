@@ -34,21 +34,11 @@ cd sentle
 pip install -e .
 ```
 
-## Quick Tour
+## Guide
 
 **(1) Setup**
 
-There are only one important function: `process`. Here, you specify all parameters and the function returns a lazy dask array.
-
-```
-
-
-**(2) Compute**
-
-You either run `.compute()` on the returned [dask](https://www.dask.org/) array or pass the object to
-`save_to_zarr` which setups zarr storage and saves each chunk as to disk as
-soon as it is ready. The latter enables an area and temporal range to be
-computed that is much larger than the RAM on your machine. 
+There is only one important function: `process`. Here, you specify all parameters and the function returns a lazy [dask](https://www.dask.org/) array with the shape `(#timesteps, #bands, #pixelsy, #pixelsx)`.
 
 ```
 from sentle import sentle
@@ -65,63 +55,32 @@ da = sentle.process(
     S2_mask_snow=True,
     S2_cloud_classification=True,
     S2_cloud_classification_device="cuda",
-    num_workers=7,
-    time_composite_freq="7d",
     S1_assets=["vv", "vh"],
     S2_apply_snow_mask=True,
     S2_apply_cloud_mask=True,
+    time_composite_freq="7d",
+    num_workers=7,
 )
 ```
 
-**(2) Specify which area you want to download, and in which CRS.** 
+Explanation:
+- `target_crs`: Specifies the target CRS that all data will be reprojected to.
+- `target_resolution`:  Determines the resolution that all data is reprojected to in the `target_crs`. 
+- `bound_*`: Bounds in `target_crs` of the area you want to download. Undefined behavior if difference between opposite bounds is not divisable by `target_resolution`.
+- `datetime`: Time range that will be downloaded.
+- `S2_mask_snow`: Whether to compute snow mask for Sentinel-2 data.
+- `S2_cloud_classification`: Whether to a cloud classification layer for Sentinel-2 data.
+- `S2_apply_*`: Whether to apply the respective mask, i.e., replace values by NaN.
+- `S1_assets`: Which Sentinel-1 assets to download. Disable Sentinel-1 by setting this to `None`.
+- `time_composite_freq`: Rounding interval across which data is averaged. Uses `pandas.Timestamp.round(time_composite_freq)`.
+- `num_workers`: Number of cores to use. Plan about 4 GiB of memory usage per worker.
 
-The below code sets up the dask task graph and saves a lazy dask array internally (`sen.da`). 
+**(2) Compute**
 
-The resulting dask array has the shape `(#timesteps, #bands, #pixelsy, #pixelsx)`. There is one timestep for each timestamp where there is data available anywhere within the specified bounding box. This will result in spatially very sparse timesteps and handled internally.
-
-CRS: For local studies, I recommend the local [UTM zone](https://www.dmap.co.uk/utmworld.htm) and pick the [EPSG code](https://docs.up42.com/data/reference/utm). For continental-scale studies, you may want to use EPSG:8857 or EPSG:3857. 
-
-```
-sen.process(
-    target_crs=CRS.from_string("EPSG:8857"),
-    bound_left=931070,
-    bound_bottom=6111250,
-    bound_right=957630,
-    bound_top=6134550,
-    target_resolution=10,
-    datetime="2023-06-01/2023-06-14",
-    S2_mask_snow=True,
-    S2_cloud_classification=True,
-    S2_cloud_classification_device="cuda",
-    S1_assets=["vv", "vh"])
-```
-<p align="center">
-<img src="https://github.com/cmosig/sentle/assets/32590522/1da22165-9fef-480f-8643-88ba58c18574" width="600">
-</p>
-
-**(3) (Optional) Mask out clouds and snow (extends task graph).** 
-
-This removes clouds/snow based on the generated masks, i.e., setting the respective pixels to `nan`.
-```
-sen.mask_array()
-```
-
-**(4) (Optional) Create a time composite in specified time intervals (extends task graph).** 
-
-Creates a (nan)median across each time interval for each S1&S2 band. This will also drop the cloud mask and snow mask if available as these cannot be merged.
-If temporal accuracy down to a single day is not relevant to your project, this step is highly recommended. The `freq` argument is passed to [pandas.Timestamp.round](https://pandas.pydata.org/docs/reference/api/pandas.Timestamp.round.html).
-```
-sen.create_time_composite(freq="14d")
-```
-
-Note: this step is not stable at the moment and consumes more memory than I'd like. If you happen to run into crashes because workers run out of memory, try to reduce the `processing_spatial_chunk_size` to 2000 in the `process` function.  
-
-**(5) Save to zarr.**
-This executes the built-up dask graph and saves the data to an optimized Zarr format.  
-```
-sen.save_as_zarr("my_cube.zarr")
-```
-Alternatively, you can call `sen.da.compute()` and use the generated cube directly, without saving it to your drive.
+You either run `.compute()` on the returned dask array or pass the object to
+`sentle.save_as_zarr(da, path="..."))` which setups zarr storage and saves each chunk as to disk as
+soon as it's ready. The latter enables an area and temporal range to be
+computed that is much larger than the RAM on your machine. 
 
 ## Questions you may have
 
