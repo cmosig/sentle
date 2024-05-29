@@ -1,8 +1,8 @@
 from setuptools import find_packages, setup
 
 VERSION = '2024.5.2'
-DESCRIPTION = 'Sentinel-2 scalable downloader.'
-LONG_DESCRIPTION = 'Download Sentinel-2 data cubes of any scale (larger-than-memory) on any machine with integrated cloud detection, snow masking, harmonization, merging, and temporal composites.'
+DESCRIPTION = 'Sentinel-1 and Sentinel-2 scalable downloader.'
+LONG_DESCRIPTION = 'Sentinel-1 & Sentinel-2 data cubes at large scale (bigger-than-memory) on any machine with integrated cloud detection, snow masking, harmonization, merging, and temporal composites.'
 
 # Setting up
 setup(name="sentle",
