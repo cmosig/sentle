@@ -674,7 +674,7 @@ def process_ptile_S2_dispatcher(
         ptile_array_count += ptile_timestamp != 0
 
     if time_composite_freq is not None:
-        if "S2_mask_snow" in ptile_array_bands:
+        if "S2_snow_mask" in ptile_array_bands:
             ptile_array_bands.remove("S2_snow_mask")
         if "S2_cloud_classification" in ptile_array_bands:
             ptile_array_bands.remove("S2_cloud_classification")
