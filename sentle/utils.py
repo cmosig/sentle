@@ -8,8 +8,12 @@ def bounds_from_transform_height_width_res(tf, height, width, resolution):
 
 
 def transform_height_width_from_bounds_res(left, bottom, right, top, res):
-    width = (right - left) / res
-    height = (top - bottom) / res
+    width, rem = divmod(right - left, res)
+    assert rem == 0
+    width = int(width)
+    height, rem = divmod(top - bottom, res)
+    assert rem == 0
+    height = int(height)
     tf = transform.from_bounds(west=left,
                                south=bottom,
                                east=right,

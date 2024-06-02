@@ -364,7 +364,6 @@ def process_ptile(
     target_resolution: float,
     S2_cloud_classification_device: str,
     time_composite_freq: str,
-    processing_spatial_chunk_size: int,
     S2_apply_snow_mask: bool,
     S2_apply_cloud_mask: bool,
     S2_mask_snow: bool = False,
@@ -385,7 +384,6 @@ def process_ptile(
             da=da,
             target_crs=target_crs,
             target_resolution=target_resolution,
-            processing_spatial_chunk_size=processing_spatial_chunk_size,
             S2_cloud_classification=S2_cloud_classification,
             S2_cloud_classification_device=S2_cloud_classification_device,
             S2_mask_snow=S2_mask_snow,
@@ -553,7 +551,6 @@ def process_ptile_S2_dispatcher(
     target_crs: CRS,
     target_resolution: float,
     S2_cloud_classification_device: str,
-    processing_spatial_chunk_size: int,
     time_composite_freq: str,
     S2_apply_snow_mask: bool,
     S2_apply_cloud_mask: bool,
@@ -639,7 +636,6 @@ def process_ptile_S2_dispatcher(
             S2_mask_snow=S2_mask_snow,
             S2_return_cloud_probabilities=S2_return_cloud_probabilities,
             S2_compute_nbar=S2_compute_nbar,
-            processing_spatial_chunk_size=processing_spatial_chunk_size,
             subtiles=subtiles,
             catalog=catalog,
             ptile_transform=ptile_transform,
@@ -723,7 +719,6 @@ def process_ptile_S2(
     ptile_width,
     cloudsen_model,
     items,
-    processing_spatial_chunk_size,
     S2_mask_snow: bool = False,
     S2_cloud_classification: bool = False,
     S2_return_cloud_probabilities: bool = False,
@@ -737,15 +732,12 @@ def process_ptile_S2(
         num_bands += 4
 
     # intiate one array representing the entire subtile for that timestamp
-    subtile_array = np.full(shape=(num_bands, processing_spatial_chunk_size,
-                                   processing_spatial_chunk_size),
+    subtile_array = np.full(shape=(num_bands, ptile_height, ptile_width),
                             fill_value=0,
                             dtype=np.float32)
 
     # count how many values we add per pixel to compute mean later
-    subtile_array_count = np.full(shape=(num_bands,
-                                         processing_spatial_chunk_size,
-                                         processing_spatial_chunk_size),
+    subtile_array_count = np.full(shape=(num_bands, ptile_height, ptile_width),
                                   fill_value=0,
                                   dtype=np.uint8)
 
@@ -1032,7 +1024,6 @@ def process(target_crs: CRS,
             S2_compute_nbar=S2_compute_nbar,
             S2_cloud_classification_device=S2_cloud_classification_device,
             time_composite_freq=time_composite_freq,
-            processing_spatial_chunk_size=processing_spatial_chunk_size,
             S2_apply_snow_mask=S2_apply_snow_mask,
             S2_apply_cloud_mask=S2_apply_cloud_mask,
         ),
