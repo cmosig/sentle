@@ -70,11 +70,11 @@ This code downloads data for a 40km by 40km area with one year of both Sentinel-
 
 Explanation:
 - `target_crs`: Specifies the target CRS that all data will be reprojected to.
-- `target_resolution`:  Determines the resolution that all data is reprojected to in the `target_crs`. 
-- `bound_*`: Bounds in `target_crs` of the area you want to download. Undefined behavior if difference between opposite bounds is not divisable by `target_resolution`.
+- `target_resolution`:  Determines the spatial resolution that all data is reprojected to in the `target_crs`. 
+- `bound_*`: Spatial bounds in `target_crs` of the area you want to download. Undefined behavior if difference between opposite bounds is not divisable by `target_resolution`.
 - `datetime`: Time range that will be downloaded.
 - `S2_mask_snow`: Whether to compute snow mask for Sentinel-2 data.
-- `S2_cloud_classification`: Whether to a cloud classification layer for Sentinel-2 data.
+- `S2_cloud_classification`: Whether to perform a cloud classification layer for Sentinel-2 data.
 - `S2_cloud_classification_device`: Where to run cloud classification. If you have an Nvidia GPU then pass `cuda` otherwise `cpu`(default).
 - `S2_apply_*`: Whether to apply the respective mask, i.e., replace values by NaN.
 - `S1_assets`: Which Sentinel-1 assets to download. Disable Sentinel-1 by setting this to `None`.
@@ -84,13 +84,21 @@ Explanation:
 **(2) Compute**
 
 You either run `.compute()` on the returned dask array or pass the object to
-`sentle.save_as_zarr(da, path="..."))` which setups zarr storage and saves each chunk as to disk as
+`sentle.save_as_zarr(da, path="..."))`, which setups zarr storage and saves each chunk as to disk as
 soon as it's ready. The latter enables an area and temporal range to be
 computed that is much larger than the RAM on your machine. 
 
-**(3 Visualize)**
+**(3) Visualize**
 
 Load the data with xarray and visualize using for example the awesome [lexcube](https://github.com/msoechting/lexcube) package. Here, band B02 is visualized from the above example. One is able to spot the cloud gaps and the spotty coverage during winter.
+
+```
+import lexcube
+import xarray as xr
+
+da = xr.open_zarr("mycube.zarr").sentle
+lexcube.Cube3DWidget(da.sel(band="B02"), vmin=0, vmax=4000)
+```
 
 <p align="center">
 <img src=https://github.com/cmosig/sentle/assets/32590522/33b7f6a0-532e-453b-80db-748d99e753a2/>
