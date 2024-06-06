@@ -338,17 +338,9 @@ def process_S2_subtile(intersecting_windows, stac_item, timestamp,
 def height_width_from_bounds_res(left, bottom, right, top, res):
     # determine width and height based on bounds and resolution
     width, w_rem = divmod(abs(right - left), res)
+    assert w_rem == 0
     height, h_rem = divmod(abs(top - bottom), res)
-
-    if h_rem > 0:
-        warnings.warn(
-            "Specified top/bottom bounds are not perfectly divisable by specified target_resolution. The resulting coverage will be slightly cropped"
-        )
-    if w_rem > 0:
-        warnings.warn(
-            "Specified left/right bounds are not perfectly divisable by specified target_resolution. The resulting coverage will be slightly cropped"
-        )
-
+    assert h_rem == 0
     return height, width
 
 
@@ -829,6 +821,24 @@ def process_ptile_S2(
     return subtile_array, subtile_array_bands
 
 
+def check_and_round_bounds(left, bottom, right, top, res):
+    h_rem = abs(top - bottom) % res
+    if h_rem != 0:
+        warnings.warn(
+            "Specified top/bottom bounds are not perfectly divisable by specified target_resolution. The resulting coverage will be rounded up to the next pixel value."
+        )
+        top -= h_rem
+
+    w_rem = abs(right - left) % res
+    if w_rem != 0:
+        warnings.warn(
+            "Specified left/right bounds are not perfectly divisable by specified target_resolution. The resulting coverage will be rounded up to the next pixel value."
+        )
+        right -= w_rem
+
+    return left, bottom, right, top
+
+
 def process(target_crs: CRS,
             target_resolution: float,
             bound_left: float,
@@ -982,6 +992,9 @@ def process(target_crs: CRS,
 
     # remove duplicates for timeaxis
     df = df.drop_duplicates("ts")
+
+    bound_left, bound_bottom, bound_right, bound_top = check_and_round_bounds(
+        bound_left, bound_bottom, bound_right, bound_top, target_resolution)
 
     height, width = height_width_from_bounds_res(bound_left, bound_bottom,
                                                  bound_right, bound_top,
