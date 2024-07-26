@@ -164,6 +164,9 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
 
 
 def get_stac_api_io():
+    """
+    Returns a StacApiIO object with a retry policy that retries on 502, 503, 504
+    """
     retry = Retry(total=5,
                   backoff_factor=1,
                   status_forcelist=[502, 503, 504],
@@ -210,6 +213,12 @@ def process_S2_subtile(intersecting_windows, stac_item, timestamp,
                        S2_mask_snow: bool, S2_cloud_classification: bool,
                        S2_compute_nbar: bool,
                        S2_cloud_classification_device: str, cloud_mask_model):
+    """Processes a single sentinel 2 subtile. This includes downloading the
+    data, reprojecting it to the target_crs and target_resolution, applying
+    cloud and snow masks and computing NBAR if requested. The function returns
+    the reprojected subtile, the write window and the band names of the
+    reprojected subtile.
+    """
 
     # init array that needs to be filled
     subtile_array = np.empty(
@@ -388,6 +397,22 @@ def process_ptile(
 
 def process_ptile_S1(da: xr.DataArray, target_crs: CRS,
                      target_resolution: float, time_composite_freq: str):
+    """Processes a single sentinel 1 ptile. This includes downloading the
+    data, reprojecting it to the target_crs and target_resolution. The function
+    returns the reprojected ptile.
+
+    Parameters
+    ----------
+    da : xr.DataArray
+        DataArray containing the sentinel 1 data.
+    target_crs : CRS
+        CRS to which the data should be reprojected.
+    target_resolution : float
+        Resolution to which the data should be reprojected.
+    time_composite_freq : str
+        Frequency for temporal composites. If None, no temporal composites are
+        computed.
+    """
 
     # compute bounds of ptile
     ptile_bounds = bounds_from_dataarray(da, target_resolution)
@@ -1059,6 +1084,8 @@ def save_as_zarr(da, path: str):
 
     Parameters
     ----------
+    da : xr.DataArray
+        DataArray that should be saved as zarr.
     path : str
         Specifies where save path of the zarr file.    
     """
