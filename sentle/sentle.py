@@ -362,8 +362,12 @@ def process_ptile(
     S2_cloud_classification: bool = False,
     S2_return_cloud_probabilities: bool = False,
     S2_compute_nbar: bool = False,
+    polygon: Polygon = None,
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
+
+    if polygon is not None and not polygon.intersects(box(da.x.min().item(), da.y.min().item(), da.x.max().item(), da.y.max().item())):
+        return da
 
     # TODO add assert to mutually exclude chunks where both s1 and s2 bands are present
     if ("vv" in da.band.data or "vh" in da.band.data):
@@ -821,19 +825,21 @@ def process_ptile_S2(
     return subtile_array, subtile_array_bands
 
 
-def check_and_round_bounds(left, bottom, right, top, res):
-    h_rem = abs(top - bottom) % res
+def check_and_round_bounds(left, bottom, right, top, round_value, bounds_source):
+    h_rem = abs(top - bottom) % round_value
     if h_rem != 0:
-        warnings.warn(
-            "Specified top/bottom bounds are not perfectly divisable by specified target_resolution. The resulting coverage will be rounded up to the next pixel value."
-        )
+        if bounds_source == "user":
+            warnings.warn(
+                "Specified top/bottom bounds are not perfectly divisable by specified target_resolution. The resulting coverage will be rounded up to the next pixel value."
+            )
         top -= h_rem
 
-    w_rem = abs(right - left) % res
+    w_rem = abs(right - left) % round_value
     if w_rem != 0:
-        warnings.warn(
-            "Specified left/right bounds are not perfectly divisable by specified target_resolution. The resulting coverage will be rounded up to the next pixel value."
-        )
+        if bounds_source == "user":
+            warnings.warn(
+                "Specified left/right bounds are not perfectly divisable by specified target_resolution. The resulting coverage will be rounded up to the next pixel value."
+            )
         right -= w_rem
 
     return left, bottom, right, top
@@ -841,11 +847,13 @@ def check_and_round_bounds(left, bottom, right, top, res):
 
 def process(target_crs: CRS,
             target_resolution: float,
-            bound_left: float,
-            bound_bottom: float,
-            bound_right: float,
-            bound_top: float,
             datetime: DatetimeLike,
+            bound_left: float = None,
+            bound_bottom: float = None,
+            bound_right: float = None,
+            bound_top: float = None,
+            polygon: Polygon = None,
+            polygon_derive_bounds_method: str = "processing_chunk",
             processing_spatial_chunk_size: int = 4000,
             S1_assets: list[str] = ["vh", "vv"],
             S2_mask_snow: bool = False,
@@ -868,14 +876,18 @@ def process(target_crs: CRS,
         Specifies the target CRS that all data will be reprojected to.
     target_resolution : float
         Determines the resolution that all data is reprojected to in the `target_crs`.
-    bound_left : float
+    bound_left : float, default=None
         Left bound of area that is supposed to be covered. Unit is in `target_crs`.
-    bound_bottom : float
+    bound_bottom : float, default=None
         Bottom bound of area that is supposed to be covered. Unit is in `target_crs`.
-    bound_right : float
+    bound_right : float, default=None
         Right bound of area that is supposed to be covered. Unit is in `target_crs`.
-    bound_top : float
+    bound_top : float, default=None
         Top bound of area that is supposed to be covered. Unit is in `target_crs`.
+    polygon : Polygon, default=None
+        Polygon from which to derive bounds can be specified instead of bounds.  Mutually exclusive with bounds arguments. Polygon is expected to be in `target_crs`. Will be ignored if bounds_* are not None.
+    polygon_derive_bounds_method: str, default="processing_chunk"
+        Method with which to derive bounds from polygon. Either `processing_chunk` where the bounds will be derived to the closest divisable of the `processing_spatial_chunk_size` or analogous for "target_resolution".
     datetime : DatetimeLike
         Specifies time range of data to be downloaded. This is forwarded to the respective stac interface.
     S2_mask_snow : bool, default=False
@@ -914,6 +926,23 @@ def process(target_crs: CRS,
         warnings.warn(
             "Temporal aggregation is specified, but neither cloud or snow mask is set to be applied. This may yield useless aggregations for Sentinel-2 data."
         )
+
+    if (bound_left is None and bound_bottom is None and bound_right is None
+            and bound_top is None):
+        assert polygon_derive_bounds_method in set(
+            ["target_resolution",
+             "processing_chunk"]), "Unexpected polygon derive method."
+        assert polygon is not None, "bounds and polygon are None"
+        bounds_round_value = target_resolution if polygon_derive_bounds_method == "target_resolution" else processing_spatial_chunk_size
+        bound_left, bound_bottom, bound_right, bound_top = polygon.bounds
+        bounds_source = "polygon"
+    else:
+        bounds_round_value = target_resolution
+        bounds_source = "user"
+        assert polygon is None, "Both bounds and polygon are not None, but they are mutually exclusive."
+        assert (bound_left is not None and bound_bottom is not None
+                and bound_right is not None and bound_top is not None
+                ), "All bound_* must either be None or have a value"
 
     # setup local processor
     cluster = LocalCluster(dashboard_address=dashboard_address,
@@ -994,7 +1023,8 @@ def process(target_crs: CRS,
     df = df.drop_duplicates("ts")
 
     bound_left, bound_bottom, bound_right, bound_top = check_and_round_bounds(
-        bound_left, bound_bottom, bound_right, bound_top, target_resolution)
+        bound_left, bound_bottom, bound_right, bound_top, bounds_round_value,
+        bounds_source)
 
     height, width = height_width_from_bounds_res(bound_left, bound_bottom,
                                                  bound_right, bound_top,
@@ -1039,6 +1069,7 @@ def process(target_crs: CRS,
             time_composite_freq=time_composite_freq,
             S2_apply_snow_mask=S2_apply_snow_mask,
             S2_apply_cloud_mask=S2_apply_cloud_mask,
+            polygon=polygon,
         ),
         template=da)
 
