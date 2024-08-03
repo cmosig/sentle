@@ -21,6 +21,7 @@ detection, snow masking, harmonization, merging, and temporal composites.</em>
 
 1) The model for cloud detection will be made available within the next couple of weeks.
 2) **This package is in early alpha stage. There will be bugs!** If you encounter any error, warning, memory issue, etc. please open a GitHub issue with the code to reproduce.
+3) This package is meant for large-scale processing and any area that is smaller than 8km in width and height will not run faster because of the underlying processing scheme. 
 
 ## Installing
 
