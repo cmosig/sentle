@@ -465,6 +465,10 @@ def process_ptile_S1(da: xr.DataArray, target_crs: CRS,
     for item in item_list:
         # iterate through S1 assets
         for i, s1_asset in enumerate(da.band.data):
+            if s1_asset not in item.assets:
+                # ii's rate and weird, but sometimes assets are missing
+                continue
+
             with rasterio.open(item.assets[s1_asset].href) as dr:
                 # reproject ptile bounds to S1 tile CRS
                 ptile_bounds_local_crs = warp.transform_bounds(
