@@ -881,7 +881,9 @@ def process(target_crs: CRS,
             num_workers: int = 1,
             threads_per_worker: int = 1,
             memory_limit_per_worker: str = None,
-            dashboard_address: str = "127.0.0.1:9988",
+            dask_dashboard_address: str = "127.0.0.1:9988",
+            dask_scheduler_address: str = "127.0.0.1",
+            dask_scheduler_port: int = 8786,
             time_composite_freq: str = None,
             S2_apply_snow_mask: bool = False,
             S2_apply_cloud_mask: bool = False):
@@ -919,7 +921,7 @@ def process(target_crs: CRS,
         Number threads to use for each worker. Anything >1 has not been tested.
     memory_limit_per_worker: str, default=None
         Maximum amount of RAM per worker, passed to dask `LocalCluster`. `None` means no limit and is recommended.
-    dashboard_address: str, default="127.0.0.1:9988"
+    dask_dashboard_address: str, default="127.0.0.1:9988"
         Address where the dask dashboard can be accessed.
     time_composite_freq: str, default=None
         Rounding interval across which data is averaged.
@@ -940,13 +942,25 @@ def process(target_crs: CRS,
             "Temporal aggregation is specified, but neither cloud or snow mask is set to be applied. This may yield useless aggregations for Sentinel-2 data."
         )
 
-    # setup local processor
-    cluster = LocalCluster(dashboard_address=dashboard_address,
-                           n_workers=num_workers,
-                           threads_per_worker=threads_per_worker,
-                           memory_limit=memory_limit_per_worker)
-    client = Client(cluster)
-    print("Dask client dashboard link:", client.dashboard_link)
+    # checking if dask cluster is already running on specified address
+    try:
+        # print("Checking for existing dask cluster...")
+        client = Client(
+            address=f"tcp://{dask_scheduler_address}:{dask_scheduler_port}",
+            timeout="1s")
+        # print(f"Dask cluster found. Dashboard link: {client.dashboard_link}")
+
+    except OSError:
+        # setup local cluster
+        print(f"Setting up dask cluster with {num_workers} workers.")
+        cluster = LocalCluster(dashboard_address=dask_dashboard_address,
+                               host=dask_scheduler_address,
+                               scheduler_port=dask_scheduler_port,
+                               n_workers=num_workers,
+                               threads_per_worker=threads_per_worker,
+                               memory_limit=memory_limit_per_worker)
+        client = Client(cluster)
+        print("Dask client dashboard link:", client.dashboard_link)
 
     # load Sentinel 2 grid
     Variable("s2gridfile").set(
