@@ -966,7 +966,11 @@ def process(target_crs: CRS,
         client = Client(cluster)
         print("Dask client dashboard link:", client.dashboard_link)
 
-    # load Sentinel 2 grid
+    # load Sentinel 2 grid and delete Variable beforehand to avoid too many files open
+    # NOTE I tried to implement checking if the Variable exsists through
+    # Timeout, but that didn't fully work
+    # TODO find a better solution than relaoding (although its probably fast enough)
+    Variable("s2gridfile").delete()
     Variable("s2gridfile").set(
         gpd.read_file(
             pkg_resources.resource_filename(
