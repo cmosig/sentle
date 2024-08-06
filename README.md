@@ -119,9 +119,13 @@ Increase the number of workers using the `num_workers` parameter when setting up
 #### My dask graph is too big, what do I do?
 Increase the `processing_spatial_chunk_size` from `4000` to something higher in the `process` function. This will increase spatial chunk sizes, but will also increase worker memory requirements. 
 
-### When is the dask cluster setup?
+#### When is the dask cluster setup?
 
 Every time you start a python kernel and run `sentle.process`, a new dask cluster is setup. When you run `sentle.process` again, the old cluster is used. If you want to start a new cluster, you need to restart the kernel.
+
+#### I am running this outside jupyter inside a normal kernel, but nothing is properly.
+
+You need to wrap the sentle code inside a `if __name__ == "__main__:` for the dask stuff to work properly.
 
 ## Contributing
 
