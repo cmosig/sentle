@@ -121,7 +121,7 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
         geom=box(left, bottom, right, top))["coordinates"])
 
     # extract overlapping sentinel tiles
-    s2grid = s2grid[s2grid["geometry"].intersects(transformed_bounds)]
+    s2grid = s2grid[s2grid["geometry"].intersects(transformed_bounds)].copy()
 
     general_subtile_windows = [
         windows.Window(col_off, row_off, S2_subtile_size, S2_subtile_size)
