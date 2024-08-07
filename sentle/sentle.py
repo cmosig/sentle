@@ -460,10 +460,12 @@ def process_ptile_S1(da: xr.DataArray, target_crs: CRS,
                          fill_value=0,
                          dtype=np.float32)
 
-    # count how many values we add per pixel to compute mean later
-    tile_array_count = np.full(shape=(da.shape[1], da.shape[2], da.shape[3]),
-                               fill_value=0,
-                               dtype=np.uint8)
+    if time_composite_freq is not None:
+        # count how many values we add per pixel to compute mean later
+        tile_array_count = np.full(shape=(da.shape[1], da.shape[2],
+                                          da.shape[3]),
+                                   fill_value=0,
+                                   dtype=np.uint8)
 
     # determine ptile dimensions and transform from bounds
     ptile_transform, ptile_height, ptile_width = transform_height_width_from_bounds_res(
@@ -542,21 +544,24 @@ def process_ptile_S1(da: xr.DataArray, target_crs: CRS,
                                write_win.col_off:write_win.col_off +
                                write_win.width] += data_repr
 
-                    # save where we have NaNs
-                    tile_array_count[i, write_win.row_off:write_win.row_off +
-                                     write_win.height,
-                                     write_win.col_off:write_win.col_off +
-                                     write_win.width] += ~(data_repr == 0)
+                    if time_composite_freq is not None:
+                        # save where we have NaNs
+                        tile_array_count[i,
+                                         write_win.row_off:write_win.row_off +
+                                         write_win.height,
+                                         write_win.col_off:write_win.col_off +
+                                         write_win.width] += ~(data_repr == 0)
 
             except rasterio.errors.RasterioIOError as e:
                 print("Failed to read from stac repository.", type(e))
                 print("This is a planetary computer issue, not a sentle issue")
                 print("Asset", band, href)
 
-    with warnings.catch_warnings():
-        # filter out divide by zero warning, this is expected here
-        warnings.simplefilter("ignore")
-        tile_array /= tile_array_count
+    if time_composite_freq is not None:
+        with warnings.catch_warnings():
+            # filter out divide by zero warning, this is expected here
+            warnings.simplefilter("ignore")
+            tile_array /= tile_array_count
 
     # replace zeros with nans
     tile_array[tile_array == 0] = np.nan
@@ -651,13 +656,16 @@ def process_ptile_S2_dispatcher(
                           fill_value=0,
                           dtype=np.float32)
 
-    # count how many values we add per pixel to compute mean later
-    ptile_array_count = np.full(shape=(num_bands, da.shape[2], da.shape[3]),
-                                fill_value=0,
-                                dtype=np.uint8)
+    if time_composite_freq is not None:
+        # count how many values we add per pixel to compute mean later
+        ptile_array_count = np.full(shape=(num_bands, da.shape[2],
+                                           da.shape[3]),
+                                    fill_value=0,
+                                    dtype=np.uint8)
 
     ptile_array_bands = None
     timestamps_it = items["ts"].drop_duplicates().tolist()
+    # sanity check on number of timestamps with or without time agg
     assert (len(timestamps_it) == 1 and time_composite_freq is None) or (
         len(timestamps_it) >= 1 and time_composite_freq is not None)
     for ts in timestamps_it:
@@ -700,8 +708,9 @@ def process_ptile_S2_dispatcher(
         # save new data
         ptile_array += ptile_timestamp
 
-        # count where we added data
-        ptile_array_count += ptile_timestamp != 0
+        if time_composite_freq is not None:
+            # count where we added data
+            ptile_array_count += ptile_timestamp != 0
 
     if time_composite_freq is not None:
         if S2_snow_mask_band in ptile_array_bands:
@@ -709,11 +718,11 @@ def process_ptile_S2_dispatcher(
         if S2_cloud_mask_band in ptile_array_bands:
             ptile_array_bands.remove(S2_cloud_mask_band)
 
-    # compute mean based on sum and count for each pixel
-    with warnings.catch_warnings():
-        # filter out divide by zero warning, this is expected here
-        warnings.simplefilter("ignore")
-        ptile_array /= ptile_array_count
+        # compute mean based on sum and count for each pixel
+        with warnings.catch_warnings():
+            # filter out divide by zero warning, this is expected here
+            warnings.simplefilter("ignore")
+            ptile_array /= ptile_array_count
 
     # ... and set all such pixels to nan (of which some are already nan because
     # of divide by zero)
