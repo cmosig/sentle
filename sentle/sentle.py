@@ -686,6 +686,9 @@ def process_ptile_S2_dispatcher(
             cloudsen_model=cloudsen_model,
             items=items[items["ts"] == ts])
 
+        # replace nans with zero, to that sum works properly
+        ptile_timestamp = np.nan_to_num(ptile_timestamp, 0)
+
         # apply masks and drop classification layers if doing temporal aggregation
         if S2_apply_snow_mask:
             snow_index = ptile_array_bands.index(S2_snow_mask_band)
