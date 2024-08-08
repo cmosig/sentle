@@ -127,6 +127,11 @@ Every time you start a python kernel and run `sentle.process`, a new dask cluste
 
 You need to wrap the sentle code inside a `if __name__ == "__main__:` for the dask stuff to work properly.
 
+#### My program crashes, sometimes after a while with "OSError: too many files open"
+
+The number of files opened is limited and each dask worker [opens a couple of
+files](https://distributed.dask.org/en/stable/faq.html#too-many-open-file-descriptors). You'll have to increase the limit with `ulimit -n 100000` or ask your administrator. This is a dask issue :) 
+
 ## Contributing
 
 Please submit issues or pull requests if you feel like something is missing or
