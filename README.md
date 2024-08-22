@@ -25,6 +25,8 @@ detection, snow masking, harmonization, merging, and temporal composites.</em>
 
 ## Installing
 
+This package is tested with Python 3.12.*. It may or may not work with other versions. 
+
 ```
 pip install sentle
 ```
@@ -123,11 +125,11 @@ Increase the `processing_spatial_chunk_size` from `4000` to something higher in 
 
 Every time you start a python kernel and run `sentle.process`, a new dask cluster is setup. When you run `sentle.process` again, the old cluster is used. If you want to start a new cluster, you need to restart the kernel.
 
-#### I am running this outside jupyter inside a normal kernel, but nothing is properly.
+#### I am running this outside jupyter inside a normal kernel, but there are weird errors.
 
-You need to wrap the sentle code inside a `if __name__ == "__main__:` for the dask stuff to work properly.
+You need to wrap the sentle code inside a `if __name__ == "__main__:` for the dask code to work properly. This is dask requirement.
 
-#### My program crashes, sometimes after a while with "OSError: too many files open"
+#### My program crashes after a while with "OSError: too many files open".
 
 The number of files opened is limited and each dask worker [opens a couple of
 files](https://distributed.dask.org/en/stable/faq.html#too-many-open-file-descriptors). You'll have to increase the limit with `ulimit -n 100000` or ask your administrator. This is a dask issue :) 
