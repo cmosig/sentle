@@ -900,6 +900,7 @@ def process(target_crs: CRS,
             bound_right: float,
             bound_top: float,
             datetime: DatetimeLike,
+            zarr_path: str,
             processing_spatial_chunk_size: int = 4000,
             S1_assets: list[str] = ["vh", "vv"],
             S2_mask_snow: bool = False,
@@ -908,14 +909,9 @@ def process(target_crs: CRS,
             S2_return_cloud_probabilities: bool = False,
             S2_compute_nbar: bool = False,
             num_workers: int = 1,
-            threads_per_worker: int = 1,
-            memory_limit_per_worker: str = None,
-            dask_dashboard_address: str = "127.0.0.1:9988",
-            dask_scheduler_address: str = "127.0.0.1",
-            dask_scheduler_port: int = 8786,
             time_composite_freq: str = None,
             S2_apply_snow_mask: bool = False,
-            S2_apply_cloud_mask: bool = False):
+            S2_apply_cloud_mask: bool = False,):
     """
     Parameters
     ----------
@@ -946,50 +942,21 @@ def process(target_crs: CRS,
         Whether to compute NBAR using the sen2nbar package. Coming soon.
     num_workers : int, default=1
         Number of cores to scale computation across. Plan 4GiB of RAM per worker.
-    threads_per_worker: int, default=1
-        Number threads to use for each worker. Anything >1 has not been tested.
-    memory_limit_per_worker: str, default=None
-        Maximum amount of RAM per worker, passed to dask `LocalCluster`. `None` means no limit and is recommended.
-    dask_dashboard_address: str, default="127.0.0.1:9988"
-        Address where the dask dashboard can be accessed.
     time_composite_freq: str, default=None
         Rounding interval across which data is averaged.
     S2_apply_snow_mask: bool, default=False
         Whether to replace snow with NaN.  
     S2_apply_cloud_mask: bool, default=False
         Whether to replace anything that is not clear sky with NaN.  
+    zarr_path: str,
+       Path of where to create the zarr storage.
     """
-
-    if threads_per_worker > 1:
-        warnings.warn(
-            "More then one thread per worker may overflow memory. Not tested yet"
-        )
 
     if time_composite_freq is not None and (not S2_apply_snow_mask
                                             and not S2_apply_cloud_mask):
         warnings.warn(
             "Temporal aggregation is specified, but neither cloud or snow mask is set to be applied. This may yield useless aggregations for Sentinel-2 data."
         )
-
-    # checking if dask cluster is already running on specified address
-    try:
-        # print("Checking for existing dask cluster...")
-        client = Client(
-            address=f"tcp://{dask_scheduler_address}:{dask_scheduler_port}",
-            timeout="1s")
-        # print(f"Dask cluster found. Dashboard link: {client.dashboard_link}")
-
-    except OSError:
-        # setup local cluster
-        print(f"Setting up dask cluster with {num_workers} workers.")
-        cluster = LocalCluster(dashboard_address=dask_dashboard_address,
-                               host=dask_scheduler_address,
-                               scheduler_port=dask_scheduler_port,
-                               n_workers=num_workers,
-                               threads_per_worker=threads_per_worker,
-                               memory_limit=memory_limit_per_worker)
-        client = Client(cluster)
-        print("Dask client dashboard link:", client.dashboard_link)
 
     # load Sentinel 2 grid
     # TODO find a better solution than relaoding (although its probably fast enough)
@@ -1076,73 +1043,63 @@ def process(target_crs: CRS,
     else:
         band_chunks = len(bands_to_save)
 
-    # chunks with one per timestep -> many empty timesteps for specific areas,
-    # because we have all the timesteps for Germany
-    da = xr.DataArray(
-        data=dask.array.full(
-            shape=(df["ts"].nunique(), len(bands_to_save), height, width),
-            chunks=(1, band_chunks, processing_spatial_chunk_size,
-                    processing_spatial_chunk_size),
-            # needs to be float in order to store NaNs
-            dtype=np.float32,
-            fill_value=np.nan),
-        dims=["time", "band", "y", "x"],
-        coords=dict(
-            time=df["ts"].tolist(),
-            band=bands_to_save,
-            x=np.arange(bound_left, bound_right,
-                        target_resolution).astype(np.float32),
-            # we do y-axis in reverse: top-left coordinate
-            y=np.arange(bound_top, bound_bottom,
-                        -target_resolution).astype(np.float32)))
+    # setup zarr storage
+    store = zarr.storage.DirectoryStore(path, dimension_separator=".")
 
-    da = da.map_blocks(
-        process_ptile,
-        kwargs=dict(
-            target_crs=target_crs,
-            target_resolution=target_resolution,
-            S2_mask_snow=S2_mask_snow,
-            S2_cloud_classification=S2_cloud_classification,
-            S2_return_cloud_probabilities=S2_return_cloud_probabilities,
-            S2_compute_nbar=S2_compute_nbar,
-            S2_cloud_classification_device=S2_cloud_classification_device,
-            time_composite_freq=time_composite_freq,
-            S2_apply_snow_mask=S2_apply_snow_mask,
-            S2_apply_cloud_mask=S2_apply_cloud_mask,
-        ),
-        template=da)
+    # create array for where to store the processed sentinel data
+    data = zarr.create(shape=(df["ts"].nunique(), len(bands_to_save), height, width),
+                chunks=(1,band_chunks,process_S2_subtile,processing_spatial_chunk_size),
+                dtype=np.float32,
+                fill_value=None,
+                store=store,
+                path="/sentle",
+                write_empty_chunks=False,
+                compressor=Blosc(cname="lz4"))
+    data.attrs.update(ZARR_DATA_ATTRS)
+
+    # arrays for storage of dimension information
+    band = zarr.create(shape=(14),
+            dtype="<U3",
+            store=store,
+            path="/band")
+    band[:] = bands_to_save
+    band.attrs.update(ZARR_BAND_ATTRS)
+    x = zarr.create(shape=(width), 
+            dtype="float32",
+            store=store,
+            path="/x")
+    x[:]  = np.arange(bound_left, bound_right,target_resolution).astype(np.float32)
+    x.attrs.update(x_attrs)
+    y = zarr.create(shape=(height), 
+            dtype="float32",
+            store=store,
+            path="/y")
+    y[:]  = np.arange(bound_top, bound_bottom, -target_resolution).astype(np.float32)
+    y.attrs.update(y_attrs)
+    time = zarr.create(shape=(5),  dtype="int64", store=store, path="/time", fill_value=None)
+    # TODO convert timestamps to this custom xarray format, maybe copy from xarray lib?
+    time.attrs.update(time_attrs)
+
+    # da = da.map_blocks(
+    #     process_ptile,
+    #     kwargs=dict(
+    #         target_crs=target_crs,
+    #         target_resolution=target_resolution,
+    #         S2_mask_snow=S2_mask_snow,
+    #         S2_cloud_classification=S2_cloud_classification,
+    #         S2_return_cloud_probabilities=S2_return_cloud_probabilities,
+    #         S2_compute_nbar=S2_compute_nbar,
+    #         S2_cloud_classification_device=S2_cloud_classification_device,
+    #         time_composite_freq=time_composite_freq,
+    #         S2_apply_snow_mask=S2_apply_snow_mask,
+    #         S2_apply_cloud_mask=S2_apply_cloud_mask,
+    #     ),
+    #     template=da)
 
     # remove timezone, otherwise crash -> zarr caveat
     # ... and use numpy.datetime64 with second precision
-    return da.assign_coords(
-        dict(time=[
-            pd.Timestamp(i.replace(tzinfo=None)).to_datetime64()
-            for i in da.time.data
-        ]))
-
-
-def save_as_zarr(da, path: str):
-    """
-    Triggers dask compute and saves chunks whenever they have been
-    processed. Empty chunks are not written. Chunks are compressed with
-    lz4. 
-
-    Parameters
-    ----------
-    da : xr.DataArray
-        DataArray that should be saved as zarr.
-    path : str
-        Specifies where save path of the zarr file.    
-    """
-
-    # NOTE the compression may not be optimal, need to benchmark
-    store = zarr.storage.DirectoryStore(path, dimension_separator=".")
-    da.rename("sentle").to_zarr(store=store,
-                                mode="w-",
-                                compute=True,
-                                encoding={
-                                    "sentle": {
-                                        "write_empty_chunks": False,
-                                        "compressor": Blosc(cname="lz4"),
-                                    }
-                                })
+    # return da.assign_coords(
+    #     dict(time=[
+    #         pd.Timestamp(i.replace(tzinfo=None)).to_datetime64()
+    #         for i in da.time.data
+    #     ]))
