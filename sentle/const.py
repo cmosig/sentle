@@ -26,6 +26,8 @@ ZARR_Y_ATTRS = {'_ARRAY_DIMENSIONS': ['y']}
 ZARR_TIME_ATTRS = {
     '_ARRAY_DIMENSIONS': ['time'],
     'calendar': 'proleptic_gregorian',
-    'units': 'days since 2023-06-01 00:00:00'
+    'units': 'days since 1970-01-01 00:00:00'
 }
 ZARR_DATA_ATTRS = {'_ARRAY_DIMENSIONS': ['time', 'band', 'y', 'x']}
+
+STAC_ENDPOINT = "https://planetarycomputer.microsoft.com/api/stac/v1"

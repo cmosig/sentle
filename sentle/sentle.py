@@ -1,7 +1,6 @@
 import itertools
 import warnings
 
-import dask.array
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -13,7 +12,6 @@ import scipy.ndimage as sc
 import xarray as xr
 import zarr
 from affine import Affine
-from dask.distributed import Client, LocalCluster, Variable
 from numcodecs import Blosc
 from pystac_client.item_search import DatetimeLike
 from pystac_client.stac_api_io import StacApiIO
@@ -26,7 +24,7 @@ from urllib3 import Retry
 from .cloud_mask import compute_cloud_mask, load_cloudsen_model, S2_cloud_prob_bands, S2_cloud_mask_band
 from .snow_mask import compute_potential_snow_layer, S2_snow_mask_band
 from .utils import bounds_from_transform_height_width_res, transform_height_width_from_bounds_res
-from .const import S2_RAW_BANDS, S2_RAW_BAND_RESOLUTION, S2_subtile_size
+from .const import *
 
 
 def recrop_write_window(win, overall_height, overall_width):
@@ -111,8 +109,10 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
         S2_subtile_size) == 0, "S2_subtile_size needs to be a divisor of 10980"
 
     # load sentinel grid
-    s2grid = Variable("s2gridfile").get()
-    assert s2grid.crs == "EPSG:4326"
+
+    # TODO fix this differently
+    # s2grid = Variable("s2gridfile").get()
+    # assert s2grid.crs == "EPSG:4326"
 
     # convert bounds to sentinel grid crs
     transformed_bounds = Polygon(*warp.transform_geom(
@@ -360,7 +360,7 @@ def height_width_from_bounds_res(left, bottom, right, top, res):
 
 
 def open_catalog():
-    return pystac_client.Client.open(Variable("stac_endpoint").get(),
+    return pystac_client.Client.open(STAC_ENDPOINT,
                                      modifier=planetary_computer.sign_inplace,
                                      stac_io=get_stac_api_io())
 
@@ -951,12 +951,11 @@ def process(
         )
 
     # load Sentinel 2 grid
-    # TODO find a better solution than relaoding (although its probably fast enough)
-    # checking with Timeout, I was not able to catch the internal exception somehow
-    Variable("s2gridfile").set(
-        gpd.read_file(
-            pkg_resources.resource_filename(
-                __name__, "data/sentinel2_grid_stripped_with_epsg.gpkg")))
+    # TODO fix this
+    # Variable("s2gridfile").set(
+    #     gpd.read_file(
+    #         pkg_resources.resource_filename(
+    #             __name__, "data/sentinel2_grid_stripped_with_epsg.gpkg")))
 
     # TODO support to only download subset of bands (mutually exclusive with cloud classification and partially snow_mask) -> or no sentinel 2 at all
 
@@ -974,8 +973,6 @@ def process(
         bands_to_save += S1_assets
 
     # sign into planetary computer
-    stac_endpoint = "https://planetarycomputer.microsoft.com/api/stac/v1"
-    Variable("stac_endpoint").set(stac_endpoint)
     catalog = open_catalog()
 
     # get all items within date range and area
@@ -1005,27 +1002,28 @@ def process(
 
     # remove duplicates for timeaxis
     df = df.drop_duplicates("ts")
+    number_of_zarr_timesteps = df["ts"].nunique()
 
+    # compute bounds, with and height  for the entire dataset
     bound_left, bound_bottom, bound_right, bound_top = check_and_round_bounds(
         bound_left, bound_bottom, bound_right, bound_top, target_resolution)
-
     height, width = height_width_from_bounds_res(bound_left, bound_bottom,
                                                  bound_right, bound_top,
                                                  target_resolution)
 
     # figure out band chunk shape
     if S1_assets is not None:
-        band_chunks = (len(bands_to_save) - len(S1_assets), len(S1_assets))
+        band_chunks = len(bands_to_save) - len(S1_assets)
     else:
         band_chunks = len(bands_to_save)
 
     # setup zarr storage
-    store = zarr.storage.DirectoryStore(path, dimension_separator=".")
+    store = zarr.storage.DirectoryStore(zarr_path, dimension_separator=".")
 
     # create array for where to store the processed sentinel data
-    data = zarr.create(shape=(df["ts"].nunique(), len(bands_to_save), height,
-                              width),
-                       chunks=(1, band_chunks, process_S2_subtile,
+    data = zarr.create(shape=(number_of_zarr_timesteps, len(bands_to_save),
+                              height, width),
+                       chunks=(1, band_chunks, processing_spatial_chunk_size,
                                processing_spatial_chunk_size),
                        dtype=np.float32,
                        fill_value=None,
@@ -1035,25 +1033,40 @@ def process(
                        compressor=Blosc(cname="lz4"))
     data.attrs.update(ZARR_DATA_ATTRS)
 
+    # ------
     # arrays for storage of dimension information
-    band = zarr.create(shape=(14), dtype="<U3", store=store, path="/band")
+
+    # band dimension
+    band = zarr.create(shape=(len(bands_to_save)),
+                       dtype="<U3",
+                       store=store,
+                       path="/band")
     band[:] = bands_to_save
     band.attrs.update(ZARR_BAND_ATTRS)
+
+    # x dimension
     x = zarr.create(shape=(width), dtype="float32", store=store, path="/x")
     x[:] = np.arange(bound_left, bound_right,
                      target_resolution).astype(np.float32)
-    x.attrs.update(x_attrs)
+    x.attrs.update(ZARR_X_ATTRS)
+
+    # y dimension
     y = zarr.create(shape=(height), dtype="float32", store=store, path="/y")
     y[:] = np.arange(bound_top, bound_bottom,
                      -target_resolution).astype(np.float32)
-    y.attrs.update(y_attrs)
-    time = zarr.create(shape=(5),
+    y.attrs.update(ZARR_Y_ATTRS)
+
+    # time dimension
+    time = zarr.create(shape=(number_of_zarr_timesteps),
                        dtype="int64",
                        store=store,
                        path="/time",
                        fill_value=None)
-    # TODO convert timestamps to this custom xarray format, maybe copy from xarray lib?
-    time.attrs.update(time_attrs)
+
+    temp = df["ts"].dt.tz_localize(tz=None) - pd.Timestamp(0, tz=None)
+    time[:] = (df["ts"].dt.tz_localize(tz=None) -
+               pd.Timestamp(0, tz=None)).dt.days.tolist()
+    time.attrs.update(ZARR_TIME_ATTRS)
 
     # da = da.map_blocks(
     #     process_ptile,
