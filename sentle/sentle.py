@@ -12,6 +12,7 @@ import scipy.ndimage as sc
 import xarray as xr
 import zarr
 from affine import Affine
+from joblib import Parallel, delayed
 from numcodecs import Blosc
 from pystac_client.item_search import DatetimeLike
 from pystac_client.stac_api_io import StacApiIO
@@ -1073,6 +1074,37 @@ def process(
 
     # close up store as we are done with init
     store.close()
+
+    # figure out jobs for multiprocessing -> one per chunk
+    config = {
+        "target_crs": target_crs,
+        "target_resolution": target_resolution,
+        "S2_cloud_classification_device": S2_cloud_classification_device,
+        "time_composite_freq": time_composite_freq,
+        "S2_apply_snow_mask": S2_apply_snow_mask,
+        "S2_apply_cloud_mask": S2_apply_cloud_mask,
+        "S2_cloud_classification": S2_cloud_classification,
+        "S2_return_cloud_probabilities": S2_return_cloud_probabilities,
+        "zarr_path": zarr_path,
+    }
+
+    def job_generator():
+        for ts in df["ts"].tolist():
+            for x_min in range(bound_left, bound_right,
+                               processing_spatial_chunk_size):
+                for y_min in range(bound_bottom, bound_top,
+                                   processing_spatial_chunk_size):
+                    ret_config = dict(config)
+                    ret_config["bound_left"] = x_min
+                    ret_config["bottom"] = y_min
+                    ret_config["right"] = x_min + processing_spatial_chunk_size
+                    ret_config["top"] = y_min + processing_spatial_chunk_size
+                    ret_config["ts"] = ts
+                    yield ret_config
+
+    Parallel(n_jobs=num_workers,
+             backend="multiprocessing")(delayed(process_ptile)(**p)
+                                        for p in job_generator())
 
     # da = da.map_blocks(
     #     process_ptile,
