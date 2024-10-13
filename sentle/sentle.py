@@ -886,24 +886,26 @@ def check_and_round_bounds(left, bottom, right, top, res):
     return left, bottom, right, top
 
 
-def process(target_crs: CRS,
-            target_resolution: float,
-            bound_left: float,
-            bound_bottom: float,
-            bound_right: float,
-            bound_top: float,
-            datetime: DatetimeLike,
-            zarr_path: str,
-            processing_spatial_chunk_size: int = 4000,
-            S1_assets: list[str] = ["vh", "vv"],
-            S2_mask_snow: bool = False,
-            S2_cloud_classification: bool = False,
-            S2_cloud_classification_device="cpu",
-            S2_return_cloud_probabilities: bool = False,
-            num_workers: int = 1,
-            time_composite_freq: str = None,
-            S2_apply_snow_mask: bool = False,
-            S2_apply_cloud_mask: bool = False,):
+def process(
+    target_crs: CRS,
+    target_resolution: float,
+    bound_left: float,
+    bound_bottom: float,
+    bound_right: float,
+    bound_top: float,
+    datetime: DatetimeLike,
+    zarr_path: str,
+    processing_spatial_chunk_size: int = 4000,
+    S1_assets: list[str] = ["vh", "vv"],
+    S2_mask_snow: bool = False,
+    S2_cloud_classification: bool = False,
+    S2_cloud_classification_device="cpu",
+    S2_return_cloud_probabilities: bool = False,
+    num_workers: int = 1,
+    time_composite_freq: str = None,
+    S2_apply_snow_mask: bool = False,
+    S2_apply_cloud_mask: bool = False,
+):
     """
     Parameters
     ----------
@@ -1021,36 +1023,35 @@ def process(target_crs: CRS,
     store = zarr.storage.DirectoryStore(path, dimension_separator=".")
 
     # create array for where to store the processed sentinel data
-    data = zarr.create(shape=(df["ts"].nunique(), len(bands_to_save), height, width),
-                chunks=(1,band_chunks,process_S2_subtile,processing_spatial_chunk_size),
-                dtype=np.float32,
-                fill_value=None,
-                store=store,
-                path="/sentle",
-                write_empty_chunks=False,
-                compressor=Blosc(cname="lz4"))
+    data = zarr.create(shape=(df["ts"].nunique(), len(bands_to_save), height,
+                              width),
+                       chunks=(1, band_chunks, process_S2_subtile,
+                               processing_spatial_chunk_size),
+                       dtype=np.float32,
+                       fill_value=None,
+                       store=store,
+                       path="/sentle",
+                       write_empty_chunks=False,
+                       compressor=Blosc(cname="lz4"))
     data.attrs.update(ZARR_DATA_ATTRS)
 
     # arrays for storage of dimension information
-    band = zarr.create(shape=(14),
-            dtype="<U3",
-            store=store,
-            path="/band")
+    band = zarr.create(shape=(14), dtype="<U3", store=store, path="/band")
     band[:] = bands_to_save
     band.attrs.update(ZARR_BAND_ATTRS)
-    x = zarr.create(shape=(width), 
-            dtype="float32",
-            store=store,
-            path="/x")
-    x[:]  = np.arange(bound_left, bound_right,target_resolution).astype(np.float32)
+    x = zarr.create(shape=(width), dtype="float32", store=store, path="/x")
+    x[:] = np.arange(bound_left, bound_right,
+                     target_resolution).astype(np.float32)
     x.attrs.update(x_attrs)
-    y = zarr.create(shape=(height), 
-            dtype="float32",
-            store=store,
-            path="/y")
-    y[:]  = np.arange(bound_top, bound_bottom, -target_resolution).astype(np.float32)
+    y = zarr.create(shape=(height), dtype="float32", store=store, path="/y")
+    y[:] = np.arange(bound_top, bound_bottom,
+                     -target_resolution).astype(np.float32)
     y.attrs.update(y_attrs)
-    time = zarr.create(shape=(5),  dtype="int64", store=store, path="/time", fill_value=None)
+    time = zarr.create(shape=(5),
+                       dtype="int64",
+                       store=store,
+                       path="/time",
+                       fill_value=None)
     # TODO convert timestamps to this custom xarray format, maybe copy from xarray lib?
     time.attrs.update(time_attrs)
 
