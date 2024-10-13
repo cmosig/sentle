@@ -367,7 +367,12 @@ def open_catalog():
 
 
 def process_ptile(
-    da: xr.DataArray,
+    zarr_path,
+    bound_left, 
+    bound_bottom,
+    bound_right,
+    bound_top,
+    collection,
     target_crs: CRS,
     target_resolution: float,
     S2_cloud_classification_device: str,
@@ -1002,7 +1007,7 @@ def process(
         df["ts"] = df["ts_raw"]
 
     # remove duplicates for timeaxis
-    df = df.drop_duplicates("ts")
+    df = df.drop_duplicates(["ts", "collection"])
     number_of_zarr_timesteps = df["ts"].nunique()
 
     # compute bounds, with and height  for the entire dataset
@@ -1089,7 +1094,7 @@ def process(
     }
 
     def job_generator():
-        for ts in df["ts"].tolist():
+        for _, ser in df[["ts", "collection"]].iterrows():
             for x_min in range(bound_left, bound_right,
                                processing_spatial_chunk_size):
                 for y_min in range(bound_bottom, bound_top,
@@ -1099,7 +1104,8 @@ def process(
                     ret_config["bottom"] = y_min
                     ret_config["right"] = x_min + processing_spatial_chunk_size
                     ret_config["top"] = y_min + processing_spatial_chunk_size
-                    ret_config["ts"] = ts
+                    ret_config["ts"] = ser["ts"]
+                    ret_config["collection"] = ser["collection"]
                     yield ret_config
 
     Parallel(n_jobs=num_workers,
