@@ -211,7 +211,6 @@ def process_S2_subtile(intersecting_windows, stac_item, timestamp,
                        target_crs: CRS, target_resolution: float,
                        ptile_transform, ptile_width: int, ptile_height: int,
                        S2_mask_snow: bool, S2_cloud_classification: bool,
-                       S2_compute_nbar: bool,
                        S2_cloud_classification_device: str, cloud_mask_model):
     """Processes a single sentinel 2 subtile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution, applying
@@ -377,7 +376,6 @@ def process_ptile(
     S2_mask_snow: bool = False,
     S2_cloud_classification: bool = False,
     S2_return_cloud_probabilities: bool = False,
-    S2_compute_nbar: bool = False,
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
@@ -396,7 +394,6 @@ def process_ptile(
             S2_cloud_classification_device=S2_cloud_classification_device,
             S2_mask_snow=S2_mask_snow,
             S2_return_cloud_probabilities=S2_return_cloud_probabilities,
-            S2_compute_nbar=S2_compute_nbar,
             time_composite_freq=time_composite_freq,
             S2_apply_snow_mask=S2_apply_snow_mask,
             S2_apply_cloud_mask=S2_apply_cloud_mask)
@@ -596,7 +593,6 @@ def process_ptile_S2_dispatcher(
     S2_mask_snow: bool = False,
     S2_cloud_classification: bool = False,
     S2_return_cloud_probabilities: bool = False,
-    S2_compute_nbar: bool = False,
 ):
 
     # compute bounds of ptile
@@ -677,7 +673,6 @@ def process_ptile_S2_dispatcher(
             S2_cloud_classification_device=S2_cloud_classification_device,
             S2_mask_snow=S2_mask_snow,
             S2_return_cloud_probabilities=S2_return_cloud_probabilities,
-            S2_compute_nbar=S2_compute_nbar,
             subtiles=subtiles,
             catalog=catalog,
             ptile_transform=ptile_transform,
@@ -768,7 +763,6 @@ def process_ptile_S2(
     S2_mask_snow: bool = False,
     S2_cloud_classification: bool = False,
     S2_return_cloud_probabilities: bool = False,
-    S2_compute_nbar: bool = False,
 ):
     # cloud classification layer and snow mask is added later
     num_bands = len(S2_RAW_BANDS)
@@ -812,7 +806,6 @@ def process_ptile_S2(
             ptile_height=ptile_height,
             S2_mask_snow=S2_mask_snow,
             S2_cloud_classification=S2_cloud_classification,
-            S2_compute_nbar=S2_compute_nbar,
             S2_cloud_classification_device=S2_cloud_classification_device,
             cloud_mask_model=cloudsen_model)
 
@@ -907,7 +900,6 @@ def process(target_crs: CRS,
             S2_cloud_classification: bool = False,
             S2_cloud_classification_device="cpu",
             S2_return_cloud_probabilities: bool = False,
-            S2_compute_nbar: bool = False,
             num_workers: int = 1,
             time_composite_freq: str = None,
             S2_apply_snow_mask: bool = False,
@@ -938,8 +930,6 @@ def process(target_crs: CRS,
         On which device to run cloud classification. Either `cpu` or `cuda`.
     S2_return_cloud_probabilities : bool, default=False
         Whether to return raw cloud probabilities which were used to determine the cloud classes.
-    S2_compute_nbar : bool, default=False
-        Whether to compute NBAR using the sen2nbar package. Coming soon.
     num_workers : int, default=1
         Number of cores to scale computation across. Plan 4GiB of RAM per worker.
     time_composite_freq: str, default=None
@@ -972,22 +962,6 @@ def process(target_crs: CRS,
     bands_to_save = S2_RAW_BANDS.copy()
     if S2_mask_snow and time_composite_freq is None:
         bands_to_save.append(S2_snow_mask_band)
-    if S2_compute_nbar:
-        warnings.warn(
-            "NBAR computation currently not supported. Coming Soon. Ignoring..."
-        )
-        S2_compute_nbar = False
-        # bands_to_save += [
-        #     "NBAR_B02",
-        #     "NBAR_B03",
-        #     "NBAR_B04",
-        #     "NBAR_B05",
-        #     "NBAR_B06",
-        #     "NBAR_B07",
-        #     "NBAR_B08",
-        #     "NBAR_B11",
-        #     "NBAR_B12",
-        # ]
     if S2_cloud_classification and time_composite_freq is None:
         bands_to_save.append(S2_cloud_mask_band)
     if S2_return_cloud_probabilities:
@@ -1088,7 +1062,6 @@ def process(target_crs: CRS,
     #         S2_mask_snow=S2_mask_snow,
     #         S2_cloud_classification=S2_cloud_classification,
     #         S2_return_cloud_probabilities=S2_return_cloud_probabilities,
-    #         S2_compute_nbar=S2_compute_nbar,
     #         S2_cloud_classification_device=S2_cloud_classification_device,
     #         time_composite_freq=time_composite_freq,
     #         S2_apply_snow_mask=S2_apply_snow_mask,
