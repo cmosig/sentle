@@ -93,6 +93,12 @@ def recrop_write_window(win, overall_height, overall_width):
             width=lwidth).round_offsets().round_lengths()
 
 
+def load_sentinel_2_grio():
+    return gpd.read_file(
+        pkg_resources.resource_filename(
+            __name__, "data/sentinel2_grid_stripped_with_epsg.gpkg"))
+
+
 def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
                     top: float):
     """Retrieves the sentinel subtiles that intersect the with the specified
@@ -368,7 +374,8 @@ def open_catalog():
 
 def process_ptile(
     zarr_path,
-    bound_left, 
+    ts,
+    bound_left,
     bound_bottom,
     bound_right,
     bound_top,
@@ -385,15 +392,22 @@ def process_ptile(
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
-    # TODO add assert to mutually exclude chunks where both s1 and s2 bands are present
-    if ("vv" in da.band.data or "vh" in da.band.data):
-        return process_ptile_S1(da=da,
+    if collection == "sentinel-1-rtc":
+        return process_ptile_S1(zarr_path=zarr_path,
+                                bound_left=bound_left,
+                                bound_bottom=bound_bottom,
+                                bound_right=bound_right,
+                                bound_top=bound_top,
                                 target_crs=target_crs,
                                 target_resolution=target_resolution,
                                 time_composite_freq=time_composite_freq)
-    else:
+    elif collection == "sentinel-2-l2a":
         return process_ptile_S2_dispatcher(
-            da=da,
+            zarr_path=zarr_path,
+            bound_left=bound_left,
+            bound_bottom=bound_bottom,
+            bound_right=bound_right,
+            bound_top=bound_top,
             target_crs=target_crs,
             target_resolution=target_resolution,
             S2_cloud_classification=S2_cloud_classification,
@@ -404,9 +418,44 @@ def process_ptile(
             S2_apply_snow_mask=S2_apply_snow_mask,
             S2_apply_cloud_mask=S2_apply_cloud_mask)
 
+    else:
+        assert False
 
-def process_ptile_S1(da: xr.DataArray, target_crs: CRS,
-                     target_resolution: float, time_composite_freq: str):
+
+def catalog_search_ptile(collection: str, ts, time_composite_freq, bound_left,
+                         bound_bottom, bound_right, bound_top) -> list:
+    # timestamp
+    if time_composite_freq is None:
+        datetime_range = da.time.data[0]
+    else:
+        timestamp_center = da.time.data[0]
+        datetime_range = [
+            timestamp_center - (pd.Timedelta(time_composite_freq) / 2),
+            timestamp_center + (pd.Timedelta(time_composite_freq) / 2)
+        ]
+
+    # open stac catalog
+    catalog = open_catalog()
+
+    # retrieve items (possible across multiple sentinel tile) for specified
+    # timestamp
+    item_list = list(
+        catalog.search(collections=[collection],
+                       datetime=datetime_range,
+                       bbox=warp.transform_bounds(
+                           src_crs=target_crs,
+                           dst_crs="EPSG:4326",
+                           left=ptile_bounds[0],
+                           bottom=ptile_bounds[1],
+                           right=ptile_bounds[2],
+                           top=ptile_bounds[3])).item_collection())
+
+    return item_list
+
+
+def process_ptile_S1(zarr_path, target_crs: CRS, target_resolution: float,
+                     time_composite_freq: str, bound_left, bound_right,
+                     bound_bottom, bound_top):
     """Processes a single sentinel 1 ptile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution. The function
     returns the reprojected ptile.
@@ -424,34 +473,15 @@ def process_ptile_S1(da: xr.DataArray, target_crs: CRS,
         computed.
     """
 
-    # compute bounds of ptile
-    ptile_bounds = bounds_from_dataarray(da, target_resolution)
-
-    # timestamp
-    if time_composite_freq is None:
-        datetime_range = da.time.data[0]
-    else:
-        timestamp_center = da.time.data[0]
-        datetime_range = [
-            timestamp_center - (pd.Timedelta(time_composite_freq) / 2),
-            timestamp_center + (pd.Timedelta(time_composite_freq) / 2)
-        ]
-
-    # open stac catalog
-    catalog = open_catalog()
-
-    # retrieve items (possible across multiple sentinel tile) for specified
-    # timestamp
-    item_list = list(
-        catalog.search(collections=["sentinel-1-rtc"],
-                       datetime=datetime_range,
-                       bbox=warp.transform_bounds(
-                           src_crs=target_crs,
-                           dst_crs="EPSG:4326",
-                           left=ptile_bounds[0],
-                           bottom=ptile_bounds[1],
-                           right=ptile_bounds[2],
-                           top=ptile_bounds[3])).item_collection())
+    # TODO change collection string to constant variable
+    # TODO replace for bound values by custom class names tuple
+    item_list = catalog_search_ptile(collection="sentinel-1-rtc",
+                                     ts=ts,
+                                     time_composite_freq=time_composite_freq,
+                                     bound_left=bound_left,
+                                     bound_right=bound_right,
+                                     bound_bottom=bound_bottom,
+                                     bound_top=bound_top)
 
     if len(item_list) == 0:
         # if there is nothing within the bounds and for that timestamp return.
@@ -478,7 +508,7 @@ def process_ptile_S1(da: xr.DataArray, target_crs: CRS,
         # iterate through S1 assets
         for i, s1_asset in enumerate(da.band.data):
             if s1_asset not in item.assets:
-                # ii's rate and weird, but sometimes assets are missing
+                # ii's rare and weird, but sometimes assets are missing
                 continue
 
             try:
@@ -589,55 +619,34 @@ def bounds_from_dataarray(da, target_resolution):
 
 
 def process_ptile_S2_dispatcher(
-    da: xr.DataArray,
+    zarr_path,
     target_crs: CRS,
     target_resolution: float,
     S2_cloud_classification_device: str,
     time_composite_freq: str,
     S2_apply_snow_mask: bool,
     S2_apply_cloud_mask: bool,
+    bound_left,
+    bound_right,
+    bound_bottom,
+    bound_top,
     S2_mask_snow: bool = False,
     S2_cloud_classification: bool = False,
     S2_return_cloud_probabilities: bool = False,
 ):
 
-    # compute bounds of ptile
-    bound_left, bound_bottom, bound_right, bound_top = bounds_from_dataarray(
-        da, target_resolution)
-
-    # open stac catalog
-    catalog = open_catalog()
-
     # obtain sub-sentinel2 tiles based on supplied bounds and CRS
+    # TODO implement cache for this
     subtiles = obtain_subtiles(target_crs, bound_left, bound_bottom,
                                bound_right, bound_top)
 
-    # determine ptile dimensions and transform from bounds
-    ptile_transform, ptile_height, ptile_width = transform_height_width_from_bounds_res(
-        bound_left, bound_bottom, bound_right, bound_top, target_resolution)
-
-    # timestamp
-    if time_composite_freq is None:
-        datetime_range = da.time.data[0]
-    else:
-        timestamp_center = da.time.data[0]
-        datetime_range = [
-            timestamp_center - (pd.Timedelta(time_composite_freq) / 2),
-            timestamp_center + (pd.Timedelta(time_composite_freq) / 2)
-        ]
-
-    # retrieve items (possible across multiple sentinel tile) for specified
-    # timestamp
-    item_list = list(
-        catalog.search(collections=["sentinel-2-l2a"],
-                       datetime=datetime_range,
-                       bbox=warp.transform_bounds(
-                           src_crs=target_crs,
-                           dst_crs="EPSG:4326",
-                           left=bound_left,
-                           bottom=bound_bottom,
-                           right=bound_right,
-                           top=bound_top)).item_collection())
+    item_list = catalog_search_ptile(collection="sentinel-2-l2a",
+                                     ts=ts,
+                                     time_composite_freq=time_composite_freq,
+                                     bound_left=bound_left,
+                                     bound_right=bound_right,
+                                     bound_bottom=bound_bottom,
+                                     bound_top=bound_top)
 
     if len(item_list) == 0:
         return da
@@ -664,6 +673,10 @@ def process_ptile_S2_dispatcher(
                                            da.shape[3]),
                                     fill_value=0,
                                     dtype=np.uint8)
+
+    # determine ptile dimensions and transform from bounds
+    ptile_transform, ptile_height, ptile_width = transform_height_width_from_bounds_res(
+        bound_left, bound_bottom, bound_right, bound_top, target_resolution)
 
     ptile_array_bands = None
     timestamps_it = items["ts"].drop_duplicates().tolist()
@@ -766,6 +779,10 @@ def process_ptile_S2(
     ptile_width,
     cloudsen_model,
     items,
+    bound_left,
+    bound_right,
+    bound_bottom,
+    bound_top,
     S2_mask_snow: bool = False,
     S2_cloud_classification: bool = False,
     S2_return_cloud_probabilities: bool = False,
@@ -1101,9 +1118,11 @@ def process(
                                    processing_spatial_chunk_size):
                     ret_config = dict(config)
                     ret_config["bound_left"] = x_min
-                    ret_config["bottom"] = y_min
-                    ret_config["right"] = x_min + processing_spatial_chunk_size
-                    ret_config["top"] = y_min + processing_spatial_chunk_size
+                    ret_config["bound_bottom"] = y_min
+                    ret_config[
+                        "bound_right"] = x_min + processing_spatial_chunk_size
+                    ret_config[
+                        "bound_top"] = y_min + processing_spatial_chunk_size
                     ret_config["ts"] = ser["ts"]
                     ret_config["collection"] = ser["collection"]
                     yield ret_config
