@@ -1,9 +1,11 @@
 import itertools
 import warnings
 
+import io
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pickle
 import pkg_resources
 import planetary_computer
 import pystac_client
@@ -13,6 +15,7 @@ import xarray as xr
 import zarr
 from affine import Affine
 from joblib import Parallel, delayed
+from multiprocessing import shared_memory
 from numcodecs import Blosc
 from pystac_client.item_search import DatetimeLike
 from pystac_client.stac_api_io import StacApiIO
@@ -93,10 +96,22 @@ def recrop_write_window(win, overall_height, overall_width):
             width=lwidth).round_offsets().round_lengths()
 
 
-def load_sentinel_2_grio():
-    return gpd.read_file(
+def load_sentinel_2_grid_into_memory():
+    df = gpd.read_file(
         pkg_resources.resource_filename(
             __name__, "data/sentinel2_grid_stripped_with_epsg.gpkg"))
+
+    buffer = io.BytesIO()
+    pickle.dump(df, buffer)
+    mem = shared_memory.SharedMemory(name="s2grid",
+                                     create=True,
+                                     size=len(buffer.getvalue()))
+    mem.buf[:] = buffer.getvalue()
+
+
+def load_sentinel_2_grid_from_memory():
+    mem = shared_memory.SharedMemory("s2grid", create=False)
+    return pickle.load(io.BytesIO(mem.buf))
 
 
 def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
@@ -116,10 +131,7 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
         S2_subtile_size) == 0, "S2_subtile_size needs to be a divisor of 10980"
 
     # load sentinel grid
-
-    # TODO fix this differently
-    # s2grid = Variable("s2gridfile").get()
-    # assert s2grid.crs == "EPSG:4326"
+    s2grid = load_sentinel_2_grid_from_memory()
 
     # convert bounds to sentinel grid crs
     transformed_bounds = Polygon(*warp.transform_geom(
@@ -399,6 +411,7 @@ def process_ptile(
                                 bound_right=bound_right,
                                 bound_top=bound_top,
                                 target_crs=target_crs,
+                                ts=ts,
                                 target_resolution=target_resolution,
                                 time_composite_freq=time_composite_freq)
     elif collection == "sentinel-2-l2a":
@@ -408,6 +421,7 @@ def process_ptile(
             bound_bottom=bound_bottom,
             bound_right=bound_right,
             bound_top=bound_top,
+            ts=ts,
             target_crs=target_crs,
             target_resolution=target_resolution,
             S2_cloud_classification=S2_cloud_classification,
@@ -423,12 +437,13 @@ def process_ptile(
 
 
 def catalog_search_ptile(collection: str, ts, time_composite_freq, bound_left,
-                         bound_bottom, bound_right, bound_top) -> list:
+                         bound_bottom, bound_right, bound_top,
+                         target_crs) -> list:
     # timestamp
     if time_composite_freq is None:
-        datetime_range = da.time.data[0]
+        datetime_range = ts
     else:
-        timestamp_center = da.time.data[0]
+        timestamp_center = ts
         datetime_range = [
             timestamp_center - (pd.Timedelta(time_composite_freq) / 2),
             timestamp_center + (pd.Timedelta(time_composite_freq) / 2)
@@ -445,10 +460,10 @@ def catalog_search_ptile(collection: str, ts, time_composite_freq, bound_left,
                        bbox=warp.transform_bounds(
                            src_crs=target_crs,
                            dst_crs="EPSG:4326",
-                           left=ptile_bounds[0],
-                           bottom=ptile_bounds[1],
-                           right=ptile_bounds[2],
-                           top=ptile_bounds[3])).item_collection())
+                           left=bound_left,
+                           bottom=bound_bottom,
+                           right=bound_bottom,
+                           top=bound_top)).item_collection())
 
     return item_list
 
@@ -481,7 +496,8 @@ def process_ptile_S1(zarr_path, target_crs: CRS, target_resolution: float,
                                      bound_left=bound_left,
                                      bound_right=bound_right,
                                      bound_bottom=bound_bottom,
-                                     bound_top=bound_top)
+                                     bound_top=bound_top,
+                                     target_crs=target_crs)
 
     if len(item_list) == 0:
         # if there is nothing within the bounds and for that timestamp return.
@@ -626,6 +642,7 @@ def process_ptile_S2_dispatcher(
     time_composite_freq: str,
     S2_apply_snow_mask: bool,
     S2_apply_cloud_mask: bool,
+    ts,
     bound_left,
     bound_right,
     bound_bottom,
@@ -646,10 +663,12 @@ def process_ptile_S2_dispatcher(
                                      bound_left=bound_left,
                                      bound_right=bound_right,
                                      bound_bottom=bound_bottom,
-                                     bound_top=bound_top)
+                                     bound_top=bound_top,
+                                     target_crs=target_crs)
 
     if len(item_list) == 0:
-        return da
+        # do nothing and return
+        return
 
     items = pd.DataFrame()
     items["item"] = item_list
@@ -974,14 +993,10 @@ def process(
         )
 
     # load Sentinel 2 grid
-    # TODO fix this
-    # Variable("s2gridfile").set(
-    #     gpd.read_file(
-    #         pkg_resources.resource_filename(
-    #             __name__, "data/sentinel2_grid_stripped_with_epsg.gpkg")))
+    load_sentinel_2_grid_into_memory()
 
-    # TODO support to only download subset of bands (mutually exclusive with cloud classification and partially snow_mask) -> or no sentinel 2 at all
-
+    # TODO support to only download subset of bands (mutually exclusive with
+    # cloud classification and partially snow_mask) -> or no sentinel 2 at all
     # derive bands to save from arguments
     bands_to_save = S2_RAW_BANDS.copy()
     if S2_mask_snow and time_composite_freq is None:
