@@ -8,7 +8,6 @@ import pandas as pd
 import pickle
 import pkg_resources
 import planetary_computer
-import pystac_client
 import rasterio
 import scipy.ndimage as sc
 import xarray as xr
@@ -17,18 +16,17 @@ from joblib import Parallel, delayed
 from multiprocessing import shared_memory
 from numcodecs import Blosc
 from pystac_client.item_search import DatetimeLike
-from pystac_client.stac_api_io import StacApiIO
 from rasterio import transform, warp, windows
 from rasterio.crs import CRS
 from rasterio.enums import Resampling
 from shapely.geometry import Polygon, box
-from urllib3 import Retry
 
 from .cloud_mask import compute_cloud_mask, load_cloudsen_model, S2_cloud_prob_bands, S2_cloud_mask_band
 from .snow_mask import compute_potential_snow_layer, S2_snow_mask_band
 from .utils import bounds_from_transform_height_width_res, transform_height_width_from_bounds_res
 from .const import *
 from .reproject_util import *
+from .stac import *
 
 
 def load_sentinel_2_grid_into_memory():
@@ -115,17 +113,6 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
     s2grid = s2grid.explode("intersecting_windows")
 
     return s2grid
-
-
-def get_stac_api_io():
-    """
-    Returns a StacApiIO object with a retry policy that retries on 502, 503, 504
-    """
-    retry = Retry(total=5,
-                  backoff_factor=1,
-                  status_forcelist=[502, 503, 504],
-                  allowed_methods=None)
-    return StacApiIO(max_retries=retry)
 
 
 def process_S2_subtile(intersecting_windows, stac_item, timestamp,
@@ -269,12 +256,6 @@ def process_S2_subtile(intersecting_windows, stac_item, timestamp,
                                             local_win.width]
 
     return subtile_array_repr, write_win, band_names
-
-
-def open_catalog():
-    return pystac_client.Client.open(STAC_ENDPOINT,
-                                     modifier=planetary_computer.sign_inplace,
-                                     stac_io=get_stac_api_io())
 
 
 def process_ptile(
