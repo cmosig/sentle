@@ -265,6 +265,8 @@ def process_ptile(
     bound_right,
     bound_top,
     collection,
+    S2_bands_to_save,
+    S1_assets,
     target_crs: CRS,
     target_resolution: float,
     S2_cloud_classification_device: str,
@@ -286,7 +288,8 @@ def process_ptile(
                                 target_crs=target_crs,
                                 ts=ts,
                                 target_resolution=target_resolution,
-                                time_composite_freq=time_composite_freq)
+                                time_composite_freq=time_composite_freq,
+                                S1_assets=S1_assets)
     elif collection == "sentinel-2-l2a":
         return process_ptile_S2_dispatcher(
             zarr_path=zarr_path,
@@ -303,7 +306,9 @@ def process_ptile(
             S2_return_cloud_probabilities=S2_return_cloud_probabilities,
             time_composite_freq=time_composite_freq,
             S2_apply_snow_mask=S2_apply_snow_mask,
-            S2_apply_cloud_mask=S2_apply_cloud_mask)
+            S2_apply_cloud_mask=S2_apply_cloud_mask,
+            S2_bands_to_save=S2_bands_to_save,
+        )
 
     else:
         assert False
@@ -504,12 +509,12 @@ def process_ptile_S2_dispatcher(
     time_composite_freq: str,
     S2_apply_snow_mask: bool,
     S2_apply_cloud_mask: bool,
+    S2_bands_to_save,
     ts,
     bound_left,
     bound_right,
     bound_bottom,
     bound_top,
-    processing_spatial_chunk_size: int,
     S2_mask_snow: bool = False,
     S2_cloud_classification: bool = False,
     S2_return_cloud_probabilities: bool = False,
@@ -553,17 +558,15 @@ def process_ptile_S2_dispatcher(
         S2_cloud_classification_device) if S2_cloud_classification else None
 
     # intiate one array representing the entire subtile for that timestamp
-    num_bands = da.shape[1]
-
-    # TODO dont think this can be processing spatial chunk size
-    ptile_array = np.full(shape=(num_bands, ptile_height, ptile_width),
+    ptile_array = np.full(shape=(len(S2_bands_to_save), ptile_height,
+                                 ptile_width),
                           fill_value=0,
                           dtype=np.float32)
 
     if time_composite_freq is not None:
         # count how many values we add per pixel to compute mean later
-        ptile_array_count = np.full(shape=(num_bands, da.shape[2],
-                                           da.shape[3]),
+        ptile_array_count = np.full(shape=(len(S2_bands_to_save), ptile_height,
+                                           ptile_width),
                                     fill_value=0,
                                     dtype=np.uint8)
 
@@ -854,17 +857,21 @@ def process(
     # TODO support to only download subset of bands (mutually exclusive with
     # cloud classification and partially snow_mask) -> or no sentinel 2 at all
     # derive bands to save from arguments
-    bands_to_save = S2_RAW_BANDS.copy()
+    S2_bands_to_save = S2_RAW_BANDS.copy()
     if S2_mask_snow and time_composite_freq is None:
-        bands_to_save.append(S2_snow_mask_band)
+        S2_bands_to_save.append(S2_snow_mask_band)
     if S2_cloud_classification and time_composite_freq is None:
-        bands_to_save.append(S2_cloud_mask_band)
+        S2_bands_to_save.append(S2_cloud_mask_band)
     if S2_return_cloud_probabilities:
-        bands_to_save += S2_cloud_prob_bands
+        S2_bands_to_save += S2_cloud_prob_bands
+    total_bands_to_save = S2_bands_to_save
+
+    # sanity check for S1 bands
     if S1_assets is not None:
         assert len(set(S1_assets) -
                    set(["vv", "vh"])) == 0, "Unsupported S1 bands."
-        bands_to_save += S1_assets
+        total_bands_to_save += S1_assets
+
 
     # sign into planetary computer
     catalog = open_catalog()
@@ -905,19 +912,14 @@ def process(
                                                  bound_right, bound_top,
                                                  target_resolution)
 
-    # figure out band chunk shape
-    if S1_assets is not None:
-        band_chunks = len(bands_to_save) - len(S1_assets)
-    else:
-        band_chunks = len(bands_to_save)
-
     # setup zarr storage
     store = zarr.storage.DirectoryStore(zarr_path, dimension_separator=".")
 
     # create array for where to store the processed sentinel data
-    data = zarr.create(shape=(number_of_zarr_timesteps, len(bands_to_save),
+    # chunk size is the number of S2 bands, because we parallelize S1/S2
+    data = zarr.create(shape=(number_of_zarr_timesteps, len(total_bands_to_save),
                               height, width),
-                       chunks=(1, band_chunks, processing_spatial_chunk_size,
+                       chunks=(1, len(S2_bands_to_save), processing_spatial_chunk_size,
                                processing_spatial_chunk_size),
                        dtype=np.float32,
                        fill_value=None,
@@ -931,11 +933,11 @@ def process(
     # arrays for storage of dimension information
 
     # band dimension
-    band = zarr.create(shape=(len(bands_to_save)),
+    band = zarr.create(shape=(len(total_bands_to_save)),
                        dtype="<U3",
                        store=store,
                        path="/band")
-    band[:] = bands_to_save
+    band[:] = total_bands_to_save
     band.attrs.update(ZARR_BAND_ATTRS)
 
     # x dimension
@@ -979,6 +981,8 @@ def process(
         "S2_cloud_classification": S2_cloud_classification,
         "S2_return_cloud_probabilities": S2_return_cloud_probabilities,
         "zarr_path": zarr_path,
+        "S2_bands_to_save": S2_bands_to_save,
+        "S1_assets": S1_assets,
     }
 
     def job_generator():
