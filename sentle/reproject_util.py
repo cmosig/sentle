@@ -1,6 +1,6 @@
 import warnings
 from affine import Affine
-from rasterio import warp
+from rasterio import warp, windows
 
 
 def check_and_round_bounds(left, bottom, right, top, res):
@@ -61,6 +61,7 @@ def height_width_from_bounds_res(left, bottom, right, top, res):
     height, h_rem = divmod(abs(top - bottom), res)
     assert h_rem == 0
     return height, width
+
 
 def recrop_write_window(win, overall_height, overall_width):
     """ Determine write window based on overlap with actual bounds and also
