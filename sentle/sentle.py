@@ -19,7 +19,7 @@ from rasterio import transform, warp, windows
 from rasterio.crs import CRS
 from rasterio.enums import Resampling
 from shapely.geometry import Polygon, box
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from .cloud_mask import compute_cloud_mask, load_cloudsen_model, S2_cloud_prob_bands, S2_cloud_mask_band
 from .snow_mask import compute_potential_snow_layer, S2_snow_mask_band
