@@ -19,10 +19,11 @@ from rasterio import transform, warp, windows
 from rasterio.crs import CRS
 from rasterio.enums import Resampling
 from shapely.geometry import Polygon, box
+from tqdm import tqdm
 
 from .cloud_mask import compute_cloud_mask, load_cloudsen_model, S2_cloud_prob_bands, S2_cloud_mask_band
 from .snow_mask import compute_potential_snow_layer, S2_snow_mask_band
-from .utils import bounds_from_transform_height_width_res, transform_height_width_from_bounds_res
+from .utils import bounds_from_transform_height_width_res, transform_height_width_from_bounds_res, tqdm_joblib
 from .const import *
 from .reproject_util import *
 from .stac import *
@@ -531,9 +532,6 @@ def process_ptile_S2_dispatcher(
     ptile_height, ptile_width = height_width_from_bounds_res(
         bound_left, bound_bottom, bound_right, bound_top, target_resolution)
 
-    print(ptile_height, ptile_width, bound_left, bound_bottom, bound_right,
-          bound_top, target_resolution)
-
     # TODO too many unessary stac requests are created here
     # when not using aggregation across large spatial scales
     # -> this function is called for each timestamp that there was a sentinel 2
@@ -1035,9 +1033,20 @@ def process(
                         time=tsi)
                     yield ret_config
 
-    Parallel(n_jobs=num_workers,
-             backend="multiprocessing")(delayed(process_ptile)(**p)
-                                        for p in job_generator())
+    num_chunks = df.shape[0] * (1 + width // processing_spatial_chunk_size) * (
+        1 + height // processing_spatial_chunk_size)
+    with tqdm_joblib(
+            tqdm(desc="processing",
+                 unit="ptiles",
+                 dynamic_ncols=True,
+                 total=num_chunks)) as progress_bar:
+        # backend can be loky or threading (or maybe something else)
+        return Parallel(n_jobs=num_workers,
+                        batch_size=1,
+                        backend="multiprocessing")(delayed(process_ptile)(**p)
+                                                   for p in job_generator())
+
+    # Parallel(n_jobs=num_workers, backend="multiprocessing")(delayed(process_ptile)(**p) for p in job_generator())
 
     # da = da.map_blocks(
     #     process_ptile,
