@@ -271,7 +271,6 @@ def process_ptile(
     time_composite_freq: str,
     S2_apply_snow_mask: bool,
     S2_apply_cloud_mask: bool,
-    processing_spatial_chunk_size: int,
     S2_mask_snow: bool = False,
     S2_cloud_classification: bool = False,
     S2_return_cloud_probabilities: bool = False,
@@ -287,8 +286,7 @@ def process_ptile(
                                 target_crs=target_crs,
                                 ts=ts,
                                 target_resolution=target_resolution,
-                                time_composite_freq=time_composite_freq,
-                                processing_spatial_chunk_size=processing_spatial_chunk_size)
+                                time_composite_freq=time_composite_freq)
     elif collection == "sentinel-2-l2a":
         return process_ptile_S2_dispatcher(
             zarr_path=zarr_path,
@@ -305,7 +303,6 @@ def process_ptile(
             S2_return_cloud_probabilities=S2_return_cloud_probabilities,
             time_composite_freq=time_composite_freq,
             S2_apply_snow_mask=S2_apply_snow_mask,
-            processing_spatial_chunk_size=processing_spatial_chunk_size,
             S2_apply_cloud_mask=S2_apply_cloud_mask)
 
     else:
@@ -523,6 +520,16 @@ def process_ptile_S2_dispatcher(
     subtiles = obtain_subtiles(target_crs, bound_left, bound_bottom,
                                bound_right, bound_top)
 
+    ptile_height, ptile_width = height_width_from_bounds_res(
+        bound_left, bound_bottom, bound_right, bound_top, target_resolution)
+
+    # TODO too many unessary stac requests are created here
+    # when not using aggregation across large spatial scales
+    # -> this function is called for each timestamp that there was a sentinel 2
+    # tile anywhere in the entire bounds
+    # one could share the initial item list with all processes and the
+    # processes filter these instead based on extent -> we have the dataframe
+    # ready anyway
     item_list = catalog_search_ptile(collection="sentinel-2-l2a",
                                      ts=ts,
                                      time_composite_freq=time_composite_freq,
@@ -532,9 +539,9 @@ def process_ptile_S2_dispatcher(
                                      bound_top=bound_top,
                                      target_crs=target_crs)
 
-    if len(item_list) == 0:
-        # do nothing and return
-        return
+    assert len(
+        item_list
+    ) > 0, "Number of retrieved stac items is zero even though we found stac items previously."
 
     items = pd.DataFrame()
     items["item"] = item_list
@@ -549,7 +556,8 @@ def process_ptile_S2_dispatcher(
     num_bands = da.shape[1]
 
     # TODO dont think this can be processing spatial chunk size
-    ptile_array = np.full(shape=(num_bands, processing_spatial_chunk_size, processing_spatial_chunk_size), fill_value=0,
+    ptile_array = np.full(shape=(num_bands, ptile_height, ptile_width),
+                          fill_value=0,
                           dtype=np.float32)
 
     if time_composite_freq is not None:
@@ -971,7 +979,6 @@ def process(
         "S2_cloud_classification": S2_cloud_classification,
         "S2_return_cloud_probabilities": S2_return_cloud_probabilities,
         "zarr_path": zarr_path,
-        "process_ptile_S2_dispatcher": processing_spatial_chunk_size,
     }
 
     def job_generator():
@@ -983,10 +990,11 @@ def process(
                     ret_config = dict(config)
                     ret_config["bound_left"] = x_min
                     ret_config["bound_bottom"] = y_min
-                    ret_config[
-                        "bound_right"] = x_min + processing_spatial_chunk_size
-                    ret_config[
-                        "bound_top"] = y_min + processing_spatial_chunk_size
+                    # cap at the top
+                    ret_config["bound_right"] = min(
+                        x_min + processing_spatial_chunk_size, bound_right)
+                    ret_config["bound_top"] = min(
+                        y_min + processing_spatial_chunk_size, bound_top)
                     ret_config["ts"] = ser["ts"]
                     ret_config["collection"] = ser["collection"]
                     yield ret_config
