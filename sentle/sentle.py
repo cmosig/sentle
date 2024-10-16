@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import pickle
 import pkg_resources
-import planetary_computer
 import rasterio
 import scipy.ndimage as sc
 import xarray as xr
