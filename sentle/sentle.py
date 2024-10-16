@@ -340,7 +340,7 @@ def catalog_search_ptile(collection: str, ts, time_composite_freq, bound_left,
                            dst_crs="EPSG:4326",
                            left=bound_left,
                            bottom=bound_bottom,
-                           right=bound_bottom,
+                           right=bound_right,
                            top=bound_top)).item_collection())
 
     return item_list
@@ -589,7 +589,6 @@ def process_ptile_S2_dispatcher(
             S2_mask_snow=S2_mask_snow,
             S2_return_cloud_probabilities=S2_return_cloud_probabilities,
             subtiles=subtiles,
-            catalog=catalog,
             ptile_transform=ptile_transform,
             ptile_width=ptile_width,
             ptile_height=ptile_height,
@@ -669,16 +668,11 @@ def process_ptile_S2(
     target_resolution: float,
     S2_cloud_classification_device: str,
     subtiles,
-    catalog,
     ptile_transform,
     ptile_height,
     ptile_width,
     cloudsen_model,
     items,
-    bound_left,
-    bound_right,
-    bound_bottom,
-    bound_top,
     S2_mask_snow: bool = False,
     S2_cloud_classification: bool = False,
     S2_return_cloud_probabilities: bool = False,
@@ -702,6 +696,9 @@ def process_ptile_S2(
 
     subtile_array_bands = None
     for st in subtiles.itertuples(index=False, name="subtile"):
+
+        print(st)
+
         # filter items by sentinel tile name
         subdf = items[items["tile"] == st.name]
 
@@ -872,7 +869,6 @@ def process(
                    set(["vv", "vh"])) == 0, "Unsupported S1 bands."
         total_bands_to_save += S1_assets
 
-
     # sign into planetary computer
     catalog = open_catalog()
 
@@ -917,9 +913,10 @@ def process(
 
     # create array for where to store the processed sentinel data
     # chunk size is the number of S2 bands, because we parallelize S1/S2
-    data = zarr.create(shape=(number_of_zarr_timesteps, len(total_bands_to_save),
-                              height, width),
-                       chunks=(1, len(S2_bands_to_save), processing_spatial_chunk_size,
+    data = zarr.create(shape=(number_of_zarr_timesteps,
+                              len(total_bands_to_save), height, width),
+                       chunks=(1, len(S2_bands_to_save),
+                               processing_spatial_chunk_size,
                                processing_spatial_chunk_size),
                        dtype=np.float32,
                        fill_value=None,
