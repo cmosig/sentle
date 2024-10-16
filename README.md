@@ -145,5 +145,6 @@ This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md
 
 ## Acknowledgments
 
-Thank you to [David Montero](https://github.com/davemlz) for all the
+- Thank you to [Cesar Aybar](https://csaybar.github.io/) for his cloud detection model. The paper: [link](https://www.nature.com/articles/s41597-022-01878-2)
+- Thank you to [David Montero](https://github.com/davemlz) for all the
 discussions and his awesome packages which inspired this.
