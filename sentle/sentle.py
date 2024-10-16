@@ -673,7 +673,6 @@ def process_ptile_S2_dispatcher(
     #                   safe_chunks=True)
 
     dst = zarr.open(zarr_path)["sentle"]
-    print("saving!")
     dst[zarr_save_slice["time"], zarr_save_slice["band"], zarr_save_slice["y"],
         zarr_save_slice["x"]] = ptile_array
 
