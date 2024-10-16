@@ -273,9 +273,9 @@ def process_ptile(
     time_composite_freq: str,
     S2_apply_snow_mask: bool,
     S2_apply_cloud_mask: bool,
-    S2_mask_snow: bool = False,
-    S2_cloud_classification: bool = False,
-    S2_return_cloud_probabilities: bool = False,
+    S2_mask_snow: bool,
+    S2_cloud_classification: bool,
+    S2_return_cloud_probabilities: bool,
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
@@ -515,9 +515,9 @@ def process_ptile_S2_dispatcher(
     bound_right,
     bound_bottom,
     bound_top,
-    S2_mask_snow: bool = False,
-    S2_cloud_classification: bool = False,
-    S2_return_cloud_probabilities: bool = False,
+    S2_mask_snow: bool,
+    S2_cloud_classification: bool,
+    S2_return_cloud_probabilities: bool,
 ):
 
     # obtain sub-sentinel2 tiles based on supplied bounds and CRS
@@ -673,9 +673,9 @@ def process_ptile_S2(
     ptile_width,
     cloudsen_model,
     items,
-    S2_mask_snow: bool = False,
-    S2_cloud_classification: bool = False,
-    S2_return_cloud_probabilities: bool = False,
+    S2_mask_snow: bool,
+    S2_cloud_classification: bool,
+    S2_return_cloud_probabilities: bool,
 ):
     # cloud classification layer and snow mask is added later
     num_bands = len(S2_RAW_BANDS)
@@ -976,6 +976,7 @@ def process(
         "S2_apply_snow_mask": S2_apply_snow_mask,
         "S2_apply_cloud_mask": S2_apply_cloud_mask,
         "S2_cloud_classification": S2_cloud_classification,
+        "S2_mask_snow": S2_mask_snow,
         "S2_return_cloud_probabilities": S2_return_cloud_probabilities,
         "zarr_path": zarr_path,
         "S2_bands_to_save": S2_bands_to_save,
