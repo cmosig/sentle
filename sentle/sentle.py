@@ -276,6 +276,7 @@ def process_ptile(
     S2_mask_snow: bool,
     S2_cloud_classification: bool,
     S2_return_cloud_probabilities: bool,
+    zarr_save_slice: dict,
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
@@ -308,6 +309,7 @@ def process_ptile(
             S2_apply_snow_mask=S2_apply_snow_mask,
             S2_apply_cloud_mask=S2_apply_cloud_mask,
             S2_bands_to_save=S2_bands_to_save,
+            zarr_save_slice=zarr_save_slice,
         )
 
     else:
@@ -518,6 +520,7 @@ def process_ptile_S2_dispatcher(
     S2_mask_snow: bool,
     S2_cloud_classification: bool,
     S2_return_cloud_probabilities: bool,
+    zarr_save_slice=dict,
 ):
 
     # obtain sub-sentinel2 tiles based on supplied bounds and CRS
@@ -527,6 +530,9 @@ def process_ptile_S2_dispatcher(
 
     ptile_height, ptile_width = height_width_from_bounds_res(
         bound_left, bound_bottom, bound_right, bound_top, target_resolution)
+
+    print(ptile_height, ptile_width, bound_left, bound_bottom, bound_right,
+          bound_top, target_resolution)
 
     # TODO too many unessary stac requests are created here
     # when not using aggregation across large spatial scales
@@ -647,19 +653,31 @@ def process_ptile_S2_dispatcher(
                      for band in S2_RAW_BANDS]] == 0,
                        axis=0)] = np.nan
 
-    # expand dimensions -> one timestep
-    ptile_array = np.expand_dims(ptile_array, axis=0)
-
     # wrap numpy array into xarray again
-    out_array = xr.DataArray(data=ptile_array,
-                             dims=["time", "band", "y", "x"],
-                             coords=dict(time=[da.time.data[0]],
-                                         band=ptile_array_bands,
-                                         x=da.x,
-                                         y=da.y))
+    # out_array = xr.DataArray(data=ptile_array,
+    #                          dims=["time", "band", "y", "x"],
+    #                          coords=dict(time=[ts],
+    #                                      band=ptile_array_bands,
+    #                                      x=np.arange(bound_left, bound_right, target_resolution).astype(np.float32),
+    #                                      y=np.arange(bound_bottom, bound_top, target_resolution).astype(np.float32),
+    #                                      )).sel(band=S2_bands_to_save)
 
-    # only return bands that have been requested
-    return out_array.sel(band=da.band)
+    # # save to zarr
+    # out_array.to_zarr(store=zarr_path,
+    #                   mode="r+", # only write data, not metadata / shapes
+    #                   group="sentle",
+    #                   region=dict(
+    #                     x=zarr_save_slice["x"],
+    #                     y=zarr_save_slice["y"],
+    #                     band=zarr_save_slice["band"],
+    #                     time=zarr_save_slice["time"],
+    #                       )
+    #                   safe_chunks=True)
+
+    dst = zarr.open(zarr_path)["sentle"]
+    print("saving!")
+    dst[zarr_save_slice["time"], zarr_save_slice["band"], zarr_save_slice["y"],
+        zarr_save_slice["x"]] = ptile_array
 
 
 def process_ptile_S2(
@@ -696,9 +714,6 @@ def process_ptile_S2(
 
     subtile_array_bands = None
     for st in subtiles.itertuples(index=False, name="subtile"):
-
-        print(st)
-
         # filter items by sentinel tile name
         subdf = items[items["tile"] == st.name]
 
@@ -983,22 +998,41 @@ def process(
         "S1_assets": S1_assets,
     }
 
+    processing_spatial_chunk_size_in_CRS_unit = processing_spatial_chunk_size * target_resolution
+
     def job_generator():
-        for _, ser in df[["ts", "collection"]].iterrows():
-            for x_min in range(bound_left, bound_right,
-                               processing_spatial_chunk_size):
-                for y_min in range(bound_bottom, bound_top,
-                                   processing_spatial_chunk_size):
+        for tsi, (_, ser) in enumerate(df[["ts", "collection"]].iterrows()):
+            for xi, x_min in enumerate(
+                    range(bound_left, bound_right,
+                          processing_spatial_chunk_size_in_CRS_unit)):
+                for yi, y_min in enumerate(
+                        range(bound_bottom, bound_top,
+                              processing_spatial_chunk_size_in_CRS_unit)):
                     ret_config = dict(config)
                     ret_config["bound_left"] = x_min
                     ret_config["bound_bottom"] = y_min
                     # cap at the top
                     ret_config["bound_right"] = min(
-                        x_min + processing_spatial_chunk_size, bound_right)
+                        x_min + processing_spatial_chunk_size_in_CRS_unit,
+                        bound_right)
                     ret_config["bound_top"] = min(
-                        y_min + processing_spatial_chunk_size, bound_top)
+                        y_min + processing_spatial_chunk_size_in_CRS_unit,
+                        bound_top)
                     ret_config["ts"] = ser["ts"]
                     ret_config["collection"] = ser["collection"]
+                    ret_config["zarr_save_slice"] = dict(
+                        x=slice(
+                            xi * processing_spatial_chunk_size,
+                            min((xi + 1) * processing_spatial_chunk_size,
+                                width)),
+                        y=slice(
+                            yi * processing_spatial_chunk_size,
+                            min((yi + 1) * processing_spatial_chunk_size,
+                                height)),
+                        band=slice(0, len(S2_bands_to_save))
+                        if ser["collection"] == "sentinel-2-l2a" else slice(
+                            len(S2_bands_to_save), len(total_bands_to_save)),
+                        time=tsi)
                     yield ret_config
 
     Parallel(n_jobs=num_workers,
