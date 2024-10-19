@@ -37,6 +37,7 @@ def load_sentinel_2_grid_into_memory():
 
     buffer = io.BytesIO()
     pickle.dump(df, buffer)
+    # TODO make sure to check if it already exists or use random string?
     mem = shared_memory.SharedMemory(name="s2grid",
                                      create=True,
                                      size=len(buffer.getvalue()))
@@ -893,9 +894,13 @@ def process(
 
     # remove duplicates for timeaxis
     df = df.drop_duplicates(["ts", "collection"])
+
     # get only one row for each final timestamp
     df = df.groupby("ts")[["collection"]].apply(
         lambda x: x["collection"].tolist()).rename("collection").reset_index()
+
+    # make sure ts is sorted in the correct order
+    df = df.sort_values("ts", ascending=False)
 
     # compute bounds, with and height  for the entire dataset
     bound_left, bound_bottom, bound_right, bound_top = check_and_round_bounds(
