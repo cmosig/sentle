@@ -309,32 +309,30 @@ def process_ptile(
     ) > 0, "Number of retrieved stac items is zero even though we found stac items previously."
 
     if collection == "sentinel-1-rtc":
-        return process_ptile_S1(zarr_path=zarr_path,
-                                bound_left=bound_left,
-                                bound_bottom=bound_bottom,
-                                bound_right=bound_right,
-                                bound_top=bound_top,
-                                target_crs=target_crs,
-                                ts=ts,
-                                height=ptile_height,
-                                width=ptile_width,
-                                transform=ptile_transform,
-                                item_list=item_list,
-                                target_resolution=target_resolution,
-                                time_composite_freq=time_composite_freq,
-                                S1_assets=S1_assets)
+        ptile_array = process_ptile_S1(bound_left=bound_left,
+                                       bound_bottom=bound_bottom,
+                                       bound_right=bound_right,
+                                       bound_top=bound_top,
+                                       target_crs=target_crs,
+                                       ts=ts,
+                                       ptile_height=ptile_height,
+                                       ptile_width=ptile_width,
+                                       ptile_transform=ptile_transform,
+                                       item_list=item_list,
+                                       target_resolution=target_resolution,
+                                       time_composite_freq=time_composite_freq,
+                                       S1_assets=S1_assets)
     elif collection == "sentinel-2-l2a":
-        return process_ptile_S2_dispatcher(
-            zarr_path=zarr_path,
+        ptile_array = process_ptile_S2_dispatcher(
             bound_left=bound_left,
             bound_bottom=bound_bottom,
             bound_right=bound_right,
             bound_top=bound_top,
             ts=ts,
             target_crs=target_crs,
-            height=ptile_height,
-            width=ptile_width,
-            transform=ptile_transform,
+            ptile_height=ptile_height,
+            ptile_width=ptile_width,
+            ptile_transform=ptile_transform,
             item_list=item_list,
             target_resolution=target_resolution,
             S2_cloud_classification=S2_cloud_classification,
@@ -345,11 +343,16 @@ def process_ptile(
             S2_apply_snow_mask=S2_apply_snow_mask,
             S2_apply_cloud_mask=S2_apply_cloud_mask,
             S2_bands_to_save=S2_bands_to_save,
-            zarr_save_slice=zarr_save_slice,
         )
 
     else:
         assert False
+
+    if ptile_array is not None:
+        # save to zarr
+        dst = zarr.open(zarr_path)["sentle"]
+        dst[zarr_save_slice["time"], zarr_save_slice["band"],
+            zarr_save_slice["y"], zarr_save_slice["x"]] = ptile_array
 
 
 def catalog_search_ptile(collection: str, ts, time_composite_freq, bound_left,
@@ -384,25 +387,13 @@ def catalog_search_ptile(collection: str, ts, time_composite_freq, bound_left,
     return item_list
 
 
-def process_ptile_S1(zarr_path, target_crs: CRS, target_resolution: float,
+def process_ptile_S1(target_crs: CRS, target_resolution: float,
                      time_composite_freq: str, bound_left, bound_right,
-                     bound_bottom, bound_top, ts, S1_assets, height, width,
-                     transform, item_list):
+                     bound_bottom, bound_top, ts, S1_assets, ptile_height,
+                     ptile_width, ptile_transform, item_list):
     """Processes a single sentinel 1 ptile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution. The function
     returns the reprojected ptile.
-
-    Parameters
-    ----------
-    da : xr.DataArray
-        DataArray containing the sentinel 1 data.
-    target_crs : CRS
-        CRS to which the data should be reprojected.
-    target_resolution : float
-        Resolution to which the data should be reprojected.
-    time_composite_freq : str
-        Frequency for temporal composites. If None, no temporal composites are
-        computed.
     """
 
     # intiate one array representing the entire subtile for that timestamp
@@ -419,7 +410,7 @@ def process_ptile_S1(zarr_path, target_crs: CRS, target_resolution: float,
 
     for item in item_list:
         # iterate through S1 assets
-        for i, s1_asset in enumerate(da.band.data):
+        for i, s1_asset in enumerate(S1_assets):
             if s1_asset not in item.assets:
                 # ii's rare and weird, but sometimes assets are missing
                 continue
@@ -428,7 +419,8 @@ def process_ptile_S1(zarr_path, target_crs: CRS, target_resolution: float,
                 with rasterio.open(item.assets[s1_asset].href) as dr:
                     # reproject ptile bounds to S1 tile CRS
                     ptile_bounds_local_crs = warp.transform_bounds(
-                        target_crs, dr.crs, *ptile_bounds)
+                        target_crs, dr.crs, bound_left, bound_bottom,
+                        bound_right, bound_top)
                     # figure out which area of the image is interesting for us
                     read_win = dr.window(*ptile_bounds_local_crs)
                     # read windowed
@@ -512,16 +504,16 @@ def process_ptile_S1(zarr_path, target_crs: CRS, target_resolution: float,
     # replace zeros with nans
     ptile_array[ptile_array == 0] = np.nan
 
-    return xr.DataArray(data=np.expand_dims(ptile_array, axis=0),
-                        dims=["time", "band", "y", "x"],
-                        coords=dict(time=[da.time.data[0]],
-                                    band=da.band,
-                                    x=da.x,
-                                    y=da.y))
+    return ptile_array
+    # return xr.DataArray(data=np.expand_dims(ptile_array, axis=0),
+    #                     dims=["time", "band", "y", "x"],
+    #                     coords=dict(time=[da.time.data[0]],
+    #                                 band=da.band,
+    #                                 x=da.x,
+    #                                 y=da.y))
 
 
 def process_ptile_S2_dispatcher(
-    zarr_path,
     target_crs: CRS,
     target_resolution: float,
     S2_cloud_classification_device: str,
@@ -529,9 +521,9 @@ def process_ptile_S2_dispatcher(
     S2_apply_snow_mask: bool,
     S2_apply_cloud_mask: bool,
     S2_bands_to_save,
-    height,
-    width,
-    transform,
+    ptile_height,
+    ptile_width,
+    ptile_transform,
     item_list,
     ts,
     bound_left,
@@ -541,7 +533,6 @@ def process_ptile_S2_dispatcher(
     S2_mask_snow: bool,
     S2_cloud_classification: bool,
     S2_return_cloud_probabilities: bool,
-    zarr_save_slice=dict,
 ):
 
     items = pd.DataFrame()
@@ -665,9 +656,7 @@ def process_ptile_S2_dispatcher(
     #                       )
     #                   safe_chunks=True)
 
-    dst = zarr.open(zarr_path)["sentle"]
-    dst[zarr_save_slice["time"], zarr_save_slice["band"], zarr_save_slice["y"],
-        zarr_save_slice["x"]] = ptile_array
+    return ptile_array
 
 
 def process_ptile_S2(
@@ -866,13 +855,13 @@ def process(
         S2_bands_to_save.append(S2_cloud_mask_band)
     if S2_return_cloud_probabilities:
         S2_bands_to_save += S2_cloud_prob_bands
-    total_bands_to_save = S2_bands_to_save
+    total_bands_to_save = S2_bands_to_save.copy()
 
     # sanity check for S1 bands
     if S1_assets is not None:
         assert len(set(S1_assets) -
                    set(["vv", "vh"])) == 0, "Unsupported S1 bands."
-        total_bands_to_save += S1_assets
+        total_bands_to_save += S1_assets.copy()
 
     # sign into planetary computer
     catalog = open_catalog()
@@ -904,7 +893,9 @@ def process(
 
     # remove duplicates for timeaxis
     df = df.drop_duplicates(["ts", "collection"])
-    number_of_zarr_timesteps = df["ts"].nunique()
+    # get only one row for each final timestamp
+    df = df.groupby("ts")[["collection"]].apply(
+        lambda x: x["collection"].tolist()).rename("collection").reset_index()
 
     # compute bounds, with and height  for the entire dataset
     bound_left, bound_bottom, bound_right, bound_top = check_and_round_bounds(
@@ -918,9 +909,9 @@ def process(
 
     # create array for where to store the processed sentinel data
     # chunk size is the number of S2 bands, because we parallelize S1/S2
-    data = zarr.create(shape=(number_of_zarr_timesteps,
-                              len(total_bands_to_save), height, width),
-                       chunks=(1, len(S2_bands_to_save),
+    data = zarr.create(shape=(df["ts"].count(), len(total_bands_to_save),
+                              height, width),
+                       chunks=(1, len(total_bands_to_save),
                                processing_spatial_chunk_size,
                                processing_spatial_chunk_size),
                        dtype=np.float32,
@@ -955,7 +946,7 @@ def process(
     y.attrs.update(ZARR_Y_ATTRS)
 
     # time dimension
-    time = zarr.create(shape=(number_of_zarr_timesteps),
+    time = zarr.create(shape=(df["ts"].count()),
                        dtype="int64",
                        store=store,
                        path="/time",
@@ -997,32 +988,34 @@ def process(
                 for yi, y_min in enumerate(
                         range(bound_bottom, bound_top,
                               processing_spatial_chunk_size_in_CRS_unit)):
-                    ret_config = dict(config)
-                    ret_config["bound_left"] = x_min
-                    ret_config["bound_bottom"] = y_min
-                    # cap at the top
-                    ret_config["bound_right"] = min(
-                        x_min + processing_spatial_chunk_size_in_CRS_unit,
-                        bound_right)
-                    ret_config["bound_top"] = min(
-                        y_min + processing_spatial_chunk_size_in_CRS_unit,
-                        bound_top)
-                    ret_config["ts"] = ser["ts"]
-                    ret_config["collection"] = ser["collection"]
-                    ret_config["zarr_save_slice"] = dict(
-                        x=slice(
-                            xi * processing_spatial_chunk_size,
-                            min((xi + 1) * processing_spatial_chunk_size,
-                                width)),
-                        y=slice(
-                            yi * processing_spatial_chunk_size,
-                            min((yi + 1) * processing_spatial_chunk_size,
-                                height)),
-                        band=slice(0, len(S2_bands_to_save))
-                        if ser["collection"] == "sentinel-2-l2a" else slice(
-                            len(S2_bands_to_save), len(total_bands_to_save)),
-                        time=tsi)
-                    yield ret_config
+                    for collection in ser["collection"]:
+                        ret_config = dict(config)
+                        ret_config["bound_left"] = x_min
+                        ret_config["bound_bottom"] = y_min
+                        # cap at the top
+                        ret_config["bound_right"] = min(
+                            x_min + processing_spatial_chunk_size_in_CRS_unit,
+                            bound_right)
+                        ret_config["bound_top"] = min(
+                            y_min + processing_spatial_chunk_size_in_CRS_unit,
+                            bound_top)
+                        ret_config["ts"] = ser["ts"]
+                        ret_config["collection"] = collection
+                        ret_config["zarr_save_slice"] = dict(
+                            x=slice(
+                                xi * processing_spatial_chunk_size,
+                                min((xi + 1) * processing_spatial_chunk_size,
+                                    width)),
+                            y=slice(
+                                yi * processing_spatial_chunk_size,
+                                min((yi + 1) * processing_spatial_chunk_size,
+                                    height)),
+                            band=slice(0, len(S2_bands_to_save))
+                            if collection == "sentinel-2-l2a" else slice(
+                                len(S2_bands_to_save),
+                                len(total_bands_to_save)),
+                            time=tsi)
+                        yield ret_config
 
     num_chunks = df.shape[0] * (ceil(
         width / processing_spatial_chunk_size)) * (ceil(
@@ -1037,28 +1030,3 @@ def process(
                         batch_size=1,
                         backend="multiprocessing")(delayed(process_ptile)(**p)
                                                    for p in job_generator())
-
-    # Parallel(n_jobs=num_workers, backend="multiprocessing")(delayed(process_ptile)(**p) for p in job_generator())
-
-    # da = da.map_blocks(
-    #     process_ptile,
-    #     kwargs=dict(
-    #         target_crs=target_crs,
-    #         target_resolution=target_resolution,
-    #         S2_mask_snow=S2_mask_snow,
-    #         S2_cloud_classification=S2_cloud_classification,
-    #         S2_return_cloud_probabilities=S2_return_cloud_probabilities,
-    #         S2_cloud_classification_device=S2_cloud_classification_device,
-    #         time_composite_freq=time_composite_freq,
-    #         S2_apply_snow_mask=S2_apply_snow_mask,
-    #         S2_apply_cloud_mask=S2_apply_cloud_mask,
-    #     ),
-    #     template=da)
-
-    # remove timezone, otherwise crash -> zarr caveat
-    # ... and use numpy.datetime64 with second precision
-    # return da.assign_coords(
-    #     dict(time=[
-    #         pd.Timestamp(i.replace(tzinfo=None)).to_datetime64()
-    #         for i in da.time.data
-    #     ]))
