@@ -1,19 +1,14 @@
 import itertools
 import warnings
 
-import io
-import geopandas as gpd
 import numpy as np
 import pandas as pd
-import pickle
-import pkg_resources
 import rasterio
 import scipy.ndimage as sc
 import xarray as xr
 import zarr
 from joblib import Parallel, delayed
 from math import ceil
-from multiprocessing import shared_memory
 from numcodecs import Blosc
 from pystac_client.item_search import DatetimeLike
 from rasterio import transform, warp, windows
@@ -28,29 +23,11 @@ from .utils import bounds_from_transform_height_width_res, transform_height_widt
 from .const import *
 from .reproject_util import *
 from .stac import *
-
-
-def load_sentinel_2_grid_into_memory():
-    df = gpd.read_file(
-        pkg_resources.resource_filename(
-            __name__, "data/sentinel2_grid_stripped_with_epsg.gpkg"))
-
-    buffer = io.BytesIO()
-    pickle.dump(df, buffer)
-    # TODO make sure to check if it already exists or use random string?
-    mem = shared_memory.SharedMemory(name="s2grid",
-                                     create=True,
-                                     size=len(buffer.getvalue()))
-    mem.buf[:] = buffer.getvalue()
-
-
-def load_sentinel_2_grid_from_memory():
-    mem = shared_memory.SharedMemory("s2grid", create=False)
-    return pickle.load(io.BytesIO(mem.buf))
+from .s2grid import *
 
 
 def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
-                    top: float):
+                    top: float, s2grid_mem_name: str):
     """Retrieves the sentinel subtiles that intersect the with the specified
     bounds. The bounds are interpreted based on the given target_crs.
     """
@@ -66,7 +43,7 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
         S2_subtile_size) == 0, "S2_subtile_size needs to be a divisor of 10980"
 
     # load sentinel grid
-    s2grid = load_sentinel_2_grid_from_memory()
+    s2grid = load_sentinel_2_grid_from_memory(s2grid_mem_name)
 
     # convert bounds to sentinel grid crs
     transformed_bounds = Polygon(*warp.transform_geom(
@@ -344,6 +321,7 @@ def process_ptile(
             S2_apply_snow_mask=S2_apply_snow_mask,
             S2_apply_cloud_mask=S2_apply_cloud_mask,
             S2_bands_to_save=S2_bands_to_save,
+            s2grid_mem_name=s2grid_mem_name,
         )
 
     else:
@@ -534,6 +512,7 @@ def process_ptile_S2_dispatcher(
     S2_mask_snow: bool,
     S2_cloud_classification: bool,
     S2_return_cloud_probabilities: bool,
+    s2grid_mem_name: str,
 ):
 
     items = pd.DataFrame()
@@ -561,7 +540,7 @@ def process_ptile_S2_dispatcher(
     # obtain sub-sentinel2 tiles based on supplied bounds and CRS
     # TODO implement cache for this, then it also would not need to be passed to the next function
     subtiles = obtain_subtiles(target_crs, bound_left, bound_bottom,
-                               bound_right, bound_top)
+                               bound_right, bound_top, s2grid_mem_name)
 
     ptile_array_bands = None
     timestamps_it = items["ts"].drop_duplicates().tolist()
@@ -844,7 +823,7 @@ def process(
         )
 
     # load Sentinel 2 grid
-    load_sentinel_2_grid_into_memory()
+    s2grid_mem_name = load_sentinel_2_grid_into_memory()
 
     # TODO support to only download subset of bands (mutually exclusive with
     # cloud classification and partially snow_mask) -> or no sentinel 2 at all
@@ -981,6 +960,7 @@ def process(
         "zarr_path": zarr_path,
         "S2_bands_to_save": S2_bands_to_save,
         "S1_assets": S1_assets,
+        "s2grid_mem_name": s2grid_mem_name,
     }
 
     processing_spatial_chunk_size_in_CRS_unit = processing_spatial_chunk_size * target_resolution
@@ -1035,3 +1015,5 @@ def process(
                         batch_size=1,
                         backend="multiprocessing")(delayed(process_ptile)(**p)
                                                    for p in job_generator())
+
+    delete_sentinel_2_grid_from_memory(s2grid_mem_name)
