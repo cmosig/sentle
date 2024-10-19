@@ -1017,7 +1017,7 @@ def process(
                             time=tsi)
                         yield ret_config
 
-    num_chunks = df.shape[0] * (ceil(
+    num_chunks = df["collection"].explode().count() * (ceil(
         width / processing_spatial_chunk_size)) * (ceil(
             height / processing_spatial_chunk_size))
     with tqdm_joblib(
