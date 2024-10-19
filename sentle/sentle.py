@@ -294,6 +294,9 @@ def process_ptile(
                                 time_composite_freq=time_composite_freq,
                                 S1_assets=S1_assets)
     elif collection == "sentinel-2-l2a":
+        # NOTE temp
+        return None
+
         return process_ptile_S2_dispatcher(
             zarr_path=zarr_path,
             bound_left=bound_left,
@@ -352,7 +355,7 @@ def catalog_search_ptile(collection: str, ts, time_composite_freq, bound_left,
 
 def process_ptile_S1(zarr_path, target_crs: CRS, target_resolution: float,
                      time_composite_freq: str, bound_left, bound_right,
-                     bound_bottom, bound_top):
+                     bound_bottom, bound_top, ts, S1_assets):
     """Processes a single sentinel 1 ptile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution. The function
     returns the reprojected ptile.
@@ -370,6 +373,8 @@ def process_ptile_S1(zarr_path, target_crs: CRS, target_resolution: float,
         computed.
     """
 
+    # TODO a lot of this could be move to process_ptile function upstream
+    
     # TODO change collection string to constant variable
     # TODO replace for bound values by custom class names tuple
     item_list = catalog_search_ptile(collection="sentinel-1-rtc",
@@ -381,26 +386,24 @@ def process_ptile_S1(zarr_path, target_crs: CRS, target_resolution: float,
                                      bound_top=bound_top,
                                      target_crs=target_crs)
 
-    if len(item_list) == 0:
-        # if there is nothing within the bounds and for that timestamp return.
-        # possible and normal
-        return da
+    assert len(
+        item_list
+    ) > 0, "Number of retrieved stac items is zero even though we found stac items previously."
+
+    # determine ptile dimensions and transform from bounds
+    ptile_transform, ptile_height, ptile_width = transform_height_width_from_bounds_res(
+        bound_left, bound_bottom, bound_right, bound_top, target_resolution)
 
     # intiate one array representing the entire subtile for that timestamp
-    tile_array = np.full(shape=(da.shape[1], da.shape[2], da.shape[3]),
+    tile_array = np.full(shape=(len(S1_assets), ptile_height, ptile_width),
                          fill_value=0,
                          dtype=np.float32)
 
     if time_composite_freq is not None:
         # count how many values we add per pixel to compute mean later
-        tile_array_count = np.full(shape=(da.shape[1], da.shape[2],
-                                          da.shape[3]),
+        tile_array_count = np.full(shape=(len(S1_assets), ptile_height, ptile_width),
                                    fill_value=0,
                                    dtype=np.uint8)
-
-    # determine ptile dimensions and transform from bounds
-    ptile_transform, ptile_height, ptile_width = transform_height_width_from_bounds_res(
-        *ptile_bounds, target_resolution)
 
     for item in item_list:
         # iterate through S1 assets
@@ -530,7 +533,8 @@ def process_ptile_S2_dispatcher(
     subtiles = obtain_subtiles(target_crs, bound_left, bound_bottom,
                                bound_right, bound_top)
 
-    ptile_height, ptile_width = height_width_from_bounds_res(
+    # determine ptile dimensions and transform from bounds
+    ptile_transform, ptile_height, ptile_width = transform_height_width_from_bounds_res(
         bound_left, bound_bottom, bound_right, bound_top, target_resolution)
 
     # TODO too many unessary stac requests are created here
@@ -575,9 +579,6 @@ def process_ptile_S2_dispatcher(
                                     fill_value=0,
                                     dtype=np.uint8)
 
-    # determine ptile dimensions and transform from bounds
-    ptile_transform, ptile_height, ptile_width = transform_height_width_from_bounds_res(
-        bound_left, bound_bottom, bound_right, bound_top, target_resolution)
 
     ptile_array_bands = None
     timestamps_it = items["ts"].drop_duplicates().tolist()
@@ -969,8 +970,7 @@ def process(
                        path="/time",
                        fill_value=None)
 
-    temp = df["ts"].dt.tz_localize(tz=None) - pd.Timestamp(0, tz=None)
-    time[:] = (df["ts"].dt.tz_localize(tz=None) -
+    time[:] = (df["ts"].drop_duplicates().dt.tz_localize(tz=None) -
                pd.Timestamp(0, tz=None)).dt.days.tolist()
     time.attrs.update(ZARR_TIME_ATTRS)
 
