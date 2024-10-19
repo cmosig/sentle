@@ -257,6 +257,7 @@ def process_ptile(
     S2_cloud_classification: bool,
     S2_return_cloud_probabilities: bool,
     zarr_save_slice: dict,
+    s2grid_mem_name: str,
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
