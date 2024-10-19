@@ -282,6 +282,32 @@ def process_ptile(
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
+    # determine ptile dimensions and transform from bounds
+    ptile_transform, ptile_height, ptile_width = transform_height_width_from_bounds_res(
+        bound_left, bound_bottom, bound_right, bound_top, target_resolution)
+
+    # TODO too many unessary stac requests are created here
+    # when not using aggregation across large spatial scales
+    # -> this function is called for each timestamp that there was a sentinel 2
+    # tile anywhere in the entire bounds
+    # one could share the initial item list with all processes and the
+    # processes filter these instead based on extent -> we have the dataframe
+    # ready anyway
+    item_list = catalog_search_ptile(
+        collection=collection,
+        ts=ts,
+        time_composite_freq=time_composite_freq,
+        bound_left=bound_left,
+        bound_right=bound_right,
+        bound_bottom=bound_bottom,
+        bound_top=bound_top,
+        target_crs=target_crs,
+    )
+
+    assert len(
+        item_list
+    ) > 0, "Number of retrieved stac items is zero even though we found stac items previously."
+
     if collection == "sentinel-1-rtc":
         return process_ptile_S1(zarr_path=zarr_path,
                                 bound_left=bound_left,
@@ -290,13 +316,14 @@ def process_ptile(
                                 bound_top=bound_top,
                                 target_crs=target_crs,
                                 ts=ts,
+                                height=ptile_height,
+                                width=ptile_width,
+                                transform=ptile_transform,
+                                item_list=item_list,
                                 target_resolution=target_resolution,
                                 time_composite_freq=time_composite_freq,
                                 S1_assets=S1_assets)
     elif collection == "sentinel-2-l2a":
-        # NOTE temp
-        return None
-
         return process_ptile_S2_dispatcher(
             zarr_path=zarr_path,
             bound_left=bound_left,
@@ -305,6 +332,10 @@ def process_ptile(
             bound_top=bound_top,
             ts=ts,
             target_crs=target_crs,
+            height=ptile_height,
+            width=ptile_width,
+            transform=ptile_transform,
+            item_list=item_list,
             target_resolution=target_resolution,
             S2_cloud_classification=S2_cloud_classification,
             S2_cloud_classification_device=S2_cloud_classification_device,
@@ -355,7 +386,8 @@ def catalog_search_ptile(collection: str, ts, time_composite_freq, bound_left,
 
 def process_ptile_S1(zarr_path, target_crs: CRS, target_resolution: float,
                      time_composite_freq: str, bound_left, bound_right,
-                     bound_bottom, bound_top, ts, S1_assets):
+                     bound_bottom, bound_top, ts, S1_assets, height, width,
+                     transform, item_list):
     """Processes a single sentinel 1 ptile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution. The function
     returns the reprojected ptile.
@@ -373,35 +405,15 @@ def process_ptile_S1(zarr_path, target_crs: CRS, target_resolution: float,
         computed.
     """
 
-    # TODO a lot of this could be move to process_ptile function upstream
-    
-    # TODO change collection string to constant variable
-    # TODO replace for bound values by custom class names tuple
-    item_list = catalog_search_ptile(collection="sentinel-1-rtc",
-                                     ts=ts,
-                                     time_composite_freq=time_composite_freq,
-                                     bound_left=bound_left,
-                                     bound_right=bound_right,
-                                     bound_bottom=bound_bottom,
-                                     bound_top=bound_top,
-                                     target_crs=target_crs)
-
-    assert len(
-        item_list
-    ) > 0, "Number of retrieved stac items is zero even though we found stac items previously."
-
-    # determine ptile dimensions and transform from bounds
-    ptile_transform, ptile_height, ptile_width = transform_height_width_from_bounds_res(
-        bound_left, bound_bottom, bound_right, bound_top, target_resolution)
-
     # intiate one array representing the entire subtile for that timestamp
-    tile_array = np.full(shape=(len(S1_assets), ptile_height, ptile_width),
-                         fill_value=0,
-                         dtype=np.float32)
+    ptile_array = np.full(shape=(len(S1_assets), ptile_height, ptile_width),
+                          fill_value=0,
+                          dtype=np.float32)
 
     if time_composite_freq is not None:
         # count how many values we add per pixel to compute mean later
-        tile_array_count = np.full(shape=(len(S1_assets), ptile_height, ptile_width),
+        tile_array_count = np.full(shape=(len(S1_assets), ptile_height,
+                                          ptile_width),
                                    fill_value=0,
                                    dtype=np.uint8)
 
@@ -473,10 +485,10 @@ def process_ptile_S1(zarr_path, target_crs: CRS, target_resolution: float,
                                           local_win.width]
 
                     # save it
-                    tile_array[i, write_win.row_off:write_win.row_off +
-                               write_win.height,
-                               write_win.col_off:write_win.col_off +
-                               write_win.width] += data_repr
+                    ptile_array[i, write_win.row_off:write_win.row_off +
+                                write_win.height,
+                                write_win.col_off:write_win.col_off +
+                                write_win.width] += data_repr
 
                     if time_composite_freq is not None:
                         # save where we have NaNs
@@ -495,12 +507,12 @@ def process_ptile_S1(zarr_path, target_crs: CRS, target_resolution: float,
         with warnings.catch_warnings():
             # filter out divide by zero warning, this is expected here
             warnings.simplefilter("ignore")
-            tile_array /= tile_array_count
+            ptile_array /= tile_array_count
 
     # replace zeros with nans
-    tile_array[tile_array == 0] = np.nan
+    ptile_array[ptile_array == 0] = np.nan
 
-    return xr.DataArray(data=np.expand_dims(tile_array, axis=0),
+    return xr.DataArray(data=np.expand_dims(ptile_array, axis=0),
                         dims=["time", "band", "y", "x"],
                         coords=dict(time=[da.time.data[0]],
                                     band=da.band,
@@ -517,6 +529,10 @@ def process_ptile_S2_dispatcher(
     S2_apply_snow_mask: bool,
     S2_apply_cloud_mask: bool,
     S2_bands_to_save,
+    height,
+    width,
+    transform,
+    item_list,
     ts,
     bound_left,
     bound_right,
@@ -527,35 +543,6 @@ def process_ptile_S2_dispatcher(
     S2_return_cloud_probabilities: bool,
     zarr_save_slice=dict,
 ):
-
-    # obtain sub-sentinel2 tiles based on supplied bounds and CRS
-    # TODO implement cache for this
-    subtiles = obtain_subtiles(target_crs, bound_left, bound_bottom,
-                               bound_right, bound_top)
-
-    # determine ptile dimensions and transform from bounds
-    ptile_transform, ptile_height, ptile_width = transform_height_width_from_bounds_res(
-        bound_left, bound_bottom, bound_right, bound_top, target_resolution)
-
-    # TODO too many unessary stac requests are created here
-    # when not using aggregation across large spatial scales
-    # -> this function is called for each timestamp that there was a sentinel 2
-    # tile anywhere in the entire bounds
-    # one could share the initial item list with all processes and the
-    # processes filter these instead based on extent -> we have the dataframe
-    # ready anyway
-    item_list = catalog_search_ptile(collection="sentinel-2-l2a",
-                                     ts=ts,
-                                     time_composite_freq=time_composite_freq,
-                                     bound_left=bound_left,
-                                     bound_right=bound_right,
-                                     bound_bottom=bound_bottom,
-                                     bound_top=bound_top,
-                                     target_crs=target_crs)
-
-    assert len(
-        item_list
-    ) > 0, "Number of retrieved stac items is zero even though we found stac items previously."
 
     items = pd.DataFrame()
     items["item"] = item_list
@@ -579,6 +566,10 @@ def process_ptile_S2_dispatcher(
                                     fill_value=0,
                                     dtype=np.uint8)
 
+    # obtain sub-sentinel2 tiles based on supplied bounds and CRS
+    # TODO implement cache for this, then it also would not need to be passed to the next function
+    subtiles = obtain_subtiles(target_crs, bound_left, bound_bottom,
+                               bound_right, bound_top)
 
     ptile_array_bands = None
     timestamps_it = items["ts"].drop_duplicates().tolist()
