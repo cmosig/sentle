@@ -12,6 +12,7 @@ import scipy.ndimage as sc
 import xarray as xr
 import zarr
 from joblib import Parallel, delayed
+from math import ceil
 from multiprocessing import shared_memory
 from numcodecs import Blosc
 from pystac_client.item_search import DatetimeLike
@@ -1032,8 +1033,9 @@ def process(
                         time=tsi)
                     yield ret_config
 
-    num_chunks = df.shape[0] * (1 + width // processing_spatial_chunk_size) * (
-        1 + height // processing_spatial_chunk_size)
+    num_chunks = df.shape[0] * (ceil(
+        width / processing_spatial_chunk_size)) * (ceil(
+            height / processing_spatial_chunk_size))
     with tqdm_joblib(
             tqdm(desc="processing",
                  unit="ptiles",
