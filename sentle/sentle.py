@@ -256,6 +256,10 @@ def process(
     # exact same timestamp
     df = pd.DataFrame()
     items = list(search.item_collection())
+    if len(items) == 0:
+        print("No items found for specified time range and area.")
+        return
+
     df["ts_raw"] = [i.datetime for i in items]
     df["collection"] = [i.collection_id for i in items]
 
