@@ -290,7 +290,7 @@ def process(
     # chunk size is the number of S2 bands, because we parallelize S1/S2
     data = zarr.create(shape=(df["ts"].count(), len(total_bands_to_save),
                               height, width),
-                       chunks=(1, len(total_bands_to_save),
+                       chunks=(1, len(S2_bands_to_save),
                                processing_spatial_chunk_size,
                                processing_spatial_chunk_size),
                        dtype=np.float32,
