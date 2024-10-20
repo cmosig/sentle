@@ -328,6 +328,8 @@ def process_ptile(
     else:
         assert False
 
+    # if we want the data instead of saving it we can do that here and then
+    # create the xarray object in the process function
     if ptile_array is not None:
         # save to zarr
         dst = zarr.open(zarr_path)["sentle"]
@@ -397,12 +399,15 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
 
             try:
                 with rasterio.open(item.assets[s1_asset].href) as dr:
+
                     # reproject ptile bounds to S1 tile CRS
                     ptile_bounds_local_crs = warp.transform_bounds(
                         target_crs, dr.crs, bound_left, bound_bottom,
                         bound_right, bound_top)
+
                     # figure out which area of the image is interesting for us
                     read_win = dr.window(*ptile_bounds_local_crs)
+
                     # read windowed
                     data = dr.read(indexes=1,
                                    window=read_win,
