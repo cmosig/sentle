@@ -13,12 +13,11 @@ from .cloud_mask import (S2_cloud_mask_band, S2_cloud_prob_bands,
                          compute_cloud_mask, load_cloudsen_model)
 from .const import *
 from .reproject_util import *
-from .s2grid import *
 from .snow_mask import S2_snow_mask_band, compute_potential_snow_layer
 
 
 def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
-                    top: float, s2grid_mem_name: str):
+                    top: float, s2grid):
     """Retrieves the sentinel subtiles that intersect the with the specified
     bounds. The bounds are interpreted based on the given target_crs.
     """
@@ -32,9 +31,6 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
     assert (
         10980 %
         S2_subtile_size) == 0, "S2_subtile_size needs to be a divisor of 10980"
-
-    # load sentinel grid
-    s2grid = load_sentinel_2_grid_from_memory(s2grid_mem_name)
 
     # convert bounds to sentinel grid crs
     transformed_bounds = Polygon(*warp.transform_geom(
@@ -82,8 +78,8 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
     # process because it intersects the specified bounds to download
     s2grid = s2grid.explode("intersecting_windows")
 
-    return s2grid
-
+    # only keep columns that we also need later
+    return s2grid[['name', 'intersecting_windows']]
 
 def process_S2_subtile(intersecting_windows, stac_item, timestamp,
                        target_crs: CRS, target_resolution: float,
@@ -248,7 +244,7 @@ def process_ptile_S2_dispatcher(
     S2_mask_snow: bool,
     S2_cloud_classification: bool,
     S2_return_cloud_probabilities: bool,
-    s2grid_mem_name: str,
+    S2_subtiles,
 ):
 
     items = pd.DataFrame()
@@ -273,11 +269,6 @@ def process_ptile_S2_dispatcher(
                                     fill_value=0,
                                     dtype=np.uint8)
 
-    # obtain sub-sentinel2 tiles based on supplied bounds and CRS
-    # TODO implement cache for this, then it also would not need to be passed to the next function
-    subtiles = obtain_subtiles(target_crs, bound_left, bound_bottom,
-                               bound_right, bound_top, s2grid_mem_name)
-
     ptile_array_bands = None
     timestamps_it = items["ts"].drop_duplicates().tolist()
     # sanity check on number of timestamps with or without time agg
@@ -292,7 +283,7 @@ def process_ptile_S2_dispatcher(
             S2_cloud_classification_device=S2_cloud_classification_device,
             S2_mask_snow=S2_mask_snow,
             S2_return_cloud_probabilities=S2_return_cloud_probabilities,
-            subtiles=subtiles,
+            subtiles=S2_subtiles,
             ptile_transform=ptile_transform,
             ptile_width=ptile_width,
             ptile_height=ptile_height,
