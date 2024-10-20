@@ -1,8 +1,10 @@
 import warnings
 from math import ceil
 
+import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pkg_resources
 import zarr
 from joblib import Parallel, delayed
 from numcodecs import Blosc
@@ -14,9 +16,8 @@ from tqdm.auto import tqdm
 from .cloud_mask import S2_cloud_mask_band, S2_cloud_prob_bands
 from .const import *
 from .reproject_util import *
-from .s2grid import *
 from .sentinel1 import process_ptile_S1
-from .sentinel2 import process_ptile_S2_dispatcher
+from .sentinel2 import obtain_subtiles, process_ptile_S2_dispatcher
 from .stac import *
 from .utils import tqdm_joblib
 
@@ -73,7 +74,7 @@ def process_ptile(
     S2_cloud_classification: bool,
     S2_return_cloud_probabilities: bool,
     zarr_save_slice: dict,
-    s2grid_mem_name: str,
+    S2_subtiles,
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
@@ -138,7 +139,7 @@ def process_ptile(
             S2_apply_snow_mask=S2_apply_snow_mask,
             S2_apply_cloud_mask=S2_apply_cloud_mask,
             S2_bands_to_save=S2_bands_to_save,
-            s2grid_mem_name=s2grid_mem_name,
+            S2_subtiles=S2_subtiles,
         )
 
     else:
@@ -216,9 +217,6 @@ def process(
         warnings.warn(
             "Temporal aggregation is specified, but neither cloud or snow mask is set to be applied. This may yield useless aggregations for Sentinel-2 data."
         )
-
-    # load Sentinel 2 grid
-    s2grid_mem_name = load_sentinel_2_grid_into_memory()
 
     # TODO support to only download subset of bands (mutually exclusive with
     # cloud classification and partially snow_mask) -> or no sentinel 2 at all
@@ -355,19 +353,22 @@ def process(
         "zarr_path": zarr_path,
         "S2_bands_to_save": S2_bands_to_save,
         "S1_assets": S1_assets,
-        "s2grid_mem_name": s2grid_mem_name,
     }
 
     processing_spatial_chunk_size_in_CRS_unit = processing_spatial_chunk_size * target_resolution
+    s2grid = gpd.read_file(
+        pkg_resources.resource_filename(
+            __name__, "data/sentinel2_grid_stripped_with_epsg.gpkg"))
 
     def job_generator():
-        for tsi, (_, ser) in enumerate(df[["ts", "collection"]].iterrows()):
-            for xi, x_min in enumerate(
-                    range(bound_left, bound_right,
+        for xi, x_min in enumerate(
+                range(bound_left, bound_right,
+                      processing_spatial_chunk_size_in_CRS_unit)):
+            for yi, y_min in enumerate(
+                    range(bound_bottom, bound_top,
                           processing_spatial_chunk_size_in_CRS_unit)):
-                for yi, y_min in enumerate(
-                        range(bound_bottom, bound_top,
-                              processing_spatial_chunk_size_in_CRS_unit)):
+                for tsi, (_, ser) in enumerate(df[["ts",
+                                                   "collection"]].iterrows()):
                     for collection in ser["collection"]:
                         ret_config = dict(config)
                         ret_config["bound_left"] = x_min
@@ -395,6 +396,14 @@ def process(
                                 len(S2_bands_to_save),
                                 len(total_bands_to_save)),
                             time=tsi)
+                        ret_config["S2_subtiles"] = obtain_subtiles(
+                            target_crs=target_crs,
+                            left=ret_config["bound_left"],
+                            bottom=ret_config["bound_bottom"],
+                            right=ret_config["bound_right"],
+                            top=ret_config["bound_top"],
+                            s2grid=s2grid,
+                        ) if collection == "sentinel-2-l2a" else None
                         yield ret_config
 
     num_chunks = df["collection"].explode().count() * (ceil(
@@ -410,5 +419,3 @@ def process(
                         batch_size=1,
                         backend="multiprocessing")(delayed(process_ptile)(**p)
                                                    for p in job_generator())
-
-    delete_sentinel_2_grid_from_memory(s2grid_mem_name)
