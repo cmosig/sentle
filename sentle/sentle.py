@@ -411,7 +411,9 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                     # read windowed
                     data = dr.read(indexes=1,
                                    window=read_win,
-                                   out_dtype=np.float32)
+                                   out_dtype=np.float32,
+                                   boundless=True,
+                                   fill_value=0)
 
                     # compute aligned reprojection
                     tile_repr_transform, tile_repr_height, tile_repr_width = calculate_aligned_transform(
