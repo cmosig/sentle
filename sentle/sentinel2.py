@@ -81,6 +81,7 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
     # only keep columns that we also need later
     return s2grid[['name', 'intersecting_windows']]
 
+
 def process_S2_subtile(intersecting_windows, stac_item, timestamp,
                        target_crs: CRS, target_resolution: float,
                        ptile_transform, ptile_width: int, ptile_height: int,
@@ -147,6 +148,10 @@ def process_S2_subtile(intersecting_windows, stac_item, timestamp,
             print("Failed to read from stac repository.", type(e))
             print("This is a planetary computer issue, not a sentle issue")
             print("Asset", band, href)
+
+    # in this case we have no data for this subtile
+    if s2_tile_transform is None:
+        return None, None, None
 
     # determine bounds based on subtile window and tile transform
     subtile_bounds_utm = windows.bounds(intersecting_windows,
@@ -290,6 +295,11 @@ def process_ptile_S2_dispatcher(
             cloudsen_model=cloudsen_model,
             items=items[items["ts"] == ts])
 
+        # this happens when the href is not available in subtile -> planetary
+        # computer issue
+        if ptile_timestamp is None:
+            continue
+
         # replace nans with zero, to that sum works properly
         ptile_timestamp = np.nan_to_num(ptile_timestamp, 0)
 
@@ -318,6 +328,9 @@ def process_ptile_S2_dispatcher(
         if time_composite_freq is not None:
             # count where we added data
             ptile_array_count += ptile_timestamp != 0
+
+    if ptile_array_bands is None:
+        return None
 
     if time_composite_freq is not None:
         if S2_snow_mask_band in ptile_array_bands:
@@ -405,6 +418,11 @@ def process_ptile_S2(
             S2_cloud_classification_device=S2_cloud_classification_device,
             cloud_mask_model=cloudsen_model)
 
+        # this happens when the href is not available
+        # -> planetary computer issue
+        if subtile_array_ret is None:
+            continue
+
         # also replace nan with 0 so that the mean computation works
         # (this is reverted later)
         subtile_array[:,
@@ -416,6 +434,9 @@ def process_ptile_S2(
                             write_win.height,
                             write_win.col_off:write_win.col_off +
                             write_win.width] += ~(subtile_array_ret == 0)
+
+    if subtile_array_bands is None:
+        return None, None
 
     with warnings.catch_warnings():
         # filter out divide by zero warning, this is expected here
