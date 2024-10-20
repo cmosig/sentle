@@ -296,7 +296,7 @@ def process(
                                processing_spatial_chunk_size,
                                processing_spatial_chunk_size),
                        dtype=np.float32,
-                       fill_value=None,
+                       fill_value=float("nan"),
                        store=store,
                        path="/sentle",
                        write_empty_chunks=False,
