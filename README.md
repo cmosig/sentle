@@ -46,7 +46,7 @@ There is only one important function: `process`. Here, you specify all parameter
 from sentle import sentle
 from rasterio.crs import CRS
 
-da = sentle.process(
+sentle.process(
     zarr_path="mycube.zarr",
     target_crs=CRS.from_string("EPSG:32633"),
     bound_left=176000,
