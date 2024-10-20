@@ -104,9 +104,8 @@ import lexcube
 lexcube.Cube3DWidget(da.sel(band="B02"), vmin=0, vmax=4000)
 ```
 
-<p align="center">
-<img src=https://github.com/cmosig/sentle/assets/32590522/33b7f6a0-532e-453b-80db-748d99e753a2/>
-</p>  
+![image](https://github.com/user-attachments/assets/13c4688a-be9d-4a43-adac-63536756f5e9)
+
 
 ## Questions you may have
 
