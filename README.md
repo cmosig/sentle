@@ -47,7 +47,7 @@ from sentle import sentle
 from rasterio.crs import CRS
 
 sentle.process(
-    zarr_path="mycube.zarr",
+    zarr_store="mycube.zarr",
     target_crs=CRS.from_string("EPSG:32633"),
     bound_left=176000,
     bound_bottom=5660000,
@@ -67,13 +67,13 @@ sentle.process(
 ```
 This code downloads data for a 40km by 40km area with one year of both Sentinel-1 and Sentinel-2. Clouds and snow are detected and replaced with NaNs. Data is also averaged every 7 days. 
 
-Everything is parallized across 10 workers and each worker immediately saves its results to the specified zarr_path. This ensures you can download larger-than-memory cubes.
+Everything is parallelized across 10 workers and each worker immediately saves its results to the specified path to a `zarr_store`. This ensures you can download larger-than-memory cubes.
 
 Explanation:
 - `zarr_path`: Save path. 
 - `target_crs`: Specifies the target CRS that all data will be reprojected to.
 - `target_resolution`:  Determines the spatial resolution that all data is reprojected to in the `target_crs`. 
-- `bound_*`: Spatial bounds in `target_crs` of the area you want to download. Undefined behavior if difference between opposite bounds is not divisable by `target_resolution`.
+- `bound_*`: Spatial bounds in `target_crs` of the area you want to download. Undefined behavior if difference between opposite bounds is not divisible by `target_resolution`.
 - `datetime`: Time range that will be downloaded.
 - `S2_mask_snow`: Whether to compute snow mask for Sentinel-2 data.
 - `S2_cloud_classification`: Whether to perform a cloud classification layer for Sentinel-2 data.
@@ -81,7 +81,9 @@ Explanation:
 - `S2_apply_*`: Whether to apply the respective mask, i.e., replace values by NaN.
 - `S1_assets`: Which Sentinel-1 assets to download. Disable Sentinel-1 by setting this to `None`.
 - `time_composite_freq`: Rounding interval across which data is averaged. Uses `pandas.Timestamp.round(time_composite_freq)`. Cloud/snow masks are dropped after masking because they cannot be aggregated.
-- `num_workers`: Number of cores to use. Plan about 2 GiB of memory usage per worker.
+- `num_workers`: Number of cores to use. Plan about 2 GiB of memory usage per worker. -1 means all cores.
+- `processing_spatial_chunk_size`: Size of spatial chunks that are processed in parallel. Default is 4000.
+- `overwrite`: Whether to overwrite the zarr store if it already exists.  Default is False.
 
 **Visualize**
 
@@ -123,6 +125,6 @@ This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md
 
 ## Acknowledgments
 
-- Thank you to [Cesar Aybar](https://csaybar.github.io/) for his cloud detection model. The paper: [link](https://www.nature.com/articles/s41597-022-01878-2)
+- Thank you to [Cesar Aybar](https://csaybar.github.io/) for his cloud detection model. All cloud detection in this package is performed using his package. The paper: [link](https://www.nature.com/articles/s41597-022-01878-2)
 - Thank you to [David Montero](https://github.com/davemlz) for all the
 discussions and his awesome packages which inspired this.
