@@ -22,7 +22,10 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                           fill_value=0,
                           dtype=np.float32)
 
-    if time_composite_freq is not None:
+    perform_aggregation = (time_composite_freq is not None) and (len(item_list)
+                                                                 > 1)
+
+    if perform_aggregation:
         # count how many values we add per pixel to compute mean later
         tile_array_count = np.full(shape=(len(S1_assets), ptile_height,
                                           ptile_width),
@@ -108,7 +111,7 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                                 write_win.col_off:write_win.col_off +
                                 write_win.width] += data_repr
 
-                    if time_composite_freq is not None:
+                    if perform_aggregation:
                         # save where we have NaNs
                         tile_array_count[i,
                                          write_win.row_off:write_win.row_off +
@@ -121,7 +124,7 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                 print("This is a planetary computer issue, not a sentle issue")
                 print("Asset", band, href)
 
-    if time_composite_freq is not None:
+    if perform_aggregation:
         with warnings.catch_warnings():
             # filter out divide by zero warning, this is expected here
             warnings.simplefilter("ignore")

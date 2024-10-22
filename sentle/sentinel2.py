@@ -267,7 +267,11 @@ def process_ptile_S2_dispatcher(
                           fill_value=0,
                           dtype=np.float32)
 
-    if time_composite_freq is not None:
+    # also dont need to perform aggreation if we only have one item
+    perform_aggregation = (time_composite_freq is not None) and (len(item_list)
+                                                                 > 1)
+
+    if perform_aggregation:
         # count how many values we add per pixel to compute mean later
         ptile_array_count = np.full(shape=(len(S2_bands_to_save), ptile_height,
                                            ptile_width),
@@ -276,9 +280,6 @@ def process_ptile_S2_dispatcher(
 
     ptile_array_bands = None
     timestamps_it = items["ts"].drop_duplicates().tolist()
-    # sanity check on number of timestamps with or without time agg
-    assert (len(timestamps_it) == 1 and time_composite_freq is None) or (
-        len(timestamps_it) >= 1 and time_composite_freq is not None)
     for ts in timestamps_it:
         ptile_timestamp, ptile_array_bands = process_ptile_S2(
             timestamp=ts,
@@ -325,7 +326,7 @@ def process_ptile_S2_dispatcher(
         # save new data
         ptile_array += ptile_timestamp
 
-        if time_composite_freq is not None:
+        if perform_aggregation:
             # count where we added data
             ptile_array_count += ptile_timestamp != 0
 
@@ -338,6 +339,7 @@ def process_ptile_S2_dispatcher(
         if S2_cloud_mask_band in ptile_array_bands:
             ptile_array_bands.remove(S2_cloud_mask_band)
 
+    if perform_aggregation:
         # compute mean based on sum and count for each pixel
         with warnings.catch_warnings():
             # filter out divide by zero warning, this is expected here
