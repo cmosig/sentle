@@ -156,7 +156,7 @@ def process_ptile(
 
 def validate_user_input(target_crs: CRS,
                         target_resolution: float,
-                        zarr_store=zarr_store,
+                        zarr_store: str | zarr.storage.Store,
                         bound_left: float,
                         bound_bottom: float,
                         bound_right: float,
@@ -277,6 +277,93 @@ def validate_user_input(target_crs: CRS,
         )
 
 
+def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
+                       df: pd.DataFrame,
+                       height: int,
+                       width: int,
+                       bound_left: float,
+                       bound_right: float,
+                       bound_top: float,
+                       bound_bottom: float,
+                       target_resolution: float,
+                       processing_spatial_chunk_size: int,
+                       S2_bands_to_save: list[str],
+                       total_bands_to_save: list[str],
+                       overwrite: bool = False) -> None:
+
+    if isinstance(zarr_store, str):
+        # setup zarr storage
+        store = zarr.storage.DirectoryStore(zarr_store,
+                                            dimension_separator=".")
+    else:
+        store = zarr_store
+
+    # create array for where to store the processed sentinel data
+    # chunk size is the number of S2 bands, because we parallelize S1/S2
+    data = zarr.create(shape=(df["ts"].count(), len(total_bands_to_save),
+                              height, width),
+                       chunks=(1, len(S2_bands_to_save),
+                               processing_spatial_chunk_size,
+                               processing_spatial_chunk_size),
+                       dtype=np.float32,
+                       fill_value=float("nan"),
+                       store=store,
+                       path="/sentle",
+                       write_empty_chunks=False,
+                       compressor=Blosc(cname="lz4"))
+    data.attrs.update(ZARR_DATA_ATTRS)
+
+    # ------
+    # arrays for storage of dimension information
+
+    # band dimension
+    band = zarr.create(shape=(len(total_bands_to_save)),
+                       dtype="<U3",
+                       store=store,
+                       path="/band",
+                       overwrite=overwrite)
+    band[:] = total_bands_to_save
+    band.attrs.update(ZARR_BAND_ATTRS)
+
+    # x dimension
+    x = zarr.create(shape=(width),
+                    dtype="float32",
+                    store=store,
+                    path="/x",
+                    overwrite=overwrite)
+    x[:] = np.arange(bound_left, bound_right,
+                     target_resolution).astype(np.float32)
+    x.attrs.update(ZARR_X_ATTRS)
+
+    # y dimension
+    y = zarr.create(shape=(height),
+                    dtype="float32",
+                    store=store,
+                    path="/y",
+                    overwrite=overwrite)
+    y[:] = np.arange(bound_top, bound_bottom,
+                     -target_resolution).astype(np.float32)
+    y.attrs.update(ZARR_Y_ATTRS)
+
+    # time dimension
+    time = zarr.create(shape=(df["ts"].count()),
+                       dtype="int64",
+                       store=store,
+                       path="/time",
+                       fill_value=None,
+                       overwrite=overwrite)
+
+    time[:] = (df["ts"].drop_duplicates().dt.tz_localize(tz=None) -
+               pd.Timestamp(0, tz=None)).dt.days.tolist()
+    time.attrs.update(ZARR_TIME_ATTRS)
+
+    # consolidating metadata
+    zarr.consolidate_metadata(store)
+
+    # close up store as we are done with init
+    store.close()
+
+
 def process(
     target_crs: CRS,
     target_resolution: float,
@@ -296,6 +383,7 @@ def process(
     time_composite_freq: str = None,
     S2_apply_snow_mask: bool = False,
     S2_apply_cloud_mask: bool = False,
+    overwrite: bool = False,
 ):
     """
     Parameters
@@ -324,15 +412,21 @@ def process(
     S2_return_cloud_probabilities : bool, default=False
         Whether to return raw cloud probabilities which were used to determine the cloud classes.
     num_workers : int, default=1
-        Number of cores to scale computation across. Plan 4GiB of RAM per worker.
+        Number of cores to scale computation across. Plan 2GiB of RAM per worker. -1 uses all available cores.
     time_composite_freq: str, default=None
         Rounding interval across which data is averaged.
     S2_apply_snow_mask: bool, default=False
         Whether to replace snow with NaN.  
     S2_apply_cloud_mask: bool, default=False
         Whether to replace anything that is not clear sky with NaN.  
-    zarr_store: str,
+    zarr_store: str | zarr.storage.Store
        Path of where to create the zarr storage.
+    processing_spatial_chunk_size: int, default=4000
+       Size of spatial chunks across which we perform parallization.
+    S1_assets: list[str], default=["vh", "vv"]
+       Specify which bands to download for Sentinel-1. Only "vh" and "vv" are supported.
+    overwrite: bool, default=False
+       Whether to overwrite existing zarr storage. 
     """
 
     validate_user_input(
@@ -424,67 +518,20 @@ def process(
                                                  bound_right, bound_top,
                                                  target_resolution)
 
-    if isinstance(zarr_store, str):
-        # setup zarr storage
-        store = zarr.storage.DirectoryStore(zarr_store,
-                                            dimension_separator=".")
-    else:
-        store = zarr_store
-
-    # create array for where to store the processed sentinel data
-    # chunk size is the number of S2 bands, because we parallelize S1/S2
-    data = zarr.create(shape=(df["ts"].count(), len(total_bands_to_save),
-                              height, width),
-                       chunks=(1, len(S2_bands_to_save),
-                               processing_spatial_chunk_size,
-                               processing_spatial_chunk_size),
-                       dtype=np.float32,
-                       fill_value=float("nan"),
-                       store=store,
-                       path="/sentle",
-                       write_empty_chunks=False,
-                       compressor=Blosc(cname="lz4"))
-    data.attrs.update(ZARR_DATA_ATTRS)
-
-    # ------
-    # arrays for storage of dimension information
-
-    # band dimension
-    band = zarr.create(shape=(len(total_bands_to_save)),
-                       dtype="<U3",
-                       store=store,
-                       path="/band")
-    band[:] = total_bands_to_save
-    band.attrs.update(ZARR_BAND_ATTRS)
-
-    # x dimension
-    x = zarr.create(shape=(width), dtype="float32", store=store, path="/x")
-    x[:] = np.arange(bound_left, bound_right,
-                     target_resolution).astype(np.float32)
-    x.attrs.update(ZARR_X_ATTRS)
-
-    # y dimension
-    y = zarr.create(shape=(height), dtype="float32", store=store, path="/y")
-    y[:] = np.arange(bound_top, bound_bottom,
-                     -target_resolution).astype(np.float32)
-    y.attrs.update(ZARR_Y_ATTRS)
-
-    # time dimension
-    time = zarr.create(shape=(df["ts"].count()),
-                       dtype="int64",
-                       store=store,
-                       path="/time",
-                       fill_value=None)
-
-    time[:] = (df["ts"].drop_duplicates().dt.tz_localize(tz=None) -
-               pd.Timestamp(0, tz=None)).dt.days.tolist()
-    time.attrs.update(ZARR_TIME_ATTRS)
-
-    # consolidating metadata
-    zarr.consolidate_metadata(store)
-
-    # close up store as we are done with init
-    store.close()
+    # setup zarr storage
+    setup_zarr_storage(
+        zarr_store=zarr_store,
+        df=df,
+        height=height,
+        width=width,
+        bound_left=bound_left,
+        bound_bottom=bound_bottom,
+        bound_right=bound_right,
+        bound_top=bound_top,
+        target_resolution=target_resolution,
+        processing_spatial_chunk_size=processing_spatial_chunk_size,
+        S2_bands_to_save=S2_bands_to_save,
+        total_bands_to_save=total_bands_to_save)
 
     # figure out jobs for multiprocessing -> one per chunk
     config = {
