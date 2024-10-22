@@ -154,6 +154,124 @@ def process_ptile(
             zarr_save_slice["y"], zarr_save_slice["x"]] = ptile_array
 
 
+def validate_user_input(target_crs: CRS,
+                        target_resolution: float,
+                        bound_left: float,
+                        bound_bottom: float,
+                        bound_right: float,
+                        bound_top: float,
+                        datetime: DatetimeLike,
+                        processing_spatial_chunk_size: int = 4000,
+                        S1_assets: list[str] = ["vh", "vv"],
+                        S2_mask_snow: bool = False,
+                        S2_cloud_classification: bool = False,
+                        S2_cloud_classification_device="cpu",
+                        S2_return_cloud_probabilities: bool = False,
+                        num_workers: int = 1,
+                        time_composite_freq: str = None,
+                        S2_apply_snow_mask: bool = False,
+                        S2_apply_cloud_mask: bool = False):
+
+    # check if the target CRS is valid
+    if not isinstance(target_crs, CRS):
+        raise ValueError("target_crs must be an instance of rasterio.crs.CRS")
+
+    # check if the target resolution is valid
+    if not isinstance(target_resolution, (int, float)):
+        raise ValueError("target_resolution must be an integer or float")
+
+    # check if resolution greater than 0
+    if target_resolution <= 0:
+        raise ValueError("target_resolution must be greater than 0")
+
+    # check if the bounds are valid
+    if not all(
+            isinstance(bound, (int, float))
+            for bound in [bound_left, bound_bottom, bound_right, bound_top]):
+        raise ValueError(
+            "bound_left, bound_bottom, bound_right, and bound_top must be integers or floats"
+        )
+
+    # check if the bounds make sense
+    if bound_left >= bound_right:
+        raise ValueError("bound_left must be less than bound_right")
+    if bound_bottom >= bound_top:
+        raise ValueError("bound_bottom must be less than bound_top")
+
+    # check processsing_spatial_chunk_size
+    if not isinstance(processing_spatial_chunk_size, int):
+        raise ValueError("processing_spatial_chunk_size must be an integer")
+    # check if chunk size is greater than 1000
+    if processing_spatial_chunk_size < 1000:
+        raise ValueError(
+            "processing_spatial_chunk_size must be greater than 1000")
+
+    if time_composite_freq is not None and (not S2_apply_snow_mask
+                                            and not S2_apply_cloud_mask):
+        warnings.warn(
+            "Temporal aggregation is specified, but neither cloud or snow mask is set to be applied. This may yield useless aggregations for Sentinel-2 data."
+        )
+
+    # validate that S1_assets is a list and contains only vv and vh
+    if S1_assets is not None:
+        if not isinstance(S1_assets, list):
+            raise ValueError("S1_assets must be a list")
+
+        if not all(isinstance(asset, str) for asset in S1_assets):
+            raise ValueError("S1_assets must contain only strings")
+
+        if not all(asset in ["vh", "vv"] for asset in S1_assets):
+            raise ValueError("S1_assets must contain only 'vh' and 'vv'")
+
+    # check if S2_mask_snow is a boolean
+    if not isinstance(S2_mask_snow, bool):
+        raise ValueError("S2_mask_snow must be a boolean")
+
+    # check if S2_cloud_classification is a boolean
+    if not isinstance(S2_cloud_classification, bool):
+        raise ValueError("S2_cloud_classification must be a boolean")
+
+    # check if S2_cloud_classification_device is a string
+    if not isinstance(S2_cloud_classification_device, str):
+        raise ValueError("S2_cloud_classification_device must be a string")
+    # check if S2_cloud_classification_device is either cpu or cuda
+    if S2_cloud_classification_device not in ["cpu", "cuda"]:
+        raise ValueError(
+            "S2_cloud_classification_device must be either 'cpu' or 'cuda'")
+
+    # check if S2_return_cloud_probabilities is a boolean
+    if not isinstance(S2_return_cloud_probabilities, bool):
+        raise ValueError("S2_return_cloud_probabilities must be a boolean")
+
+    # check if num_workers is an integer
+    if not isinstance(num_workers, int):
+        raise ValueError("num_workers must be an integer")
+
+    # check if time_composite_freq is a string
+    if time_composite_freq is not None and not isinstance(
+            time_composite_freq, str):
+        raise ValueError("time_composite_freq must be a string")
+
+    # check if S2_apply_snow_mask is a boolean
+    if not isinstance(S2_apply_snow_mask, bool):
+        raise ValueError("S2_apply_snow_mask must be a boolean")
+
+    # check if S2_apply_cloud_mask is a boolean
+    if not isinstance(S2_apply_cloud_mask, bool):
+        raise ValueError("S2_apply_cloud_mask must be a boolean")
+
+    # check if combinations of booleans make sense
+    if S2_apply_snow_mask and not S2_mask_snow:
+        raise ValueError(
+            "S2_apply_snow_mask is set to True, but S2_mask_snow is set to False"
+        )
+
+    if S2_apply_cloud_mask and not S2_cloud_classification:
+        raise ValueError(
+            "S2_apply_cloud_mask is set to True, but S2_cloud_classification is set to False"
+        )
+
+
 def process(
     target_crs: CRS,
     target_resolution: float,
@@ -212,11 +330,25 @@ def process(
        Path of where to create the zarr storage.
     """
 
-    if time_composite_freq is not None and (not S2_apply_snow_mask
-                                            and not S2_apply_cloud_mask):
-        warnings.warn(
-            "Temporal aggregation is specified, but neither cloud or snow mask is set to be applied. This may yield useless aggregations for Sentinel-2 data."
-        )
+    validate_user_input(
+        target_crs=target_crs,
+        target_resolution=target_resolution,
+        bound_left=bound_left,
+        bound_bottom=bound_bottom,
+        bound_right=bound_right,
+        bound_top=bound_top,
+        datetime=datetime,
+        processing_spatial_chunk_size=processing_spatial_chunk_size,
+        S1_assets=S1_assets,
+        S2_mask_snow=S2_mask_snow,
+        S2_cloud_classification=S2_cloud_classification,
+        S2_cloud_classification_device=S2_cloud_classification_device,
+        S2_return_cloud_probabilities=S2_return_cloud_probabilities,
+        num_workers=num_workers,
+        time_composite_freq=time_composite_freq,
+        S2_apply_snow_mask=S2_apply_snow_mask,
+        S2_apply_cloud_mask=S2_apply_cloud_mask,
+    )
 
     # TODO support to only download subset of bands (mutually exclusive with
     # cloud classification and partially snow_mask) -> or no sentinel 2 at all
@@ -234,11 +366,8 @@ def process(
     if isinstance(S1_assets, list) and len(S1_assets) == 0:
         S1_assets = None
 
-    # sanity check for S1 bands
     if S1_assets is not None:
-        assert len(set(S1_assets) -
-                   set(["vv", "vh"])) == 0, "Unsupported S1 bands."
-        total_bands_to_save += S1_assets.copy()
+        total_bands_to_save += S1_assets
 
     # sign into planetary computer
     catalog = open_catalog()
