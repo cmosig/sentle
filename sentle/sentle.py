@@ -55,7 +55,7 @@ def catalog_search_ptile(collection: str, ts, time_composite_freq, bound_left,
 
 
 def process_ptile(
-    zarr_path,
+    zarr_store,
     ts,
     bound_left,
     bound_bottom,
@@ -149,13 +149,14 @@ def process_ptile(
     # create the xarray object in the process function
     if ptile_array is not None:
         # save to zarr
-        dst = zarr.open(zarr_path)["sentle"]
+        dst = zarr.open(zarr_store)["sentle"]
         dst[zarr_save_slice["time"], zarr_save_slice["band"],
             zarr_save_slice["y"], zarr_save_slice["x"]] = ptile_array
 
 
 def validate_user_input(target_crs: CRS,
                         target_resolution: float,
+                        zarr_store=zarr_store,
                         bound_left: float,
                         bound_bottom: float,
                         bound_right: float,
@@ -171,6 +172,10 @@ def validate_user_input(target_crs: CRS,
                         time_composite_freq: str = None,
                         S2_apply_snow_mask: bool = False,
                         S2_apply_cloud_mask: bool = False):
+
+    # validate type zarr store
+    if not isinstance(zarr_store, (str, zarr.storage.Store)):
+        raise ValueError("zarr_store must be a string or zarr.storage.Store")
 
     # check if the target CRS is valid
     if not isinstance(target_crs, CRS):
@@ -280,7 +285,7 @@ def process(
     bound_right: float,
     bound_top: float,
     datetime: DatetimeLike,
-    zarr_path: str,
+    zarr_store: str | zarr.storage.Store,
     processing_spatial_chunk_size: int = 4000,
     S1_assets: list[str] = ["vh", "vv"],
     S2_mask_snow: bool = False,
@@ -326,7 +331,7 @@ def process(
         Whether to replace snow with NaN.  
     S2_apply_cloud_mask: bool, default=False
         Whether to replace anything that is not clear sky with NaN.  
-    zarr_path: str,
+    zarr_store: str,
        Path of where to create the zarr storage.
     """
 
@@ -345,6 +350,7 @@ def process(
         S2_cloud_classification_device=S2_cloud_classification_device,
         S2_return_cloud_probabilities=S2_return_cloud_probabilities,
         num_workers=num_workers,
+        zarr_store=zarr_store,
         time_composite_freq=time_composite_freq,
         S2_apply_snow_mask=S2_apply_snow_mask,
         S2_apply_cloud_mask=S2_apply_cloud_mask,
@@ -418,8 +424,12 @@ def process(
                                                  bound_right, bound_top,
                                                  target_resolution)
 
-    # setup zarr storage
-    store = zarr.storage.DirectoryStore(zarr_path, dimension_separator=".")
+    if isinstance(zarr_store, str):
+        # setup zarr storage
+        store = zarr.storage.DirectoryStore(zarr_store,
+                                            dimension_separator=".")
+    else:
+        store = zarr_store
 
     # create array for where to store the processed sentinel data
     # chunk size is the number of S2 bands, because we parallelize S1/S2
@@ -487,7 +497,7 @@ def process(
         "S2_cloud_classification": S2_cloud_classification,
         "S2_mask_snow": S2_mask_snow,
         "S2_return_cloud_probabilities": S2_return_cloud_probabilities,
-        "zarr_path": zarr_path,
+        "zarr_store": zarr_store,
         "S2_bands_to_save": S2_bands_to_save,
         "S1_assets": S1_assets,
     }
