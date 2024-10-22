@@ -1,3 +1,4 @@
+import multiprocessing as mp
 import warnings
 from math import ceil
 
@@ -13,7 +14,8 @@ from rasterio import transform, warp, windows
 from rasterio.crs import CRS
 from tqdm.auto import tqdm
 
-from .cloud_mask import S2_cloud_mask_band, S2_cloud_prob_bands
+from .cloud_mask import (S2_cloud_mask_band, S2_cloud_prob_bands,
+                         init_cloud_prediction_service)
 from .const import *
 from .reproject_util import *
 from .sentinel1 import process_ptile_S1
@@ -75,6 +77,7 @@ def process_ptile(
     S2_return_cloud_probabilities: bool,
     zarr_save_slice: dict,
     S2_subtiles,
+    cloud_queue: mp.Queue,
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
@@ -140,6 +143,7 @@ def process_ptile(
             S2_apply_cloud_mask=S2_apply_cloud_mask,
             S2_bands_to_save=S2_bands_to_save,
             S2_subtiles=S2_subtiles,
+            cloud_queue=cloud_queue,
         )
 
     else:
@@ -533,6 +537,10 @@ def process(
         S2_bands_to_save=S2_bands_to_save,
         total_bands_to_save=total_bands_to_save)
 
+    if S2_cloud_classification:
+        cloud_queue = init_cloud_prediction_service(
+            device=S2_cloud_classification_device)
+
     # figure out jobs for multiprocessing -> one per chunk
     config = {
         "target_crs": target_crs,
@@ -547,6 +555,7 @@ def process(
         "zarr_store": zarr_store,
         "S2_bands_to_save": S2_bands_to_save,
         "S1_assets": S1_assets,
+        "cloud_queue": cloud_queue
     }
 
     processing_spatial_chunk_size_in_CRS_unit = processing_spatial_chunk_size * target_resolution
@@ -613,3 +622,8 @@ def process(
                         batch_size=1,
                         backend="multiprocessing")(delayed(process_ptile)(**p)
                                                    for p in job_generator())
+
+    # close cloud queue
+    if S2_cloud_classification:
+        cloud_queue.put(None)
+        cloud_queue.close()

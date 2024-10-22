@@ -1,4 +1,5 @@
 import itertools
+import multiprocessing as mp
 
 import numpy as np
 import pandas as pd
@@ -10,7 +11,7 @@ from rasterio.enums import Resampling
 from shapely.geometry import Polygon, box
 
 from .cloud_mask import (S2_cloud_mask_band, S2_cloud_prob_bands,
-                         compute_cloud_mask, load_cloudsen_model)
+                         worker_get_cloud_mask)
 from .const import *
 from .reproject_util import *
 from .snow_mask import S2_snow_mask_band, compute_potential_snow_layer
@@ -86,7 +87,8 @@ def process_S2_subtile(intersecting_windows, stac_item, timestamp,
                        target_crs: CRS, target_resolution: float,
                        ptile_transform, ptile_width: int, ptile_height: int,
                        S2_mask_snow: bool, S2_cloud_classification: bool,
-                       S2_cloud_classification_device: str, cloud_mask_model):
+                       S2_cloud_classification_device: str,
+                       cloud_queue: mp.Queue):
     """Processes a single sentinel 2 subtile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution, applying
     cloud and snow masks and computing NBAR if requested. The function returns
@@ -164,10 +166,8 @@ def process_S2_subtile(intersecting_windows, stac_item, timestamp,
     ) // 10 == S2_subtile_size, "mismatch between subtile size and bounds on y-axis"
 
     if S2_cloud_classification:
-        result_probs = compute_cloud_mask(
-            subtile_array,
-            cloud_mask_model,
-            S2_cloud_classification_device=S2_cloud_classification_device)
+        # this waits for the cloud mask to be computed in the service
+        result_probs = worker_get_cloud_mask(subtile_array, request_queue)
         band_names += S2_cloud_prob_bands
         subtile_array = np.concatenate([subtile_array, result_probs])
 
@@ -250,16 +250,13 @@ def process_ptile_S2_dispatcher(
     S2_cloud_classification: bool,
     S2_return_cloud_probabilities: bool,
     S2_subtiles,
+    cloud_queue: mp.Queue,
 ):
 
     items = pd.DataFrame()
     items["item"] = item_list
     items["tile"] = items["item"].apply(lambda x: x.properties["s2:mgrs_tile"])
     items["ts"] = items["item"].apply(lambda x: x.datetime)
-
-    # load cloudsen model
-    cloudsen_model = load_cloudsen_model(
-        S2_cloud_classification_device) if S2_cloud_classification else None
 
     # intiate one array representing the entire subtile for that timestamp
     ptile_array = np.full(shape=(len(S2_bands_to_save), ptile_height,
@@ -293,8 +290,9 @@ def process_ptile_S2_dispatcher(
             ptile_transform=ptile_transform,
             ptile_width=ptile_width,
             ptile_height=ptile_height,
-            cloudsen_model=cloudsen_model,
-            items=items[items["ts"] == ts])
+            items=items[items["ts"] == ts],
+            cloud_queue=cloud_queue,
+        )
 
         # this happens when the href is not available in subtile -> planetary
         # computer issue
@@ -369,7 +367,7 @@ def process_ptile_S2(
     ptile_transform,
     ptile_height,
     ptile_width,
-    cloudsen_model,
+    cloud_queue,
     items,
     S2_mask_snow: bool,
     S2_cloud_classification: bool,
@@ -418,7 +416,7 @@ def process_ptile_S2(
             S2_mask_snow=S2_mask_snow,
             S2_cloud_classification=S2_cloud_classification,
             S2_cloud_classification_device=S2_cloud_classification_device,
-            cloud_mask_model=cloudsen_model)
+            cloud_queue=cloudsen_queue)
 
         # this happens when the href is not available
         # -> planetary computer issue
