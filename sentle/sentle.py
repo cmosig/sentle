@@ -230,6 +230,10 @@ def process(
         S2_bands_to_save += S2_cloud_prob_bands
     total_bands_to_save = S2_bands_to_save.copy()
 
+    # if S1_assets are supplied as empty list, convert to None
+    if isinstance(S1_assets, list) and len(S1_assets) == 0:
+        S1_assets = None
+
     # sanity check for S1 bands
     if S1_assets is not None:
         assert len(set(S1_assets) -
