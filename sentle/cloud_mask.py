@@ -25,13 +25,14 @@ def load_cloudsen_model(device: str):
 
 def init_cloud_prediction_service(device: str = "cpu"):
     # create request queue that is passed both to workers and the cloud prediction loop
-    request_queue = mp.Manager().Queue()
+    queue_manager = mp.Manager()
+    request_queue = queue_manager.Queue()
 
     process = mp.Process(target=cloud_prediction_loop,
                          args=(request_queue, device))
     process.start()
 
-    return request_queue
+    return queue_manager, request_queue
 
 
 def cloud_prediction_loop(request_queue: mp.Queue, device: str):

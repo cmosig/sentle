@@ -23,6 +23,7 @@ from .sentinel2 import obtain_subtiles, process_ptile_S2_dispatcher
 from .stac import *
 from .utils import tqdm_joblib
 
+GLOBAL_QUEUE_MANAGER = None
 
 def catalog_search_ptile(collection: str, ts, time_composite_freq, bound_left,
                          bound_bottom, bound_right, bound_top,
@@ -544,7 +545,9 @@ def process(
         total_bands_to_save=total_bands_to_save)
 
     if S2_cloud_classification:
-        cloud_request_queue = init_cloud_prediction_service(
+        global GLOBAL_QUEUE_MANAGER
+
+        GLOBAL_QUEUE_MANAGER, cloud_request_queue = init_cloud_prediction_service(
             device=S2_cloud_classification_device)
 
     # figure out jobs for multiprocessing -> one per chunk
@@ -569,10 +572,8 @@ def process(
         pkg_resources.resource_filename(
             __name__, "data/sentinel2_grid_stripped_with_epsg.gpkg"))
 
-    response_queue_manager = mp.Manager()
-
     def job_generator():
-        nonlocal response_queue_manager
+        global GLOBAL_QUEUE_MANAGER
 
         for xi, x_min in enumerate(
                 range(bound_left, bound_right,
@@ -618,7 +619,7 @@ def process(
                             s2grid=s2grid,
                         ) if collection == "sentinel-2-l2a" else None
                         ret_config[
-                            "cloud_response_queue"] = response_queue_manager.Queue(
+                            "cloud_response_queue"] = GLOBAL_QUEUE_MANAGER.Queue(
                                 maxsize=1) if S2_cloud_classification else None
                         yield ret_config
 
@@ -642,4 +643,4 @@ def process(
         cloud_request_queue.close()
 
         # close response queues manager
-        response_queue_manager.shutdown()
+        GLOBAL_QUEUE_MANAGER.shutdown()
