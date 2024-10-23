@@ -77,7 +77,8 @@ def process_ptile(
     S2_return_cloud_probabilities: bool,
     zarr_save_slice: dict,
     S2_subtiles,
-    cloud_queue: mp.Queue,
+    cloud_request_queue: mp.Queue,
+    cloud_response_queue: mp.Queue,
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
@@ -143,7 +144,8 @@ def process_ptile(
             S2_apply_cloud_mask=S2_apply_cloud_mask,
             S2_bands_to_save=S2_bands_to_save,
             S2_subtiles=S2_subtiles,
-            cloud_queue=cloud_queue,
+            cloud_request_queue=cloud_request_queue,
+            cloud_response_queue=cloud_response_queue,
         )
 
     else:
@@ -538,7 +540,7 @@ def process(
         total_bands_to_save=total_bands_to_save)
 
     if S2_cloud_classification:
-        cloud_queue = init_cloud_prediction_service(
+        cloud_request_queue = init_cloud_prediction_service(
             device=S2_cloud_classification_device)
 
     # figure out jobs for multiprocessing -> one per chunk
@@ -555,7 +557,7 @@ def process(
         "zarr_store": zarr_store,
         "S2_bands_to_save": S2_bands_to_save,
         "S1_assets": S1_assets,
-        "cloud_queue": cloud_queue
+        "cloud_request_queue": cloud_request_queue
     }
 
     processing_spatial_chunk_size_in_CRS_unit = processing_spatial_chunk_size * target_resolution
@@ -564,6 +566,9 @@ def process(
             __name__, "data/sentinel2_grid_stripped_with_epsg.gpkg"))
 
     def job_generator():
+        if S2_cloud_classification:
+            response_queue_manager = mp.Manager()
+
         for xi, x_min in enumerate(
                 range(bound_left, bound_right,
                       processing_spatial_chunk_size_in_CRS_unit)):
@@ -607,6 +612,9 @@ def process(
                             top=ret_config["bound_top"],
                             s2grid=s2grid,
                         ) if collection == "sentinel-2-l2a" else None
+                        ret_config[
+                            "cloud_response_queue"] = response_queue_manager.Queue(
+                                maxsize=1)
                         yield ret_config
 
     num_chunks = df["collection"].explode().count() * (ceil(
@@ -625,5 +633,5 @@ def process(
 
     # close cloud queue
     if S2_cloud_classification:
-        cloud_queue.put(None)
-        cloud_queue.close()
+        cloud_request_queue.put(None)
+        cloud_request_queue.close()

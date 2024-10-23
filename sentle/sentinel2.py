@@ -83,12 +83,21 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
     return s2grid[['name', 'intersecting_windows']]
 
 
-def process_S2_subtile(intersecting_windows, stac_item, timestamp,
-                       target_crs: CRS, target_resolution: float,
-                       ptile_transform, ptile_width: int, ptile_height: int,
-                       S2_mask_snow: bool, S2_cloud_classification: bool,
-                       S2_cloud_classification_device: str,
-                       cloud_queue: mp.Queue):
+def process_S2_subtile(
+    intersecting_windows,
+    stac_item,
+    timestamp,
+    target_crs: CRS,
+    target_resolution: float,
+    ptile_transform,
+    ptile_width: int,
+    ptile_height: int,
+    S2_mask_snow: bool,
+    S2_cloud_classification: bool,
+    S2_cloud_classification_device: str,
+    cloud_request_queue: mp.Queue,
+    cloud_response_queue: mp.Queue,
+):
     """Processes a single sentinel 2 subtile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution, applying
     cloud and snow masks and computing NBAR if requested. The function returns
@@ -167,7 +176,10 @@ def process_S2_subtile(intersecting_windows, stac_item, timestamp,
 
     if S2_cloud_classification:
         # this waits for the cloud mask to be computed in the service
-        result_probs = worker_get_cloud_mask(subtile_array, request_queue)
+        result_probs = worker_get_cloud_mask(
+            array=subtile_array,
+            request_queue=cloud_request_queue,
+            response_queue=cloud_request_queue)
         band_names += S2_cloud_prob_bands
         subtile_array = np.concatenate([subtile_array, result_probs])
 
@@ -250,7 +262,8 @@ def process_ptile_S2_dispatcher(
     S2_cloud_classification: bool,
     S2_return_cloud_probabilities: bool,
     S2_subtiles,
-    cloud_queue: mp.Queue,
+    cloud_request_queue: mp.Queue,
+    cloud_response_queue: mp.Queue,
 ):
 
     items = pd.DataFrame()
@@ -291,7 +304,8 @@ def process_ptile_S2_dispatcher(
             ptile_width=ptile_width,
             ptile_height=ptile_height,
             items=items[items["ts"] == ts],
-            cloud_queue=cloud_queue,
+            cloud_request_queue=cloud_request_queue,
+            cloud_response_queue=cloud_response_queue,
         )
 
         # this happens when the href is not available in subtile -> planetary
@@ -355,6 +369,9 @@ def process_ptile_S2_dispatcher(
                      for band in S2_RAW_BANDS]] == 0,
                        axis=0)] = np.nan
 
+    # close response queue as it is task specific
+    cloud_request_queue.close()
+
     return ptile_array
 
 
@@ -367,7 +384,8 @@ def process_ptile_S2(
     ptile_transform,
     ptile_height,
     ptile_width,
-    cloud_queue,
+    cloud_request_queue,
+    cloud_response_queue,
     items,
     S2_mask_snow: bool,
     S2_cloud_classification: bool,
@@ -416,7 +434,8 @@ def process_ptile_S2(
             S2_mask_snow=S2_mask_snow,
             S2_cloud_classification=S2_cloud_classification,
             S2_cloud_classification_device=S2_cloud_classification_device,
-            cloud_queue=cloudsen_queue)
+            cloud_response_queue=cloud_response_queue,
+            cloud_request_queue=cloud_request_queue)
 
         # this happens when the href is not available
         # -> planetary computer issue

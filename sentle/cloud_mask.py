@@ -25,7 +25,7 @@ def load_cloudsen_model(device: str):
 
 def init_cloud_prediction_service(device: str = "cpu"):
     # create request queue that is passed both to workers and the cloud prediction loop
-    request_queue = mp.Queue()
+    request_queue = mp.Manager().Queue()
 
     process = mp.Process(target=cloud_prediction_loop,
                          args=(request_queue, device))
@@ -82,7 +82,7 @@ def compute_cloud_mask(array: np.array, model: torch.jit.ScriptModule,
     return cloud_probabilities
 
 
-def worker_get_cloud_mask(array: np.array, request_queue: mp.Queue):
-    response_queue = mp.Queue()
+def worker_get_cloud_mask(array: np.array, request_queue: mp.Queue,
+                          response_queue: mp.Queue):
     request_queue.put({"array": array, "response_queue": response_queue})
     return response_queue.get()
