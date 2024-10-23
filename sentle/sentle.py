@@ -151,6 +151,10 @@ def process_ptile(
     else:
         assert False
 
+    if cloud_response_queue is not None:
+        # close response queue as it is task specific
+        cloud_response_queue.close()
+
     # if we want the data instead of saving it we can do that here and then
     # create the xarray object in the process function
     if ptile_array is not None:
@@ -566,9 +570,6 @@ def process(
             __name__, "data/sentinel2_grid_stripped_with_epsg.gpkg"))
 
     def job_generator():
-        if S2_cloud_classification:
-            response_queue_manager = mp.Manager()
-
         for xi, x_min in enumerate(
                 range(bound_left, bound_right,
                       processing_spatial_chunk_size_in_CRS_unit)):
@@ -612,9 +613,8 @@ def process(
                             top=ret_config["bound_top"],
                             s2grid=s2grid,
                         ) if collection == "sentinel-2-l2a" else None
-                        ret_config[
-                            "cloud_response_queue"] = response_queue_manager.Queue(
-                                maxsize=1)
+                        ret_config["cloud_response_queue"] = mp.Manager(
+                        ).Queue(maxsize=1) if S2_cloud_classification else None
                         yield ret_config
 
     num_chunks = df["collection"].explode().count() * (ceil(

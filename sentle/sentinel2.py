@@ -179,7 +179,7 @@ def process_S2_subtile(
         result_probs = worker_get_cloud_mask(
             array=subtile_array,
             request_queue=cloud_request_queue,
-            response_queue=cloud_request_queue)
+            response_queue=cloud_response_queue)
         band_names += S2_cloud_prob_bands
         subtile_array = np.concatenate([subtile_array, result_probs])
 
@@ -368,9 +368,6 @@ def process_ptile_S2_dispatcher(
                     [ptile_array_bands.index(band)
                      for band in S2_RAW_BANDS]] == 0,
                        axis=0)] = np.nan
-
-    # close response queue as it is task specific
-    cloud_request_queue.close()
 
     return ptile_array
 
