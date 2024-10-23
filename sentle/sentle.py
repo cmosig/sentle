@@ -569,7 +569,11 @@ def process(
         pkg_resources.resource_filename(
             __name__, "data/sentinel2_grid_stripped_with_epsg.gpkg"))
 
+    response_queue_manager = mp.Manager()
+
     def job_generator():
+        nonlocal response_queue_manager
+
         for xi, x_min in enumerate(
                 range(bound_left, bound_right,
                       processing_spatial_chunk_size_in_CRS_unit)):
@@ -613,8 +617,9 @@ def process(
                             top=ret_config["bound_top"],
                             s2grid=s2grid,
                         ) if collection == "sentinel-2-l2a" else None
-                        ret_config["cloud_response_queue"] = mp.Manager(
-                        ).Queue(maxsize=1) if S2_cloud_classification else None
+                        ret_config[
+                            "cloud_response_queue"] = response_queue_manager.Queue(
+                                maxsize=1) if S2_cloud_classification else None
                         yield ret_config
 
     num_chunks = df["collection"].explode().count() * (ceil(
@@ -635,3 +640,6 @@ def process(
     if S2_cloud_classification:
         cloud_request_queue.put(None)
         cloud_request_queue.close()
+
+        # close response queues manager
+        response_queue_manager.shutdown()
