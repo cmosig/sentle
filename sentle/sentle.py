@@ -24,6 +24,8 @@ from .stac import *
 from .utils import tqdm_joblib
 
 GLOBAL_QUEUE_MANAGER = None
+GLOBAL_QUEUES = []
+
 
 def catalog_search_ptile(collection: str, ts, time_composite_freq, bound_left,
                          bound_bottom, bound_right, bound_top,
@@ -151,10 +153,6 @@ def process_ptile(
 
     else:
         assert False
-
-    if cloud_response_queue is not None:
-        # close response queue as it is task specific
-        cloud_response_queue.close()
 
     # if we want the data instead of saving it we can do that here and then
     # create the xarray object in the process function
@@ -574,6 +572,7 @@ def process(
 
     def job_generator():
         global GLOBAL_QUEUE_MANAGER
+        global GLOBAL_QUEUES
 
         for xi, x_min in enumerate(
                 range(bound_left, bound_right,
@@ -618,9 +617,13 @@ def process(
                             top=ret_config["bound_top"],
                             s2grid=s2grid,
                         ) if collection == "sentinel-2-l2a" else None
-                        ret_config[
-                            "cloud_response_queue"] = GLOBAL_QUEUE_MANAGER.Queue(
-                                maxsize=1) if S2_cloud_classification else None
+                        if S2_cloud_classification and collection == "sentinel-2-l2a":
+                            GLOBAL_QUEUES.append(
+                                GLOBAL_QUEUE_MANAGER.Queue(maxsize=1))
+                            ret_config["cloud_response_queue"] = GLOBAL_QUEUES[
+                                -1]
+                        else:
+                            ret_config["cloud_response_queue"] = None
                         yield ret_config
 
     num_chunks = df["collection"].explode().count() * (ceil(
