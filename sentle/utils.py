@@ -46,7 +46,6 @@ class ImmediateResultBackend(MultiprocessingBackend):
 
     def callback(self, result):
         global GLOBAL_QUEUES
-        print(list(GLOBAL_QUEUES.keys()))
         GLOBAL_QUEUES.pop(result[0])
 
     def apply_async(self, func, callback=None):
