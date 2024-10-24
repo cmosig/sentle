@@ -641,9 +641,9 @@ def process(
 
         with parallel_backend("cleanupqueue"):
             # backend can be loky or threading (or maybe something else)
-            return Parallel(n_jobs=num_workers,
-                            batch_size=1)(delayed(process_ptile)(**p)
-                                          for p in job_generator())
+            Parallel(n_jobs=num_workers,
+                     batch_size=1)(delayed(process_ptile)(**p)
+                                   for p in job_generator())
 
     # close cloud queue
     if S2_cloud_classification:
