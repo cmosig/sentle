@@ -1,3 +1,4 @@
+import multiprocessing as mp
 import warnings
 from math import ceil
 
@@ -6,20 +7,21 @@ import numpy as np
 import pandas as pd
 import pkg_resources
 import zarr
-from joblib import Parallel, delayed
+from joblib import Parallel, delayed, parallel_backend
 from numcodecs import Blosc
 from pystac_client.item_search import DatetimeLike
 from rasterio import transform, warp, windows
 from rasterio.crs import CRS
 from tqdm.auto import tqdm
 
-from .cloud_mask import S2_cloud_mask_band, S2_cloud_prob_bands
+from .cloud_mask import (S2_cloud_mask_band, S2_cloud_prob_bands,
+                         init_cloud_prediction_service)
 from .const import *
 from .reproject_util import *
 from .sentinel1 import process_ptile_S1
 from .sentinel2 import obtain_subtiles, process_ptile_S2_dispatcher
 from .stac import *
-from .utils import tqdm_joblib
+from .utils import *
 
 
 def catalog_search_ptile(collection: str, ts, time_composite_freq, bound_left,
@@ -75,6 +77,9 @@ def process_ptile(
     S2_return_cloud_probabilities: bool,
     zarr_save_slice: dict,
     S2_subtiles,
+    cloud_request_queue: mp.Queue,
+    cloud_response_queue: mp.Queue,
+    job_id: int,
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
@@ -140,6 +145,8 @@ def process_ptile(
             S2_apply_cloud_mask=S2_apply_cloud_mask,
             S2_bands_to_save=S2_bands_to_save,
             S2_subtiles=S2_subtiles,
+            cloud_request_queue=cloud_request_queue,
+            cloud_response_queue=cloud_response_queue,
         )
 
     else:
@@ -152,6 +159,8 @@ def process_ptile(
         dst = zarr.open(zarr_store)["sentle"]
         dst[zarr_save_slice["time"], zarr_save_slice["band"],
             zarr_save_slice["y"], zarr_save_slice["x"]] = ptile_array
+
+    return job_id
 
 
 def validate_user_input(target_crs: CRS,
@@ -533,6 +542,12 @@ def process(
         S2_bands_to_save=S2_bands_to_save,
         total_bands_to_save=total_bands_to_save)
 
+    if S2_cloud_classification:
+        global GLOBAL_QUEUE_MANAGER
+
+        GLOBAL_QUEUE_MANAGER, cloud_request_queue = init_cloud_prediction_service(
+            device=S2_cloud_classification_device)
+
     # figure out jobs for multiprocessing -> one per chunk
     config = {
         "target_crs": target_crs,
@@ -547,6 +562,7 @@ def process(
         "zarr_store": zarr_store,
         "S2_bands_to_save": S2_bands_to_save,
         "S1_assets": S1_assets,
+        "cloud_request_queue": cloud_request_queue
     }
 
     processing_spatial_chunk_size_in_CRS_unit = processing_spatial_chunk_size * target_resolution
@@ -555,6 +571,10 @@ def process(
             __name__, "data/sentinel2_grid_stripped_with_epsg.gpkg"))
 
     def job_generator():
+        global GLOBAL_QUEUE_MANAGER
+        global GLOBAL_QUEUES
+        job_id = 0
+
         for xi, x_min in enumerate(
                 range(bound_left, bound_right,
                       processing_spatial_chunk_size_in_CRS_unit)):
@@ -598,6 +618,16 @@ def process(
                             top=ret_config["bound_top"],
                             s2grid=s2grid,
                         ) if collection == "sentinel-2-l2a" else None
+                        if S2_cloud_classification and collection == "sentinel-2-l2a":
+                            GLOBAL_QUEUES[job_id] = GLOBAL_QUEUE_MANAGER.Queue(
+                                maxsize=1)
+                            ret_config["cloud_response_queue"] = GLOBAL_QUEUES[
+                                job_id]
+                            ret_config["job_id"] = job_id
+                            job_id += 1
+                        else:
+                            ret_config["cloud_response_queue"] = None
+                            ret_config["job_id"] = None
                         yield ret_config
 
     num_chunks = df["collection"].explode().count() * (ceil(
@@ -608,8 +638,17 @@ def process(
                  unit="ptiles",
                  dynamic_ncols=True,
                  total=num_chunks)) as progress_bar:
-        # backend can be loky or threading (or maybe something else)
-        return Parallel(n_jobs=num_workers,
-                        batch_size=1,
-                        backend="multiprocessing")(delayed(process_ptile)(**p)
-                                                   for p in job_generator())
+
+        with parallel_backend("cleanupqueue"):
+            # backend can be loky or threading (or maybe something else)
+            Parallel(n_jobs=num_workers,
+                     batch_size=1)(delayed(process_ptile)(**p)
+                                   for p in job_generator())
+
+    # close cloud queue
+    if S2_cloud_classification:
+        cloud_request_queue.put(None)
+        cloud_request_queue.close()
+
+        # close response queues manager
+        GLOBAL_QUEUE_MANAGER.shutdown()
