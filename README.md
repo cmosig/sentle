@@ -112,7 +112,7 @@ lexcube.Cube3DWidget(da.sel(band="B02"), vmin=0, vmax=4000)
 ## Questions you may have
 
 #### How do I scale this program?
-Increase the number of workers using the `num_workers` parameter when setting up the `Sentle` class. With default spatial chunk size of 4000, specified by `processing_spatial_chunk_size`, you should plan with 2GiB per worker. At the moment (will change), each worker also initiates its own model on the GPU, meaning more workers will also mean that more GPU VRAM will be used.
+Increase the number of workers using the `num_workers` parameter when setting up the `Sentle` class. With default spatial chunk size of 4000, specified by `processing_spatial_chunk_size`, you should plan with 2GiB per worker.
 
 ## Contributing
 
