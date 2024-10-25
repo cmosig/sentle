@@ -70,7 +70,7 @@ This code downloads data for a 40km by 40km area with one year of both Sentinel-
 Everything is parallelized across 10 workers and each worker immediately saves its results to the specified path to a `zarr_store`. This ensures you can download larger-than-memory cubes.
 
 Explanation:
-- `zarr_path`: Save path. 
+- `zarr_store`: Save path. 
 - `target_crs`: Specifies the target CRS that all data will be reprojected to.
 - `target_resolution`:  Determines the spatial resolution that all data is reprojected to in the `target_crs`. 
 - `bound_*`: Spatial bounds in `target_crs` of the area you want to download. Undefined behavior if difference between opposite bounds is not divisible by `target_resolution`.
