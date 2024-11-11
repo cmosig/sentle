@@ -647,8 +647,5 @@ def process(
 
     # close cloud queue
     if S2_cloud_classification:
-        cloud_request_queue.put(None)
-        cloud_request_queue.close()
-
         # close response queues manager
         GLOBAL_QUEUE_MANAGER.shutdown()
