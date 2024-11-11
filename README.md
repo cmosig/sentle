@@ -9,6 +9,8 @@
 <a href="https://peps.python.org/pep-0008/" target="_blank">
     <img src="https://img.shields.io/badge/code_style-pep8-blue" alt="Black">
 </a>
+<a href="https://doi.org/10.5281/zenodo.13997085"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.13997085.svg" alt="DOI"></a>
+
 </p>
 <p align="center">
     <em>Download Sentinel-1 & Sentinel-2 data cubes of huge-scale (larger-than-memory) on any machine with integrated cloud
@@ -122,6 +124,21 @@ needs to be fixed.
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details.
+
+## How to cite
+
+```
+@software{sentle_python,
+  author       = {Clemens Mosig},
+  title        = {cmosig/sentle: 2024.10.3},
+  month        = oct,
+  year         = 2024,
+  publisher    = {Zenodo},
+  version      = {2024.10.3},
+  doi          = {10.5281/zenodo.13997085},
+  url          = {https://doi.org/10.5281/zenodo.13997085}
+}
+```
 
 ## Acknowledgments
 
