@@ -647,5 +647,8 @@ def process(
 
     # close cloud queue
     if S2_cloud_classification:
+        # end cloud prediction service by sending None to queue
+        cloud_request_queue.put(None)
+
         # close response queues manager
         GLOBAL_QUEUE_MANAGER.shutdown()
