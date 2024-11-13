@@ -125,21 +125,6 @@ needs to be fixed.
 
 This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details.
 
-## How to cite
-
-```
-@software{sentle_python,
-  author       = {Clemens Mosig},
-  title        = {cmosig/sentle: 2024.10.3},
-  month        = oct,
-  year         = 2024,
-  publisher    = {Zenodo},
-  version      = {2024.10.3},
-  doi          = {10.5281/zenodo.13997085},
-  url          = {https://doi.org/10.5281/zenodo.13997085}
-}
-```
-
 ## Acknowledgments
 
 - Thank you to [Cesar Aybar](https://csaybar.github.io/) for his cloud detection model. All cloud detection in this package is performed using his package. The paper: [link](https://www.nature.com/articles/s41597-022-01878-2)
