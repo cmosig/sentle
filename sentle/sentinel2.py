@@ -79,6 +79,10 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
     # process because it intersects the specified bounds to download
     s2grid = s2grid.explode("intersecting_windows")
 
+    # remove sentinel tiles that do not intersect with the bounds
+    # this can happen in edge cases
+    s2grid = s2grid.dropna(subset=["intersecting_windows"])
+
     # only keep columns that we also need later
     return s2grid[['name', 'intersecting_windows']]
 
