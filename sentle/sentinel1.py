@@ -121,8 +121,8 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
 
             except rasterio.errors.RasterioIOError as e:
                 print("Failed to read from stac repository.", type(e))
-                print("This is a planetary computer issue, not a sentle issue")
-                print("Asset", band, href)
+                print("This is a planetary computer issue, not a sentle issue.")
+                print("Asset", item.assets[s1_asset])
 
     if perform_aggregation:
         with warnings.catch_warnings():
