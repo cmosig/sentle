@@ -114,7 +114,7 @@ lexcube.Cube3DWidget(da.sel(band="B02"), vmin=0, vmax=4000)
 ## Questions you may have
 
 #### How do I scale this program?
-Increase the number of workers using the `num_workers` parameter when setting up the `Sentle` class. With default spatial chunk size of 4000, specified by `processing_spatial_chunk_size`, you should plan with 2GiB per worker.
+Increase the number of workers using the `num_workers` parameter when calling `sentle.process`. With default spatial chunk size of 4000, specified by `processing_spatial_chunk_size`, you should plan with 2GiB per worker.
 
 ## Contributing
 
