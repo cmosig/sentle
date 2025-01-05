@@ -3,6 +3,7 @@ import rasterio
 from rasterio import transform, warp, windows
 from rasterio.crs import CRS
 from rasterio.enums import Resampling
+import warnings
 
 from .const import *
 from .reproject_util import *
@@ -47,8 +48,14 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                         target_crs, dr.crs, bound_left, bound_bottom,
                         bound_right, bound_top)
 
-                    # figure out which area of the image is interesting for us
-                    read_win = dr.window(*ptile_bounds_local_crs)
+                    try:
+                        # figure out which area of the image is interesting for us
+                        read_win = dr.window(*ptile_bounds_local_crs)
+                    except rasterio.errors.WindowError:
+                        warnings.warn(
+                            "Asset has transform that rasterio cannot handle. Skipping."
+                        )
+                        continue
 
                     # read windowed
                     data = dr.read(indexes=1,
@@ -121,7 +128,8 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
 
             except rasterio.errors.RasterioIOError as e:
                 print("Failed to read from stac repository.", type(e))
-                print("This is a planetary computer issue, not a sentle issue.")
+                print(
+                    "This is a planetary computer issue, not a sentle issue.")
                 print("Asset", item.assets[s1_asset])
 
     if perform_aggregation:
