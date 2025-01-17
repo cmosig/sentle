@@ -152,9 +152,12 @@ def process_ptile(
     else:
         assert False
 
-    # if we want the data instead of saving it we can do that here and then
+    # NOTE if we want the data instead of saving it we can do that here and then
     # create the xarray object in the process function
-    if ptile_array is not None:
+
+    # only save to zarr if we have data
+    if ptile_array is not None and not np.isnan(ptile_array).all():
+
         # save to zarr
         dst = zarr.open(zarr_store)["sentle"]
         dst[zarr_save_slice["time"], zarr_save_slice["band"],
