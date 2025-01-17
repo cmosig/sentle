@@ -1,6 +1,10 @@
 import multiprocessing as mp
+import shutil
+import tempfile
 import warnings
 from math import ceil
+from os import path
+from time import time
 
 import geopandas as gpd
 import numpy as np
@@ -13,6 +17,7 @@ from pystac_client.item_search import DatetimeLike
 from rasterio import transform, warp, windows
 from rasterio.crs import CRS
 from tqdm.auto import tqdm
+from zarr.sync import ProcessSynchronizer
 
 from .cloud_mask import (S2_cloud_mask_band, S2_cloud_prob_bands,
                          init_cloud_prediction_service)
@@ -80,6 +85,7 @@ def process_ptile(
     cloud_request_queue: mp.Queue,
     cloud_response_queue: mp.Queue,
     job_id: int,
+    sync_file_path: str,
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
@@ -159,7 +165,9 @@ def process_ptile(
     if ptile_array is not None and not np.isnan(ptile_array).all():
 
         # save to zarr
-        dst = zarr.open(zarr_store)["sentle"]
+        dst = zarr.open(
+            zarr_store,
+            synchronizer=ProcessSynchronizer(sync_file_path))["sentle"]
         dst[zarr_save_slice["time"], zarr_save_slice["band"],
             zarr_save_slice["y"], zarr_save_slice["x"]] = ptile_array
 
@@ -183,7 +191,8 @@ def validate_user_input(target_crs: CRS,
                         num_workers: int = 1,
                         time_composite_freq: str = None,
                         S2_apply_snow_mask: bool = False,
-                        S2_apply_cloud_mask: bool = False):
+                        S2_apply_cloud_mask: bool = False,
+                        zarr_store_chunk_size: dict):
 
     # validate type zarr store
     if not isinstance(zarr_store, (str, zarr.storage.Store)):
@@ -288,6 +297,13 @@ def validate_user_input(target_crs: CRS,
             "S2_apply_cloud_mask is set to True, but S2_cloud_classification is set to False"
         )
 
+    # make sure that zarr_store_chunk_size is a dictionary and has time, y, and x keys
+    if not isinstance(zarr_store_chunk_size, dict):
+        raise ValueError("zarr_store_chunk_size must be a dictionary")
+    if not all(key in zarr_store_chunk_size for key in ["time", "y", "x"]):
+        raise ValueError(
+            "zarr_store_chunk_size must contain the keys 'time', 'y', and 'x'")
+
 
 def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
                        df: pd.DataFrame,
@@ -299,6 +315,7 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
                        bound_bottom: float,
                        target_resolution: float,
                        processing_spatial_chunk_size: int,
+                       zarr_store_chunk_size: dict,
                        S2_bands_to_save: list[str],
                        total_bands_to_save: list[str],
                        overwrite: bool = False) -> None:
@@ -310,19 +327,28 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
     else:
         store = zarr_store
 
+    sync_file_path = None
+    if zarr_store_chunk_size["time"] == 1 and zarr_store_chunk_size[
+            "y"] == processing_spatial_chunk_size and zarr_store_chunk_size[
+                "x"] == processing_spatial_chunk_size:
+        numcodecs.blosc.use_threads = False
+
+        # get a uuid for sync file
+        sync_file_path = path.join(tempfile.gettempdir(),
+                                   f"sentle_{time()}.sync")
+
     # create array for where to store the processed sentinel data
     # chunk size is the number of S2 bands, because we parallelize S1/S2
-    data = zarr.create(shape=(df["ts"].count(), len(total_bands_to_save),
-                              height, width),
-                       chunks=(1, len(S2_bands_to_save),
-                               processing_spatial_chunk_size,
-                               processing_spatial_chunk_size),
-                       dtype=np.float32,
-                       fill_value=float("nan"),
-                       store=store,
-                       path="/sentle",
-                       write_empty_chunks=False,
-                       compressor=Blosc(cname="lz4"))
+    data = zarr.create(
+        shape=(df["ts"].count(), len(total_bands_to_save), height, width),
+        chunks=(zarr_store_chunk_size["time"], len(S2_bands_to_save),
+                zarr_store_chunk_size["y"], zarr_store_chunk_size["x"]),
+        dtype=np.float32,
+        fill_value=float("nan"),
+        store=store,
+        path="/sentle",
+        write_empty_chunks=False,
+        compressor=Blosc(cname="lz4"))
     data.attrs.update(ZARR_DATA_ATTRS)
 
     # ------
@@ -375,6 +401,8 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
     # close up store as we are done with init
     store.close()
 
+    return sync_file_path
+
 
 def process(
     target_crs: CRS,
@@ -396,6 +424,11 @@ def process(
     S2_apply_snow_mask: bool = False,
     S2_apply_cloud_mask: bool = False,
     overwrite: bool = False,
+    zarr_store_chunk_size: dict = {
+        "time": 50,
+        "x": 100,
+        "y": 100,
+    },
 ):
     """
     Parameters
@@ -531,7 +564,7 @@ def process(
                                                  target_resolution)
 
     # setup zarr storage
-    setup_zarr_storage(
+    sync_file_path = setup_zarr_storage(
         zarr_store=zarr_store,
         df=df,
         height=height,
@@ -541,9 +574,10 @@ def process(
         bound_right=bound_right,
         bound_top=bound_top,
         target_resolution=target_resolution,
-        processing_spatial_chunk_size=processing_spatial_chunk_size,
+        zarr_store_chunk_size=zarr_store_chunk_size,
         S2_bands_to_save=S2_bands_to_save,
-        total_bands_to_save=total_bands_to_save)
+        total_bands_to_save=total_bands_to_save,
+        processing_spatial_chunk_size=processing_spatial_chunk_size)
 
     if S2_cloud_classification:
         global GLOBAL_QUEUE_MANAGER
@@ -565,7 +599,8 @@ def process(
         "zarr_store": zarr_store,
         "S2_bands_to_save": S2_bands_to_save,
         "S1_assets": S1_assets,
-        "cloud_request_queue": cloud_request_queue
+        "cloud_request_queue": cloud_request_queue,
+        "sync_file_path": sync_file_path,
     }
 
     processing_spatial_chunk_size_in_CRS_unit = processing_spatial_chunk_size * target_resolution
@@ -655,3 +690,10 @@ def process(
 
         # close response queues manager
         GLOBAL_QUEUE_MANAGER.shutdown()
+
+    # try to remove sync file
+    if sync_file_path is not None:
+        try:
+            shutil.rmtree(sync_file_path)
+        except Exception:
+            pass
