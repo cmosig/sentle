@@ -181,6 +181,7 @@ def validate_user_input(target_crs: CRS,
                         bound_bottom: float,
                         bound_right: float,
                         bound_top: float,
+                        zarr_store_chunk_size: dict,
                         datetime: DatetimeLike,
                         processing_spatial_chunk_size: int = 4000,
                         S1_assets: list[str] = ["vh", "vv"],
@@ -191,8 +192,7 @@ def validate_user_input(target_crs: CRS,
                         num_workers: int = 1,
                         time_composite_freq: str = None,
                         S2_apply_snow_mask: bool = False,
-                        S2_apply_cloud_mask: bool = False,
-                        zarr_store_chunk_size: dict):
+                        S2_apply_cloud_mask: bool = False):
 
     # validate type zarr store
     if not isinstance(zarr_store, (str, zarr.storage.Store)):
