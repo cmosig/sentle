@@ -1,12 +1,13 @@
 import multiprocessing as mp
 import shutil
 import tempfile
+from time import time as currenttime
 import warnings
 from math import ceil
 from os import path
-from time import time
 
 import geopandas as gpd
+import numcodecs
 import numpy as np
 import pandas as pd
 import pkg_resources
@@ -328,14 +329,14 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
         store = zarr_store
 
     sync_file_path = None
-    if zarr_store_chunk_size["time"] == 1 and zarr_store_chunk_size[
-            "y"] == processing_spatial_chunk_size and zarr_store_chunk_size[
-                "x"] == processing_spatial_chunk_size:
+    if not (zarr_store_chunk_size["time"] == 1
+            and zarr_store_chunk_size["y"] == processing_spatial_chunk_size
+            and zarr_store_chunk_size["x"] == processing_spatial_chunk_size):
         numcodecs.blosc.use_threads = False
 
         # get a uuid for sync file
         sync_file_path = path.join(tempfile.gettempdir(),
-                                   f"sentle_{time()}.sync")
+                                   f"sentle_{currenttime()}.sync")
 
     # create array for where to store the processed sentinel data
     # chunk size is the number of S2 bands, because we parallelize S1/S2
@@ -493,6 +494,7 @@ def process(
         time_composite_freq=time_composite_freq,
         S2_apply_snow_mask=S2_apply_snow_mask,
         S2_apply_cloud_mask=S2_apply_cloud_mask,
+        zarr_store_chunk_size=zarr_store_chunk_size,
     )
 
     # TODO support to only download subset of bands (mutually exclusive with
