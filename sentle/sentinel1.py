@@ -79,6 +79,9 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                                    boundless=True,
                                    fill_value=0)
 
+                    # replace nodata with zeros
+                    data[data == dr.nodata] = 0
+
                     # compute aligned reprojection
                     tile_repr_transform, tile_repr_height, tile_repr_width = calculate_aligned_transform(
                         dr.crs, target_crs, data.shape[0], data.shape[1],
@@ -96,7 +99,7 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                                        width=read_win.width),
                                    src_crs=dr.crs,
                                    dst_crs=target_crs,
-                                   src_nodata=dr.nodata,
+                                   src_nodata=0,
                                    dst_nodata=0,
                                    dst_transform=tile_repr_transform,
                                    resampling=Resampling.bilinear)
