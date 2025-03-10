@@ -471,7 +471,7 @@ def process(
        Path of where to create the zarr storage.
     processing_spatial_chunk_size: int, default=4000
        Size of spatial chunks across which we perform parallization.
-    S1_assets: list[str], default=["vh", "vv"]
+    S1_assets: list[str], default=["vh_asc", "vh_desc", "vv_asc", "vv_desc"]
        Specify which bands to download for Sentinel-1. Only "vh" and "vv" are supported.
     overwrite: bool, default=False
        Whether to overwrite existing zarr storage. 

@@ -60,7 +60,7 @@ sentle.process(
     S2_mask_snow=True,
     S2_cloud_classification=True,
     S2_cloud_classification_device="cuda",
-    S1_assets=["vv", "vh"],
+    S1_assets=["vh_asc", "vh_desc", "vv_asc", "vv_desc"],
     S2_apply_snow_mask=True,
     S2_apply_cloud_mask=True,
     time_composite_freq="7d",
@@ -81,7 +81,7 @@ Explanation:
 - `S2_cloud_classification`: Whether to perform a cloud classification layer for Sentinel-2 data.
 - `S2_cloud_classification_device`: Where to run cloud classification. If you have an Nvidia GPU then pass `cuda` otherwise `cpu`(default).
 - `S2_apply_*`: Whether to apply the respective mask, i.e., replace values by NaN.
-- `S1_assets`: Which Sentinel-1 assets to download. Disable Sentinel-1 by setting this to `None`.
+- `S1_assets`: Which Sentinel-1 assets to download. Disable Sentinel-1 by setting this to `None`. This extracts by default 'vv' and 'vh' bands from the S1-RTC product and splits them by ascending and descending orbit.
 - `time_composite_freq`: Rounding interval across which data is averaged. Uses `pandas.Timestamp.round(time_composite_freq)`. Cloud/snow masks are dropped after masking because they cannot be aggregated.
 - `num_workers`: Number of cores to use. Plan about 2 GiB of memory usage per worker. -1 means all cores.
 - `processing_spatial_chunk_size`: Size of spatial chunks that are processed in parallel. Default is 4000.
@@ -105,7 +105,7 @@ And visualize using the awesome [lexcube](https://github.com/msoechting/lexcube)
 
 ```
 import lexcube
-lexcube.Cube3DWidget(da.sel(band="B02"), vmin=0, vmax=4000)
+lexcube.Cube3DWidget(da.load().sel(band="B02"), vmin=0, vmax=4000)
 ```
 
 ![image](https://github.com/user-attachments/assets/13c4688a-be9d-4a43-adac-63536756f5e9)
