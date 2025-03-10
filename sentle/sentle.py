@@ -185,7 +185,7 @@ def validate_user_input(target_crs: CRS,
                         zarr_store_chunk_size: dict,
                         datetime: DatetimeLike,
                         processing_spatial_chunk_size: int = 4000,
-                        S1_assets: list[str] = ["vh", "vv"],
+                        S1_assets: list[str] = S1_ASSETS,
                         S2_mask_snow: bool = False,
                         S2_cloud_classification: bool = False,
                         S2_cloud_classification_device="cpu",
@@ -247,8 +247,10 @@ def validate_user_input(target_crs: CRS,
         if not all(isinstance(asset, str) for asset in S1_assets):
             raise ValueError("S1_assets must contain only strings")
 
-        if not all(asset in ["vh", "vv"] for asset in S1_assets):
-            raise ValueError("S1_assets must contain only 'vh' and 'vv'")
+        if not all(asset in S1_ASSETS for asset in S1_assets):
+            raise ValueError(
+                "S1_assets must contain only 'vh_asc', 'vv_asc', 'vh_desc', 'vv_desc'"
+            )
 
     # check if S2_mask_snow is a boolean
     if not isinstance(S2_mask_snow, bool):
@@ -357,7 +359,7 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
 
     # band dimension
     band = zarr.create(shape=(len(total_bands_to_save)),
-                       dtype="<U3",
+                       dtype="<U32",
                        store=store,
                        path="/band",
                        overwrite=overwrite)
@@ -415,7 +417,7 @@ def process(
     datetime: DatetimeLike,
     zarr_store: str | zarr.storage.Store,
     processing_spatial_chunk_size: int = 4000,
-    S1_assets: list[str] = ["vh", "vv"],
+    S1_assets: list[str] = S1_ASSETS,
     S2_mask_snow: bool = False,
     S2_cloud_classification: bool = False,
     S2_cloud_classification_device="cpu",
@@ -581,6 +583,7 @@ def process(
         total_bands_to_save=total_bands_to_save,
         processing_spatial_chunk_size=processing_spatial_chunk_size)
 
+    cloud_request_queue = None
     if S2_cloud_classification:
         global GLOBAL_QUEUE_MANAGER
 

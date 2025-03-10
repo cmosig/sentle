@@ -31,3 +31,8 @@ ZARR_TIME_ATTRS = {
 ZARR_DATA_ATTRS = {'_ARRAY_DIMENSIONS': ['time', 'band', 'y', 'x']}
 
 STAC_ENDPOINT = "https://planetarycomputer.microsoft.com/api/stac/v1"
+
+S1_ASSETS = ["vh_asc", "vh_desc", "vv_asc", "vv_desc"]
+S1_TRUE_ASSETS = ["vv", "vh"]
+
+ORBIT_STATE_ABBREVIATION = {"ascending": "asc", "descending": "desc"}

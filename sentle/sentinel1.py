@@ -27,6 +27,8 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
     perform_aggregation = (time_composite_freq is not None) and (len(item_list)
                                                                  > 1)
 
+    user_s1_true_assets = set(map(lambda x: x.split("_")[0], S1_assets))
+
     if perform_aggregation:
         # count how many values we add per pixel to compute mean later
         tile_array_count = np.full(shape=(len(S1_assets), ptile_height,
@@ -35,14 +37,26 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                                    dtype=np.uint8)
 
     for item in item_list:
+
         # iterate through S1 assets
-        for i, s1_asset in enumerate(S1_assets):
-            if s1_asset not in item.assets:
-                # ii's rare and weird, but sometimes assets are missing
+        for s1_true_asset in S1_TRUE_ASSETS:
+
+            if s1_true_asset not in user_s1_true_assets:
                 continue
 
+            if s1_true_asset not in item.assets:
+                # it's rare and weird, but sometimes assets are missing
+                continue
+
+            # extract orbit state -> either ascending or descending
+            orbit_state = item.properties["sat:orbit_state"]
+            orbit_state = ORBIT_STATE_ABBREVIATION[orbit_state]
+
+            # compute index to save
+            band_save_index = S1_ASSETS.index(f"{s1_true_asset}_{orbit_state}")
+
             try:
-                with rasterio.open(item.assets[s1_asset].href) as dr:
+                with rasterio.open(item.assets[s1_true_asset].href) as dr:
 
                     # reproject ptile bounds to S1 tile CRS
                     ptile_bounds_local_crs = warp.transform_bounds(
@@ -114,14 +128,15 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                                           local_win.width]
 
                     # save it
-                    ptile_array[i, write_win.row_off:write_win.row_off +
+                    ptile_array[band_save_index,
+                                write_win.row_off:write_win.row_off +
                                 write_win.height,
                                 write_win.col_off:write_win.col_off +
                                 write_win.width] += data_repr
 
                     if perform_aggregation:
                         # save where we have NaNs
-                        tile_array_count[i,
+                        tile_array_count[band_save_index,
                                          write_win.row_off:write_win.row_off +
                                          write_win.height,
                                          write_win.col_off:write_win.col_off +
@@ -131,7 +146,7 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                 print("Failed to read from stac repository.", type(e))
                 print(
                     "This is a planetary computer issue, not a sentle issue.")
-                print("Asset", item.assets[s1_asset])
+                print("Asset", item.assets[s1_true_asset])
 
     if perform_aggregation:
         with warnings.catch_warnings():
