@@ -71,22 +71,6 @@ This code downloads data for a 40km by 40km area with one year of both Sentinel-
 
 Everything is parallelized across 10 workers and each worker immediately saves its results to the specified path to a `zarr_store`. This ensures you can download larger-than-memory cubes.
 
-Explanation:
-- `zarr_store`: Save path. 
-- `target_crs`: Specifies the target CRS that all data will be reprojected to.
-- `target_resolution`:  Determines the spatial resolution that all data is reprojected to in the `target_crs`. 
-- `bound_*`: Spatial bounds in `target_crs` of the area you want to download. Undefined behavior if difference between opposite bounds is not divisible by `target_resolution`.
-- `datetime`: Time range that will be downloaded.
-- `S2_mask_snow`: Whether to compute snow mask for Sentinel-2 data.
-- `S2_cloud_classification`: Whether to perform a cloud classification layer for Sentinel-2 data.
-- `S2_cloud_classification_device`: Where to run cloud classification. If you have an Nvidia GPU then pass `cuda` otherwise `cpu`(default).
-- `S2_apply_*`: Whether to apply the respective mask, i.e., replace values by NaN.
-- `S1_assets`: Which Sentinel-1 assets to download. Disable Sentinel-1 by setting this to `None`.
-- `time_composite_freq`: Rounding interval across which data is averaged. Uses `pandas.Timestamp.round(time_composite_freq)`. Cloud/snow masks are dropped after masking because they cannot be aggregated.
-- `num_workers`: Number of cores to use. Plan about 2 GiB of memory usage per worker. -1 means all cores.
-- `processing_spatial_chunk_size`: Size of spatial chunks that are processed in parallel. Default is 4000.
-- `overwrite`: Whether to overwrite the zarr store if it already exists.  Default is False.
-
 **Visualize**
 
 Load the data with xarray. 
@@ -110,6 +94,48 @@ lexcube.Cube3DWidget(da.sel(band="B02"), vmin=0, vmax=4000)
 
 ![image](https://github.com/user-attachments/assets/13c4688a-be9d-4a43-adac-63536756f5e9)
 
+## API Documentation
+
+### sentle.process
+
+The package contains only one main function for retrieving and processing Sentinel data: `process`.
+
+#### Required Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `target_crs` | `rasterio.crs.CRS` | Specifies the target CRS that all data will be reprojected to. |
+| `target_resolution` | `float` | Determines the resolution that all data is reprojected to in the `target_crs`. |
+| `bound_left` | `float` | Left bound of area that is supposed to be covered. Unit is in `target_crs`. |
+| `bound_bottom` | `float` | Bottom bound of area that is supposed to be covered. Unit is in `target_crs`. |
+| `bound_right` | `float` | Right bound of area that is supposed to be covered. Unit is in `target_crs`. |
+| `bound_top` | `float` | Top bound of area that is supposed to be covered. Unit is in `target_crs`. |
+| `datetime` | `DatetimeLike` | Specifies time range of data to be downloaded. This is forwarded to the respective STAC interface. |
+| `zarr_store` | `str` or `zarr.storage.Store` | Path of where to create the zarr storage. |
+
+#### Optional Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `processing_spatial_chunk_size` | `int` | `4000` | Size of spatial chunks across which parallelization is performed. |
+| `S1_assets` | `list[str]` | `["vh", "vv"]` | Specify which bands to download for Sentinel-1. Only "vh" and "vv" are supported. |
+| `S2_mask_snow` | `bool` | `False` | Whether to create a snow mask. Based on https://doi.org/10.1016/j.rse.2011.10.028. |
+| `S2_cloud_classification` | `bool` | `False` | Whether to create cloud classification layer, where `0=clear sky`, `2=thick cloud`, `3=thin cloud`, `4=shadow`. |
+| `S2_cloud_classification_device` | `str` | `"cpu"` | On which device to run cloud classification. Either `"cpu"` or `"cuda"`. |
+| `S2_return_cloud_probabilities` | `bool` | `False` | Whether to return raw cloud probabilities which were used to determine the cloud classes. |
+| `num_workers` | `int` | `1` | Number of cores to scale computation across. Plan 2GiB of RAM per worker. -1 uses all available cores. |
+| `time_composite_freq` | `str` | `None` | Rounding interval across which data is averaged. |
+| `S2_apply_snow_mask` | `bool` | `False` | Whether to replace snow with NaN. |
+| `S2_apply_cloud_mask` | `bool` | `False` | Whether to replace anything that is not clear sky with NaN. |
+| `overwrite` | `bool` | `False` | Whether to overwrite existing zarr storage. |
+| `zarr_store_chunk_size` | `dict` | `{"time": 50, "x": 100, "y": 100}` | Chunk sizes for zarr storage. |
+
+#### Notes
+
+- If `S2_apply_snow_mask` is set to `True`, `S2_mask_snow` must also be `True`.
+- If `S2_apply_cloud_mask` is set to `True`, `S2_cloud_classification` must also be `True`.
+- If `time_composite_freq` is set and neither `S2_apply_snow_mask` nor `S2_apply_cloud_mask` is set, a warning will be issued as temporal aggregation may yield useless results for Sentinel-2 data.
+- When `S1_assets` is supplied as an empty list, it will be converted to `None`, meaning no Sentinel-1 data will be downloaded.
 
 ## Questions you may have
 
