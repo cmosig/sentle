@@ -52,8 +52,15 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
             orbit_state = item.properties["sat:orbit_state"]
             orbit_state = ORBIT_STATE_ABBREVIATION[orbit_state]
 
+            # create band index string
+            band_index_string = f"{s1_true_asset}_{orbit_state}"
+
+            if band_index_string not in S1_assets:
+                # user did not request this band
+                continue
+
             # compute index to save
-            band_save_index = S1_ASSETS.index(f"{s1_true_asset}_{orbit_state}")
+            band_save_index = S1_assets.index(band_index_string)
 
             try:
                 with rasterio.open(item.assets[s1_true_asset].href) as dr:
