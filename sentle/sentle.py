@@ -1,3 +1,4 @@
+import gc
 import multiprocessing as mp
 import shutil
 import tempfile
@@ -696,9 +697,15 @@ def process(
         # close response queues manager
         GLOBAL_QUEUE_MANAGER.shutdown()
 
+        GLOBAL_QUEUE_MANAGER = None
+        GLOBAL_QUEUES = dict()
+
     # try to remove sync file
     if sync_file_path is not None:
         try:
             shutil.rmtree(sync_file_path)
         except Exception:
             pass
+
+    # clean up
+    gc.collect()
