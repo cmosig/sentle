@@ -10,8 +10,8 @@ def get_stac_api_io():
     """
     Returns a StacApiIO object with a retry policy that retries on 502, 503, 504
     """
-    retry = Retry(total=5,
-                  backoff_factor=1,
+    retry = Retry(total=10,
+                  backoff_jitter=0.1,
                   status_forcelist=[502, 503, 504],
                   allowed_methods=None)
     return StacApiIO(max_retries=retry)
