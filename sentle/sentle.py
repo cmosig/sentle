@@ -113,9 +113,9 @@ def process_ptile(
         target_crs=target_crs,
     )
 
-    assert len(
-        item_list
-    ) > 0, "Number of retrieved stac items is zero even though we found stac items previously."
+    if len(item_list) == 0:
+        # no items found for this ptile, this happens sometimes. planetary problem. dunno why.
+        return job_id
 
     if collection == "sentinel-1-rtc":
         ptile_array = process_ptile_S1(bound_left=bound_left,
