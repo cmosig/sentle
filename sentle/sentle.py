@@ -622,6 +622,10 @@ def process(
         for xi, x_min in enumerate(
                 range(bound_left, bound_right,
                       processing_spatial_chunk_size_in_CRS_unit)):
+
+            num_y_indices = ceil((bound_top - bound_bottom) /
+                                 processing_spatial_chunk_size_in_CRS_unit) - 1
+
             for yi, y_min in enumerate(
                     range(bound_bottom, bound_top,
                           processing_spatial_chunk_size_in_CRS_unit)):
@@ -646,9 +650,10 @@ def process(
                                 min((xi + 1) * processing_spatial_chunk_size,
                                     width)),
                             y=slice(
-                                yi * processing_spatial_chunk_size,
-                                min((yi + 1) * processing_spatial_chunk_size,
-                                    height)),
+                                max(
+                                    0, height -
+                                    (yi + 1) * processing_spatial_chunk_size),
+                                height - yi * processing_spatial_chunk_size),
                             band=slice(0, len(S2_bands_to_save))
                             if collection == "sentinel-2-l2a" else slice(
                                 len(S2_bands_to_save),
