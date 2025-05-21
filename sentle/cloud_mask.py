@@ -4,7 +4,6 @@ import os
 import numpy as np
 import pkg_resources
 import torch
-import xarray as xr
 
 S2_cloud_mask_band = "S2_cloud_classification"
 S2_cloud_prob_bands = [

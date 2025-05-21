@@ -1,5 +1,4 @@
 import numpy as np
-import xarray as xr
 
 S2_snow_mask_band = "S2_snow_mask"
 
