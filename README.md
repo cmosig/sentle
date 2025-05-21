@@ -117,8 +117,8 @@ The package contains only one main function for retrieving and processing Sentin
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `processing_spatial_chunk_size` | `int` | `4000` | Size of spatial chunks across which parallelization is performed. |
-| `S1_assets` | `list[str]` | `["vh", "vv"]` | Specify which bands to download for Sentinel-1. Only "vh" and "vv" are supported. |
+| `processing_spatial_chunk_size` | `int` | `4000` | Size of spatial chunks across which parallelization is performed in pixels. |
+| `S1_assets` | `list[str]` | `["vh_asc", "vh_desc", "vv_asc", "vv_desc"]` | Specify which bands to download for Sentinel-1. Only "vh_asc", "vh_desc", "vv_asc", "vv_desc" are supported. Empty list will be converted to None (no Sentinel-1 data). |
 | `S2_mask_snow` | `bool` | `False` | Whether to create a snow mask. Based on https://doi.org/10.1016/j.rse.2011.10.028. |
 | `S2_cloud_classification` | `bool` | `False` | Whether to create cloud classification layer, where `0=clear sky`, `2=thick cloud`, `3=thin cloud`, `4=shadow`. |
 | `S2_cloud_classification_device` | `str` | `"cpu"` | On which device to run cloud classification. Either `"cpu"` or `"cuda"`. |
@@ -128,7 +128,7 @@ The package contains only one main function for retrieving and processing Sentin
 | `S2_apply_snow_mask` | `bool` | `False` | Whether to replace snow with NaN. |
 | `S2_apply_cloud_mask` | `bool` | `False` | Whether to replace anything that is not clear sky with NaN. |
 | `overwrite` | `bool` | `False` | Whether to overwrite existing zarr storage. |
-| `zarr_store_chunk_size` | `dict` | `{"time": 50, "x": 100, "y": 100}` | Chunk sizes for zarr storage. |
+| `zarr_store_chunk_size` | `dict` | `{"time": 50, "x": 100, "y": 100}` | Chunk sizes for zarr storage. Must contain the keys 'time', 'y', and 'x'. Controls the size of data chunks for efficient storage and retrieval. |
 
 #### Notes
 
@@ -136,6 +136,8 @@ The package contains only one main function for retrieving and processing Sentin
 - If `S2_apply_cloud_mask` is set to `True`, `S2_cloud_classification` must also be `True`.
 - If `time_composite_freq` is set and neither `S2_apply_snow_mask` nor `S2_apply_cloud_mask` is set, a warning will be issued as temporal aggregation may yield useless results for Sentinel-2 data.
 - When `S1_assets` is supplied as an empty list, it will be converted to `None`, meaning no Sentinel-1 data will be downloaded.
+- The `zarr_store_chunk_size` dictionary must contain the keys 'time', 'y', and 'x'.
+- When using cloud or snow masking with temporal composites, the masks will be applied before aggregation.
 
 ## Questions you may have
 
