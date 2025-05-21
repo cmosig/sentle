@@ -18,7 +18,9 @@ def compute_potential_snow_layer(B03, B08, B11):
     S1 = B11 / 10000
 
     # Compute the Normalized Difference Snow Index
-    NDSI = (G - S1) / (G + S1)
+    # Suppress division by zero warnings
+    with np.errstate(divide='ignore', invalid='ignore'):
+        NDSI = (G - S1) / (G + S1)
 
     # Eq. 20. (Zhu and Woodcock, 2012) and invert (True is clear, False is snow)
     PSL = ~((NDSI > 0.15) & (N > 0.11) & (G > 0.1))
