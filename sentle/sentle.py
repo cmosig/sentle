@@ -309,20 +309,32 @@ def validate_user_input(target_crs: CRS,
             "zarr_store_chunk_size must contain the keys 'time', 'y', and 'x'")
 
 
-def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
-                       df: pd.DataFrame,
-                       height: int,
-                       width: int,
-                       bound_left: float,
-                       bound_right: float,
-                       bound_top: float,
-                       bound_bottom: float,
-                       target_resolution: float,
-                       processing_spatial_chunk_size: int,
-                       zarr_store_chunk_size: dict,
-                       S2_bands_to_save: list[str],
-                       total_bands_to_save: list[str],
-                       overwrite: bool = False) -> None:
+def setup_zarr_storage(
+    zarr_store: str | zarr.storage.Store,
+    df: pd.DataFrame,
+    height: int,
+    width: int,
+    bound_left: float,
+    bound_right: float,
+    bound_top: float,
+    bound_bottom: float,
+    target_resolution: float,
+    processing_spatial_chunk_size: int,
+    zarr_store_chunk_size: dict,
+    S2_bands_to_save: list[str],
+    total_bands_to_save: list[str],
+    overwrite: bool = False,
+    coord_save_mode: str = "top-left"
+) -> None:
+
+    """
+    Parameters
+    ----------
+    coord_save_mode : str, default="top-left"
+        Specifies how coordinates are saved in zarr.
+        - "top-left": coordinates represent the top-left corner of each pixel (default, current behavior).
+        - "center": coordinates represent the center of each pixel (shifted by half a pixel).
+    """
 
     if isinstance(zarr_store, str):
         # setup zarr storage
@@ -373,9 +385,12 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
                     store=store,
                     path="/x",
                     overwrite=overwrite)
-    x[:] = np.arange(bound_left, bound_right,
-                     target_resolution).astype(np.float32)
+    if coord_save_mode == "center":
+        x[:] = (np.arange(bound_left, bound_right, target_resolution) + target_resolution / 2).astype(np.float32)
+    else:
+        x[:] = np.arange(bound_left, bound_right, target_resolution).astype(np.float32)
     x.attrs.update(ZARR_X_ATTRS)
+    x.attrs["coord_save_mode"] = coord_save_mode
 
     # y dimension
     y = zarr.create(shape=(height),
@@ -383,9 +398,18 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
                     store=store,
                     path="/y",
                     overwrite=overwrite)
-    y[:] = np.arange(bound_top, bound_bottom,
-                     -target_resolution).astype(np.float32)
+    if coord_save_mode == "center":
+        y[:] = (np.arange(bound_top, bound_bottom, -target_resolution) - target_resolution / 2).astype(np.float32)
+    else:
+        y[:] = np.arange(bound_top, bound_bottom, -target_resolution).astype(np.float32)
     y.attrs.update(ZARR_Y_ATTRS)
+    y.attrs["coord_save_mode"] = coord_save_mode
+    if coord_save_mode == "center":
+        y[:] = (np.arange(bound_top, bound_bottom, -target_resolution) - target_resolution / 2).astype(np.float32)
+    else:
+        y[:] = np.arange(bound_top, bound_bottom, -target_resolution).astype(np.float32)
+    y.attrs.update(ZARR_Y_ATTRS)
+    y.attrs["coord_save_mode"] = coord_save_mode
 
     # time dimension
     time = zarr.create(shape=(df["ts"].count()),
@@ -433,6 +457,7 @@ def process(
         "x": 100,
         "y": 100,
     },
+    coord_save_mode: str = "top-left",
 ):
     """
     Parameters
@@ -465,9 +490,9 @@ def process(
     time_composite_freq: str, default=None
         Rounding interval across which data is averaged.
     S2_apply_snow_mask: bool, default=False
-        Whether to replace snow with NaN.  
+        Whether to replace snow with NaN.
     S2_apply_cloud_mask: bool, default=False
-        Whether to replace anything that is not clear sky with NaN.  
+        Whether to replace anything that is not clear sky with NaN.
     zarr_store: str | zarr.storage.Store
        Path of where to create the zarr storage.
     processing_spatial_chunk_size: int, default=4000
@@ -475,7 +500,12 @@ def process(
     S1_assets: list[str], default=["vh_asc", "vh_desc", "vv_asc", "vv_desc"]
        Specify which bands to download for Sentinel-1. Only "vh" and "vv" are supported.
     overwrite: bool, default=False
-       Whether to overwrite existing zarr storage. 
+       Whether to overwrite existing zarr storage.
+    coord_save_mode: str, default="top-left"
+       Specifies how coordinates are saved in zarr. Options:
+         - "top-left": (default) coordinates represent the top-left corner of each pixel (current behavior)
+         - "center": coordinates represent the center of each pixel (shifted by half a pixel)
+       Note: This does not affect the processing scheme, only how coordinates are saved in the zarr store.
     """
 
     validate_user_input(
@@ -582,7 +612,8 @@ def process(
         zarr_store_chunk_size=zarr_store_chunk_size,
         S2_bands_to_save=S2_bands_to_save,
         total_bands_to_save=total_bands_to_save,
-        processing_spatial_chunk_size=processing_spatial_chunk_size)
+        processing_spatial_chunk_size=processing_spatial_chunk_size,
+        coord_save_mode=coord_save_mode)
 
     cloud_request_queue = None
     if S2_cloud_classification:
