@@ -46,11 +46,11 @@ There is only one important function: `process`. Here, you specify all parameter
 
 ```
 from sentle import sentle
-from rasterio.crs import CRS
 
+# target_crs can be either a rasterio.crs.CRS object or a string such as "EPSG:32633"
 sentle.process(
     zarr_store="mycube.zarr",
-    target_crs=CRS.from_string("EPSG:32633"),
+    target_crs="EPSG:32633",
     bound_left=176000,
     bound_bottom=5660000,
     bound_right=216000,
@@ -104,7 +104,7 @@ The package contains only one main function for retrieving and processing Sentin
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `target_crs` | `rasterio.crs.CRS` | Specifies the target CRS that all data will be reprojected to. |
+| `target_crs` | `rasterio.crs.CRS` or `str` | Specifies the target CRS that all data will be reprojected to. You can provide either a `rasterio.crs.CRS` object or a string (e.g., `"EPSG:32633"`). |
 | `target_resolution` | `float` | Determines the resolution that all data is reprojected to in the `target_crs`. |
 | `bound_left` | `float` | Left bound of area that is supposed to be covered. Unit is in `target_crs`. |
 | `bound_bottom` | `float` | Bottom bound of area that is supposed to be covered. Unit is in `target_crs`. |
