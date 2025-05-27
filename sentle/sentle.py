@@ -176,7 +176,7 @@ def process_ptile(
     return job_id
 
 
-def validate_user_input(target_crs: CRS,
+def validate_user_input(target_crs: CRS | str,
                         target_resolution: float,
                         zarr_store: str | zarr.storage.Store,
                         bound_left: float,
@@ -200,9 +200,14 @@ def validate_user_input(target_crs: CRS,
     if not isinstance(zarr_store, (str, zarr.storage.Store)):
         raise ValueError("zarr_store must be a string or zarr.storage.Store")
 
-    # check if the target CRS is valid
+    # check if the target CRS is valid, allow string and convert if needed
+    if isinstance(target_crs, str):
+        try:
+            target_crs = CRS.from_user_input(target_crs)
+        except Exception as e:
+            raise ValueError(f"target_crs string could not be interpreted by rasterio.crs.CRS.from_user_input(): {e}")
     if not isinstance(target_crs, CRS):
-        raise ValueError("target_crs must be an instance of rasterio.crs.CRS")
+        raise ValueError("target_crs must be an instance of rasterio.crs.CRS or a string interpretable by CRS.from_user_input()")
 
     # check if the target resolution is valid
     if not isinstance(target_resolution, (int, float)):
@@ -323,6 +328,7 @@ def setup_zarr_storage(
     zarr_store_chunk_size: dict,
     S2_bands_to_save: list[str],
     total_bands_to_save: list[str],
+    target_crs: CRS,
     overwrite: bool = False,
     coord_save_mode: str = "top-left"
 ) -> None:
@@ -342,6 +348,10 @@ def setup_zarr_storage(
                                             dimension_separator=".")
     else:
         store = zarr_store
+
+    # Save CRS as WKT attribute to the Zarr root group
+    root = zarr.group(store=store)
+    root.attrs["crs_wkt"] = target_crs.to_wkt()
 
     sync_file_path = None
     if not (zarr_store_chunk_size["time"] == 1
@@ -433,7 +443,7 @@ def setup_zarr_storage(
 
 
 def process(
-    target_crs: CRS,
+    target_crs: CRS | str,
     target_resolution: float,
     bound_left: float,
     bound_bottom: float,
@@ -463,8 +473,8 @@ def process(
     Parameters
     ----------
 
-    target_crs : CRS
-        Specifies the target CRS that all data will be reprojected to.
+    target_crs : CRS or str
+        Specifies the target CRS that all data will be reprojected to. If a string is provided, it will be interpreted by rasterio.crs.CRS.from_user_input().
     target_resolution : float
         Determines the resolution that all data is reprojected to in the `target_crs`.
     bound_left : float
@@ -507,6 +517,10 @@ def process(
          - "center": coordinates represent the center of each pixel (shifted by half a pixel)
        Note: This does not affect the processing scheme, only how coordinates are saved in the zarr store.
     """
+
+    # Accept either a CRS or a string for target_crs
+    if isinstance(target_crs, str):
+        target_crs = CRS.from_user_input(target_crs)
 
     validate_user_input(
         target_crs=target_crs,
@@ -609,10 +623,11 @@ def process(
         bound_right=bound_right,
         bound_top=bound_top,
         target_resolution=target_resolution,
+        processing_spatial_chunk_size=processing_spatial_chunk_size,
         zarr_store_chunk_size=zarr_store_chunk_size,
         S2_bands_to_save=S2_bands_to_save,
         total_bands_to_save=total_bands_to_save,
-        processing_spatial_chunk_size=processing_spatial_chunk_size,
+        target_crs=target_crs,
         coord_save_mode=coord_save_mode)
 
     cloud_request_queue = None
