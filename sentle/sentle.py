@@ -323,6 +323,7 @@ def setup_zarr_storage(
     zarr_store_chunk_size: dict,
     S2_bands_to_save: list[str],
     total_bands_to_save: list[str],
+    target_crs: CRS,
     overwrite: bool = False,
     coord_save_mode: str = "top-left"
 ) -> None:
@@ -342,6 +343,10 @@ def setup_zarr_storage(
                                             dimension_separator=".")
     else:
         store = zarr_store
+
+    # Save CRS as WKT attribute to the Zarr root group
+    root = zarr.group(store=store)
+    root.attrs["crs_wkt"] = target_crs.to_wkt()
 
     sync_file_path = None
     if not (zarr_store_chunk_size["time"] == 1
@@ -609,10 +614,11 @@ def process(
         bound_right=bound_right,
         bound_top=bound_top,
         target_resolution=target_resolution,
+        processing_spatial_chunk_size=processing_spatial_chunk_size,
         zarr_store_chunk_size=zarr_store_chunk_size,
         S2_bands_to_save=S2_bands_to_save,
         total_bands_to_save=total_bands_to_save,
-        processing_spatial_chunk_size=processing_spatial_chunk_size,
+        target_crs=target_crs,
         coord_save_mode=coord_save_mode)
 
     cloud_request_queue = None
