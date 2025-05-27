@@ -47,7 +47,6 @@ There is only one important function: `process`. Here, you specify all parameter
 ```
 from sentle import sentle
 
-# target_crs can be either a rasterio.crs.CRS object or a string such as "EPSG:32633"
 sentle.process(
     zarr_store="mycube.zarr",
     target_crs="EPSG:32633",
