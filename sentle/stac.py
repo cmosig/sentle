@@ -9,9 +9,12 @@ from .const import STAC_ENDPOINT
 def get_stac_api_io():
     """
     Returns a StacApiIO object with a retry policy that retries on 502, 503, 504
+    with exponential backoff to handle server overload
     """
-    retry = Retry(total=10,
-                  backoff_jitter=0.1,
+    retry = Retry(total=15,
+                  backoff_factor=1.0,
+                  backoff_jitter=0.2,
+                  backoff_max=120,
                   status_forcelist=[502, 503, 504],
                   allowed_methods=None)
     return StacApiIO(max_retries=retry)
