@@ -1,3 +1,5 @@
+import planetary_computer
+import pystac_client
 from pystac_client.stac_api_io import StacApiIO
 from urllib3 import Retry
 

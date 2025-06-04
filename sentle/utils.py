@@ -1,6 +1,8 @@
 import contextlib
 
 import joblib
+from joblib import register_parallel_backend
+from joblib._parallel_backends import MultiprocessingBackend
 
 GLOBAL_QUEUE_MANAGER = None
 GLOBAL_QUEUES = dict()

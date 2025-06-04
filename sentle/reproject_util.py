@@ -1,7 +1,7 @@
 import warnings
 
 from affine import Affine
-from rasterio import transform
+from rasterio import transform, warp, windows
 
 
 def check_and_round_bounds(left, bottom, right, top, res):
@@ -47,6 +47,9 @@ def calculate_aligned_transform(src_crs, dst_crs, height, width, left, bottom,
         tf.h,
         tf.i,
     )
+
+    if repr_width is None or repr_height is None:
+        raise ValueError("calculate_default_transform returned None for width or height")
 
     # include one more pixel because rounding down
     repr_width += 1

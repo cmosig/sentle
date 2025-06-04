@@ -1,10 +1,11 @@
 import gc
+import multiprocessing as mp
 import shutil
 import tempfile
-from time import time as currenttime
 import warnings
 from math import ceil
 from os import path
+from time import time as currenttime
 
 import geopandas as gpd
 import numcodecs
@@ -12,6 +13,7 @@ import numpy as np
 import pandas as pd
 import pkg_resources
 import zarr
+import zarr.storage
 from joblib import Parallel, delayed, parallel_backend
 from numcodecs import Blosc
 from pystac_client.item_search import DatetimeLike
@@ -22,12 +24,15 @@ from zarr.sync import ProcessSynchronizer
 
 from .cloud_mask import (S2_cloud_mask_band, S2_cloud_prob_bands,
                          init_cloud_prediction_service)
-from .const import ZARR_BAND_ATTRS, ZARR_X_ATTRS, ZARR_Y_ATTRS, ZARR_TIME_ATTRS, ZARR_DATA_ATTRS
-from .reproject_util import transform_height_width_from_bounds_res, check_and_round_bounds, height_width_from_bounds_res
+from .const import (S1_ASSETS, S2_RAW_BANDS, ZARR_BAND_ATTRS, ZARR_DATA_ATTRS,
+                    ZARR_TIME_ATTRS, ZARR_X_ATTRS, ZARR_Y_ATTRS)
+from .reproject_util import (check_and_round_bounds,
+                             height_width_from_bounds_res,
+                             transform_height_width_from_bounds_res)
 from .sentinel1 import process_ptile_S1
 from .sentinel2 import obtain_subtiles, process_ptile_S2_dispatcher
 from .stac import open_catalog
-from .utils import tqdm_joblib
+from .utils import GLOBAL_QUEUE_MANAGER, GLOBAL_QUEUES, tqdm_joblib
 
 
 def catalog_search_ptile(collection: str, ts, time_composite_freq, bound_left,
@@ -204,9 +209,13 @@ def validate_user_input(target_crs: CRS | str,
         try:
             target_crs = CRS.from_user_input(target_crs)
         except Exception as e:
-            raise ValueError(f"target_crs string could not be interpreted by rasterio.crs.CRS.from_user_input(): {e}")
+            raise ValueError(
+                f"target_crs string could not be interpreted by rasterio.crs.CRS.from_user_input(): {e}"
+            )
     if not isinstance(target_crs, CRS):
-        raise ValueError("target_crs must be an instance of rasterio.crs.CRS or a string interpretable by CRS.from_user_input()")
+        raise ValueError(
+            "target_crs must be an instance of rasterio.crs.CRS or a string interpretable by CRS.from_user_input()"
+        )
 
     # check if the target resolution is valid
     if not isinstance(target_resolution, (int, float)):
@@ -313,25 +322,22 @@ def validate_user_input(target_crs: CRS | str,
             "zarr_store_chunk_size must contain the keys 'time', 'y', and 'x'")
 
 
-def setup_zarr_storage(
-    zarr_store: str | zarr.storage.Store,
-    df: pd.DataFrame,
-    height: int,
-    width: int,
-    bound_left: float,
-    bound_right: float,
-    bound_top: float,
-    bound_bottom: float,
-    target_resolution: float,
-    processing_spatial_chunk_size: int,
-    zarr_store_chunk_size: dict,
-    S2_bands_to_save: list[str],
-    total_bands_to_save: list[str],
-    target_crs: CRS,
-    overwrite: bool = False,
-    coord_save_mode: str = "top-left"
-) -> None | str:
-
+def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
+                       df: pd.DataFrame,
+                       height: int,
+                       width: int,
+                       bound_left: float,
+                       bound_right: float,
+                       bound_top: float,
+                       bound_bottom: float,
+                       target_resolution: float,
+                       processing_spatial_chunk_size: int,
+                       zarr_store_chunk_size: dict,
+                       S2_bands_to_save: list[str],
+                       total_bands_to_save: list[str],
+                       target_crs: CRS,
+                       overwrite: bool = False,
+                       coord_save_mode: str = "top-left") -> None | str:
     """
     Parameters
     ----------
@@ -395,9 +401,11 @@ def setup_zarr_storage(
                     path="/x",
                     overwrite=overwrite)
     if coord_save_mode == "center":
-        x[:] = (np.arange(bound_left, bound_right, target_resolution) + target_resolution / 2).astype(np.float32)
+        x[:] = (np.arange(bound_left, bound_right, target_resolution) +
+                target_resolution / 2).astype(np.float32)
     else:
-        x[:] = np.arange(bound_left, bound_right, target_resolution).astype(np.float32)
+        x[:] = np.arange(bound_left, bound_right,
+                         target_resolution).astype(np.float32)
     x.attrs.update(ZARR_X_ATTRS)
     x.attrs["coord_save_mode"] = coord_save_mode
 
@@ -408,15 +416,19 @@ def setup_zarr_storage(
                     path="/y",
                     overwrite=overwrite)
     if coord_save_mode == "center":
-        y[:] = (np.arange(bound_top, bound_bottom, -target_resolution) - target_resolution / 2).astype(np.float32)
+        y[:] = (np.arange(bound_top, bound_bottom, -target_resolution) -
+                target_resolution / 2).astype(np.float32)
     else:
-        y[:] = np.arange(bound_top, bound_bottom, -target_resolution).astype(np.float32)
+        y[:] = np.arange(bound_top, bound_bottom,
+                         -target_resolution).astype(np.float32)
     y.attrs.update(ZARR_Y_ATTRS)
     y.attrs["coord_save_mode"] = coord_save_mode
     if coord_save_mode == "center":
-        y[:] = (np.arange(bound_top, bound_bottom, -target_resolution) - target_resolution / 2).astype(np.float32)
+        y[:] = (np.arange(bound_top, bound_bottom, -target_resolution) -
+                target_resolution / 2).astype(np.float32)
     else:
-        y[:] = np.arange(bound_top, bound_bottom, -target_resolution).astype(np.float32)
+        y[:] = np.arange(bound_top, bound_bottom,
+                         -target_resolution).astype(np.float32)
     y.attrs.update(ZARR_Y_ATTRS)
     y.attrs["coord_save_mode"] = coord_save_mode
 

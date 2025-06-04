@@ -1,3 +1,4 @@
+import multiprocessing as mp
 import os
 
 import numpy as np
@@ -51,7 +52,7 @@ def cloud_prediction_loop(request_queue: mp.Queue, device: str):
         request["response_queue"].put(cloud_probabilities)
 
 
-def compute_cloud_mask(array: np.array, model: torch.jit.ScriptModule,
+def compute_cloud_mask(array: np.ndarray, model: torch.jit.ScriptModule,
                        device: str):
 
     assert array.shape == (
@@ -81,7 +82,7 @@ def compute_cloud_mask(array: np.array, model: torch.jit.ScriptModule,
     return cloud_probabilities
 
 
-def worker_get_cloud_mask(array: np.array, request_queue: mp.Queue,
+def worker_get_cloud_mask(array: np.ndarray, request_queue: mp.Queue,
                           response_queue: mp.Queue):
     request_queue.put({"array": array, "response_queue": response_queue})
     return response_queue.get()
