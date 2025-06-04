@@ -24,6 +24,7 @@ from zarr.sync import ProcessSynchronizer
 
 from .cloud_mask import (S2_cloud_mask_band, S2_cloud_prob_bands,
                          init_cloud_prediction_service)
+from .snow_mask import S2_snow_mask_band
 from .const import (S1_ASSETS, S2_RAW_BANDS, ZARR_BAND_ATTRS, ZARR_DATA_ATTRS,
                     ZARR_TIME_ATTRS, ZARR_X_ATTRS, ZARR_Y_ATTRS)
 from .reproject_util import (check_and_round_bounds,
@@ -445,7 +446,8 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
                        overwrite=overwrite)
 
     for i, ts in enumerate(unique_timestamps):
-        time[i] = (ts - pd.Timestamp(0, tz=None)).total_seconds()
+        time[i] = (ts.tz_localize(tz=None) -
+                   pd.Timestamp(0, tz=None)).total_seconds()
     time.attrs.update(ZARR_TIME_ATTRS)
 
     # consolidating metadata
@@ -489,14 +491,14 @@ def retrieve_timestamps(time_composite_freq: str, datetime: DatetimeLike,
         df["collection"] = [i.collection_id for i in items]
 
         # remove duplicates for timeaxis
-        df = df.drop_duplicates(["ts", "collection"])
+        df = df.drop_duplicates(["ts_raw", "collection"])
 
         # make sure ts is sorted in the correct order
-        df = df.sort_values("ts", ascending=False)
+        df = df.sort_values("ts_raw", ascending=False)
 
         return [
-            dict(collection=row["collection"], ts=row["ts"])
-            for row in df.itertuples()
+            dict(collection=row["collection"], ts=row["ts_raw"])
+            for _, row in df.iterrows()
         ]
 
     else:
@@ -718,7 +720,7 @@ def process(
                     ret_config["bound_top"] = min(
                         y_min + processing_spatial_chunk_size_in_CRS_unit,
                         bound_top)
-                    ret_config["ts"] = itme["ts"]
+                    ret_config["ts"] = item["ts"]
                     ret_config["collection"] = item["collection"]
                     ret_config["zarr_save_slice"] = dict(
                         x=slice(
