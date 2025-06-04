@@ -12,8 +12,8 @@ from shapely.geometry import Polygon, box
 
 from .cloud_mask import (S2_cloud_mask_band, S2_cloud_prob_bands,
                          worker_get_cloud_mask)
-from .const import *
-from .reproject_util import *
+from .const import S2_subtile_size, S2_RAW_BANDS, S2_RAW_BAND_RESOLUTION
+from .reproject_util import calculate_aligned_transform, bounds_from_transform_height_width_res, recrop_write_window
 from .snow_mask import S2_snow_mask_band, compute_potential_snow_layer
 
 
