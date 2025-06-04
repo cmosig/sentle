@@ -1,7 +1,7 @@
 import warnings
 
 from affine import Affine
-from rasterio import transform, warp, windows
+from rasterio import transform
 
 
 def check_and_round_bounds(left, bottom, right, top, res):

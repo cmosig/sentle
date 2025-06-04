@@ -1,5 +1,4 @@
 import gc
-import multiprocessing as mp
 import shutil
 import tempfile
 from time import time as currenttime
@@ -27,8 +26,8 @@ from .const import ZARR_BAND_ATTRS, ZARR_X_ATTRS, ZARR_Y_ATTRS, ZARR_TIME_ATTRS,
 from .reproject_util import transform_height_width_from_bounds_res, check_and_round_bounds, height_width_from_bounds_res
 from .sentinel1 import process_ptile_S1
 from .sentinel2 import obtain_subtiles, process_ptile_S2_dispatcher
-from .stac import get_stac_api_io, open_catalog
-from .utils import tqdm_joblib, MultiCallback, ImmediateResultBackend
+from .stac import open_catalog
+from .utils import tqdm_joblib
 
 
 def catalog_search_ptile(collection: str, ts, time_composite_freq, bound_left,

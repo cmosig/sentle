@@ -1,7 +1,4 @@
-import warnings
-
 import numpy as np
-import rasterio
 from rasterio import transform, warp, windows
 from rasterio.crs import CRS
 from rasterio.enums import Resampling
