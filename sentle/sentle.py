@@ -330,7 +330,7 @@ def setup_zarr_storage(
     target_crs: CRS,
     overwrite: bool = False,
     coord_save_mode: str = "top-left"
-) -> None:
+) -> None | str:
 
     """
     Parameters
