@@ -502,8 +502,33 @@ def retrieve_timestamps(time_composite_freq: str, datetime: DatetimeLike,
         ]
 
     else:
-        # figure out some form of generative approach
-        return [{"temp": 25}]
+        # Use pystac_client.ItemSearch to parse/expand the datetime
+        from pystac_client import ItemSearch
+
+        # Create a minimal ItemSearch instance to use its datetime parsing logic
+        bs = ItemSearch(
+            url="http://dummy",
+            datetime=datetime,
+        )
+        parsed_datetime = bs.get_parameters()["datetime"]
+
+        # Now parsed_datetime is a string like "YYYY-MM-DDTHH:MM:SSZ/YYYY-MM-DDTHH:MM:SSZ"
+        # Parse the start and end from this string
+        if "/" in parsed_datetime:
+            start_str, end_str = parsed_datetime.split("/")
+        else:
+            start_str = end_str = parsed_datetime
+
+        start = pd.to_datetime(start_str)
+        end = pd.to_datetime(end_str)
+
+        # TODO needs to rounded to be backward compatible with old code
+        timestamps = pd.date_range(start, end, freq=time_composite_freq)[::-1]
+
+        return [{
+            "collection": collection,
+            "ts": ts
+        } for ts in timestamps for collection in collections]
 
 
 def process(
@@ -709,7 +734,10 @@ def process(
             for yi, y_min in enumerate(
                     range(bound_bottom, bound_top,
                           processing_spatial_chunk_size_in_CRS_unit)):
-                for tsi, item in enumerate(timestamp_list):
+                last_ts = timestamp_list[0]["ts"]
+                ts_save_index = 0
+                for item in timestamp_list:
+
                     ret_config = dict(config)
                     ret_config["bound_left"] = x_min
                     ret_config["bound_bottom"] = y_min
@@ -722,6 +750,11 @@ def process(
                         bound_top)
                     ret_config["ts"] = item["ts"]
                     ret_config["collection"] = item["collection"]
+
+                    if item["ts"] != last_ts:
+                        last_ts = item["ts"]
+                        ts_save_index += 1
+
                     ret_config["zarr_save_slice"] = dict(
                         x=slice(
                             xi * processing_spatial_chunk_size,
@@ -735,7 +768,7 @@ def process(
                         band=slice(0, len(S2_bands_to_save))
                         if item["collection"] == "sentinel-2-l2a" else slice(
                             len(S2_bands_to_save), len(total_bands_to_save)),
-                        time=tsi)
+                        time=ts_save_index)
                     ret_config["S2_subtiles"] = obtain_subtiles(
                         target_crs=target_crs,
                         left=ret_config["bound_left"],
