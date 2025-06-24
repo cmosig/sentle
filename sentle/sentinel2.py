@@ -246,29 +246,33 @@ def process_S2_subtile(
 
 
 def process_ptile_S2_dispatcher(
-    target_crs: CRS,
-    target_resolution: float,
-    S2_cloud_classification_device: str,
-    time_composite_freq: str,
-    S2_apply_snow_mask: bool,
-    S2_apply_cloud_mask: bool,
-    S2_bands_to_save,
-    ptile_height,
-    ptile_width,
-    ptile_transform,
-    item_list,
-    ts,
-    bound_left,
-    bound_right,
-    bound_bottom,
-    bound_top,
-    S2_mask_snow: bool,
-    S2_cloud_classification: bool,
-    S2_return_cloud_probabilities: bool,
-    S2_subtiles,
-    cloud_request_queue: mp.Queue,
-    cloud_response_queue: mp.Queue,
+    **kwargs
 ):
+    
+    target_crs: CRS = kwargs.get("target_crs")
+    target_resolution: float = kwargs.get("target_resolution")
+    S2_mask_snow: bool = kwargs.get("S2_mask_snow", False)
+    S2_cloud_classification: bool = kwargs.get("S2_cloud_classification",
+                                               False)
+    S2_cloud_classification_device: str = kwargs.get(
+        "S2_cloud_classification_device", "cpu")
+    S2_return_cloud_probabilities: bool = kwargs.get(
+        "S2_return_cloud_probabilities", False)
+    S2_subtiles = kwargs.get("S2_subtiles")
+    S2_bands_to_save = kwargs.get("S2_bands_to_save", S2_RAW_BANDS)
+    S2_snow_mask_band = kwargs.get("S2_snow_mask_band", S2_snow_mask_band)
+    S2_cloud_mask_band = kwargs.get("S2_cloud_mask_band", S2_cloud_mask_band)
+    time_composite_freq = kwargs.get("time_composite_freq", None)
+    item_list = kwargs.get("item_list")
+    stac_item = kwargs.get("stac_item")
+    intersecting_windows = kwargs.get("intersecting_windows")
+    ptile_transform = kwargs.get("ptile_transform")
+    ptile_width: int = kwargs.get("ptile_width")
+    ptile_height: int = kwargs.get("ptile_height")
+    cloud_request_queue: mp.Queue = kwargs.get("cloud_request_queue")
+    timestamp = kwargs.get("timestamp")
+
+
 
     items = pd.DataFrame()
     items["item"] = item_list

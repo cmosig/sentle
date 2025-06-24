@@ -10,14 +10,25 @@ from .const import *
 from .reproject_util import *
 
 
-def process_ptile_S1(target_crs: CRS, target_resolution: float,
-                     time_composite_freq: str, bound_left, bound_right,
-                     bound_bottom, bound_top, ts, S1_assets, ptile_height,
-                     ptile_width, ptile_transform, item_list):
+def process_ptile_S1(**kwargs):
     """Processes a single sentinel 1 ptile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution. The function
     returns the reprojected ptile.
     """
+    target_crs: CRS = kwargs.get("target_crs")
+    target_resolution: float = kwargs.get("target_resolution")
+    time_composite_freq: str = kwargs.get("time_composite_freq")
+    bound_left = kwargs.get("bound_left")
+    bound_right = kwargs.get("bound_right")
+    bound_bottom = kwargs.get("bound_bottom")
+    bound_top = kwargs.get("bound_top")
+    ts = kwargs.get("ts")
+    S1_assets: list = kwargs.get("S1_assets")
+    ptile_height: int = kwargs.get("ptile_height")
+    ptile_width: int = kwargs.get("ptile_width")
+    ptile_transform: transform.Affine = kwargs.get("ptile_transform")
+    item_list: list = kwargs.get("item_list")
+
 
     # intiate one array representing the entire subtile for that timestamp
     ptile_array = np.full(shape=(len(S1_assets), ptile_height, ptile_width),

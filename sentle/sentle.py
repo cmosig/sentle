@@ -89,6 +89,7 @@ def process_ptile(
     job_id: int,
     sync_file_path: str,
 ):
+
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
     # determine ptile dimensions and transform from bounds
@@ -116,46 +117,52 @@ def process_ptile(
     if len(item_list) == 0:
         # no items found for this ptile, this happens sometimes. planetary problem. dunno why.
         return job_id
+    
+    s1_args = {
+    "bound_left": bound_left,
+    "bound_right": bound_right,
+    "bound_bottom": bound_bottom,
+    "bound_top": bound_top,
+    "target_crs": target_crs,
+    "target_resolution": target_resolution,
+    "time_composite_freq": time_composite_freq,
+    "ts": ts,
+    "S1_assets": S1_assets,
+    "ptile_height": ptile_height,
+    "ptile_width": ptile_width,
+    "ptile_transform": ptile_transform,
+    "item_list": item_list,
+    }
+
+    s2_args = {
+        "bound_left": bound_left,
+        "bound_right": bound_right,
+        "bound_bottom": bound_bottom,
+        "bound_top": bound_top,
+        "target_crs": target_crs,
+        "target_resolution": target_resolution,
+        "time_composite_freq": time_composite_freq,
+        "ts": ts,
+        "S2_assets": S2_bands_to_save,
+        "S2_cloud_classification_device": S2_cloud_classification_device,
+        "S2_apply_snow_mask": S2_apply_snow_mask,
+        "S2_apply_cloud_mask": S2_apply_cloud_mask,
+        "S2_mask_snow": S2_mask_snow,
+        "S2_cloud_classification": S2_cloud_classification,
+        "S2_return_cloud_probabilities": S2_return_cloud_probabilities,
+        "ptile_height": ptile_height,
+        "ptile_width": ptile_width,
+        "ptile_transform": ptile_transform,
+        "item_list": item_list,
+        "S2_subtiles": S2_subtiles,
+        "cloud_request_queue": cloud_request_queue,
+        "cloud_response_queue": cloud_response_queue,
+    }
 
     if collection == "sentinel-1-rtc":
-        ptile_array = process_ptile_S1(bound_left=bound_left,
-                                       bound_bottom=bound_bottom,
-                                       bound_right=bound_right,
-                                       bound_top=bound_top,
-                                       target_crs=target_crs,
-                                       ts=ts,
-                                       ptile_height=ptile_height,
-                                       ptile_width=ptile_width,
-                                       ptile_transform=ptile_transform,
-                                       item_list=item_list,
-                                       target_resolution=target_resolution,
-                                       time_composite_freq=time_composite_freq,
-                                       S1_assets=S1_assets)
+        ptile_array = process_ptile_S1(**s1_args)
     elif collection == "sentinel-2-l2a":
-        ptile_array = process_ptile_S2_dispatcher(
-            bound_left=bound_left,
-            bound_bottom=bound_bottom,
-            bound_right=bound_right,
-            bound_top=bound_top,
-            ts=ts,
-            target_crs=target_crs,
-            ptile_height=ptile_height,
-            ptile_width=ptile_width,
-            ptile_transform=ptile_transform,
-            item_list=item_list,
-            target_resolution=target_resolution,
-            S2_cloud_classification=S2_cloud_classification,
-            S2_cloud_classification_device=S2_cloud_classification_device,
-            S2_mask_snow=S2_mask_snow,
-            S2_return_cloud_probabilities=S2_return_cloud_probabilities,
-            time_composite_freq=time_composite_freq,
-            S2_apply_snow_mask=S2_apply_snow_mask,
-            S2_apply_cloud_mask=S2_apply_cloud_mask,
-            S2_bands_to_save=S2_bands_to_save,
-            S2_subtiles=S2_subtiles,
-            cloud_request_queue=cloud_request_queue,
-            cloud_response_queue=cloud_response_queue,
-        )
+        ptile_array = process_ptile_S2_dispatcher(**s2_args)
 
     else:
         assert False
