@@ -32,10 +32,6 @@ def get_c_factor_value(
         The c-factor array interpolated to the subtile grid, to be multiplied with reflectance bands for NBAR correction.
     """
 
-    # get top-left coordinates of subtile
-    x_coords = np.arange(subtile_bounds_utm[0], subtile_bounds_utm[2], 10)
-    y_coords = np.arange(subtile_bounds_utm[1], subtile_bounds_utm[3], 10)
-
     # get item id from stac item
     item_id = stac_item.id
 
@@ -56,12 +52,17 @@ def get_c_factor_value(
         if len(c_factor_cache) > 1000:
             c_factor_cache.popitem(last=False)
 
+    # get top-left coordinates of subtile
+    x_coords = np.arange(subtile_bounds_utm[0], subtile_bounds_utm[2], 10)
+    y_coords = np.arange(subtile_bounds_utm[1], subtile_bounds_utm[3], 10)
+
+    # get c-factor array for exact subtile bounds
     c = c.interp(
         y=y_coords,
         x=x_coords,
         method="linear",
         kwargs={"fill_value": "extrapolate"},
-    )  # Implement the nbar_sentle function here
+    )
 
     # convert output to numpy array
     c = c.values
