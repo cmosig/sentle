@@ -48,7 +48,7 @@ def get_c_factor_value(
                                                  f"EPSG:{s2_crs.to_epsg()}")
         c_factor_cache[item_id] = c
 
-        # if dict size > 1000 remove random other item
+        # if dict size > 1000 remove oldest item
         if len(c_factor_cache) > 1000:
             c_factor_cache.popitem(last=False)
 
