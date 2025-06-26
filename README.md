@@ -62,6 +62,7 @@ sentle.process(
     S1_assets=["vh_asc", "vh_desc", "vv_asc", "vv_desc"],
     S2_apply_snow_mask=True,
     S2_apply_cloud_mask=True,
+    S2_nbar=True,
     time_composite_freq="7d",
     num_workers=10,
 )
@@ -122,6 +123,7 @@ The package contains only one main function for retrieving and processing Sentin
 | `S2_cloud_classification` | `bool` | `False` | Whether to create cloud classification layer, where `0=clear sky`, `2=thick cloud`, `3=thin cloud`, `4=shadow`. |
 | `S2_cloud_classification_device` | `str` | `"cpu"` | On which device to run cloud classification. Either `"cpu"` or `"cuda"`. |
 | `S2_return_cloud_probabilities` | `bool` | `False` | Whether to return raw cloud probabilities which were used to determine the cloud classes. |
+| `S2_nbar` | `bool` | `False` | Whether to apply Nadir BRDF (Bidirectional Reflectance Distribution Function) correction to Sentinel-2 surface reflectance using the [sen2nbar](https://github.com/cosminpopescu/sen2nbar) package. This correction harmonizes reflectance values as if observed from nadir, reducing angular effects and improving consistency for time series analysis. |
 | `num_workers` | `int` | `1` | Number of cores to scale computation across. Plan 2GiB of RAM per worker. -1 uses all available cores. |
 | `time_composite_freq` | `str` | `None` | Rounding interval across which data is averaged. |
 | `S2_apply_snow_mask` | `bool` | `False` | Whether to replace snow with NaN. |

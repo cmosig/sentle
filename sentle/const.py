@@ -18,6 +18,10 @@ S2_RAW_BAND_RESOLUTION = {
     'B11': 20,
     'B12': 20
 }
+S2_NBAR_BANDS = [
+    'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B11', 'B12'
+]
+S2_NBAR_INDICES_RAW_BANDS = [S2_RAW_BANDS.index(band) for band in S2_NBAR_BANDS]
 
 # zarr attrs that are necessary for xarray to be able to read the data in the end
 ZARR_BAND_ATTRS = {'_ARRAY_DIMENSIONS': ['band']}
