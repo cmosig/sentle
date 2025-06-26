@@ -1,0 +1,50 @@
+from collections import OrderedDict
+
+import numpy as np
+import sen2nbar.c_factor
+
+# cheap least recently used cache
+c_factor_cache = OrderedDict()
+
+
+def get_c_factor_value(
+    stac_item,
+    s2_crs,
+    subtile_bounds_utm,
+):
+
+    # get top-left coordinates of subtile
+    x_coords = np.arange(subtile_bounds_utm[0], subtile_bounds_utm[2], 10)
+    y_coords = np.arange(subtile_bounds_utm[1], subtile_bounds_utm[3], 10)
+
+    # get item id from stac item
+    item_id = stac_item.id
+
+    # this part takes 99% of the time of this function which its why its cached
+    if item_id in c_factor_cache:
+        c = c_factor_cache[item_id]
+
+        # move to end of cache so that wont be removed
+        c_factor_cache.move_to_end(item_id)
+    else:
+        assert s2_crs is not None, "s2_crs is None"
+
+        c = sen2nbar.c_factor.c_factor_from_item(stac_item,
+                                                 f"EPSG:{s2_crs.to_epsg()}")
+        c_factor_cache[item_id] = c
+
+        # if dict size > 1000 remove random other item
+        if len(c_factor_cache) > 1000:
+            c_factor_cache.popitem(last=False)
+
+    c = c.interp(
+        y=y_coords,
+        x=x_coords,
+        method="linear",
+        kwargs={"fill_value": "extrapolate"},
+    )  # Implement the nbar_sentle function here
+
+    # convert output to numpy array
+    c = c.values
+
+    return c
