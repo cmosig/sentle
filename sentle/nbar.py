@@ -54,7 +54,7 @@ def get_c_factor_value(
 
     # get top-left coordinates of subtile
     x_coords = np.arange(subtile_bounds_utm[0], subtile_bounds_utm[2], 10)
-    y_coords = np.arange(subtile_bounds_utm[1], subtile_bounds_utm[3], 10)
+    y_coords = np.arange(subtile_bounds_utm[3], subtile_bounds_utm[1], -10)
 
     # get c-factor array for exact subtile bounds
     c = c.interp(
