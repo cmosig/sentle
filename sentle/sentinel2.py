@@ -16,6 +16,7 @@ from .cloud_mask import (S2_cloud_mask_band, S2_cloud_prob_bands,
 from .const import S2_RAW_BAND_RESOLUTION, S2_RAW_BANDS, S2_subtile_size
 from .reproject_util import (bounds_from_transform_height_width_res,
                              calculate_aligned_transform, recrop_write_window)
+from .nbar import get_c_factor_value
 from .snow_mask import S2_snow_mask_band, compute_potential_snow_layer
 
 
@@ -104,6 +105,7 @@ def process_S2_subtile(
     S2_mask_snow: bool,
     S2_cloud_classification: bool,
     S2_cloud_classification_device: str,
+    S2_nbar: bool,
     cloud_request_queue: mp.Queue,
     cloud_response_queue: mp.Queue,
 ):
@@ -192,6 +194,13 @@ def process_S2_subtile(
         band_names += S2_cloud_prob_bands
         subtile_array = np.concatenate([subtile_array, result_probs])
 
+    if S2_nbar:
+        # needs to happen at a per-item level after after clouds were detected
+        c = get_c_factor_value(stac_item, s2_crs, subtile_bounds_utm)
+
+        # apply c-factor to array
+        subtile_array[S2_NBAR_INDICES_RAW_BANDS] *= c
+
     # 3 reproject to target_crs for each band
     # determine transform --> round to target resolution so that reprojected
     # subtiles align across subtiles
@@ -270,6 +279,7 @@ def process_ptile_S2_dispatcher(
     S2_mask_snow: bool,
     S2_cloud_classification: bool,
     S2_return_cloud_probabilities: bool,
+    S2_nbar: bool,
     S2_subtiles,
     cloud_request_queue: mp.Queue,
     cloud_response_queue: mp.Queue,
@@ -308,6 +318,7 @@ def process_ptile_S2_dispatcher(
             S2_cloud_classification_device=S2_cloud_classification_device,
             S2_mask_snow=S2_mask_snow,
             S2_return_cloud_probabilities=S2_return_cloud_probabilities,
+            S2_nbar=S2_nbar,
             subtiles=S2_subtiles,
             ptile_transform=ptile_transform,
             ptile_width=ptile_width,
@@ -396,6 +407,7 @@ def process_ptile_S2(
     S2_mask_snow: bool,
     S2_cloud_classification: bool,
     S2_return_cloud_probabilities: bool,
+    S2_nbar: bool,
 ):
     # cloud classification layer and snow mask is added later
     num_bands = len(S2_RAW_BANDS)
@@ -440,6 +452,7 @@ def process_ptile_S2(
             S2_mask_snow=S2_mask_snow,
             S2_cloud_classification=S2_cloud_classification,
             S2_cloud_classification_device=S2_cloud_classification_device,
+            S2_nbar=S2_nbar,
             cloud_response_queue=cloud_response_queue,
             cloud_request_queue=cloud_request_queue)
 
@@ -466,6 +479,8 @@ def process_ptile_S2(
     with warnings.catch_warnings():
         # filter out divide by zero warning, this is expected here
         warnings.simplefilter("ignore")
+        # TODO I feel like this is not necessary becauset there should not be
+        # more then one subtile in one area
         subtile_array /= subtile_array_count
 
     # compute cloud classification layer

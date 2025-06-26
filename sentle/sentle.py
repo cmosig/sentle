@@ -86,6 +86,7 @@ def process_ptile(
     S2_apply_cloud_mask: bool,
     S2_mask_snow: bool,
     S2_cloud_classification: bool,
+    S2_nbar: bool,
     S2_return_cloud_probabilities: bool,
     zarr_save_slice: dict,
     S2_subtiles,
@@ -153,6 +154,7 @@ def process_ptile(
             S2_cloud_classification_device=S2_cloud_classification_device,
             S2_mask_snow=S2_mask_snow,
             S2_return_cloud_probabilities=S2_return_cloud_probabilities,
+            S2_nbar=S2_nbar,
             time_composite_freq=time_composite_freq,
             S2_apply_snow_mask=S2_apply_snow_mask,
             S2_apply_cloud_mask=S2_apply_cloud_mask,
@@ -190,6 +192,7 @@ def validate_user_input(target_crs: CRS | str,
                         bound_top: float,
                         zarr_store_chunk_size: dict,
                         datetime: DatetimeLike,
+                        S2_nbar: bool,
                         processing_spatial_chunk_size: int = 4000,
                         S1_assets: list[str] = S1_ASSETS,
                         S2_mask_snow: bool = False,
@@ -199,7 +202,8 @@ def validate_user_input(target_crs: CRS | str,
                         num_workers: int = 1,
                         time_composite_freq: str = None,
                         S2_apply_snow_mask: bool = False,
-                        S2_apply_cloud_mask: bool = False):
+                        S2_apply_cloud_mask: bool = False,
+):
 
     # validate type zarr store
     if not isinstance(zarr_store, (str, zarr.storage.Store)):
@@ -321,6 +325,10 @@ def validate_user_input(target_crs: CRS | str,
     if not all(key in zarr_store_chunk_size for key in ["time", "y", "x"]):
         raise ValueError(
             "zarr_store_chunk_size must contain the keys 'time', 'y', and 'x'")
+
+    # validate that S2_nbar is a boolean
+    if not isinstance(S2_nbar, bool):
+        raise ValueError("S2_nbar must be a boolean")
 
 
 def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
@@ -550,6 +558,7 @@ def process(
     time_composite_freq: str = None,
     S2_apply_snow_mask: bool = False,
     S2_apply_cloud_mask: bool = False,
+    S2_nbar: bool = False,
     overwrite: bool = False,
     zarr_store_chunk_size: dict = {
         "time": 50,
@@ -557,6 +566,7 @@ def process(
         "y": 100,
     },
     coord_save_mode: str = "top-left",
+
 ):
     """
     Parameters
@@ -592,6 +602,8 @@ def process(
         Whether to replace snow with NaN.
     S2_apply_cloud_mask: bool, default=False
         Whether to replace anything that is not clear sky with NaN.
+    S2_nbar: bool, default=False
+        Whether to apply Nadir BRFD correction with sen2nbar package.
     zarr_store: str | zarr.storage.Store
        Path of where to create the zarr storage.
     processing_spatial_chunk_size: int, default=4000
@@ -631,6 +643,7 @@ def process(
         S2_apply_snow_mask=S2_apply_snow_mask,
         S2_apply_cloud_mask=S2_apply_cloud_mask,
         zarr_store_chunk_size=zarr_store_chunk_size,
+        S2_nbar=S2_nbar,
     )
 
     # TODO support to only download subset of bands (mutually exclusive with
@@ -712,6 +725,7 @@ def process(
         "S1_assets": S1_assets,
         "cloud_request_queue": cloud_request_queue,
         "sync_file_path": sync_file_path,
+        "S2_nbar": S2_nbar,
     }
 
     processing_spatial_chunk_size_in_CRS_unit = processing_spatial_chunk_size * target_resolution
