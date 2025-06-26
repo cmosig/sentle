@@ -1,17 +1,36 @@
 from collections import OrderedDict
 
 import numpy as np
+import rasterio.crs
 import sen2nbar.c_factor
+from pystac import Item
 
 # cheap least recently used cache
 c_factor_cache = OrderedDict()
 
 
 def get_c_factor_value(
-    stac_item,
-    s2_crs,
-    subtile_bounds_utm,
-):
+    stac_item: Item,
+    s2_crs: rasterio.crs.CRS,
+    subtile_bounds_utm: tuple[float, float, float, float],
+) -> np.ndarray:
+    """
+    Compute the c-factor (nadir BRDF correction factor) for a Sentinel-2 STAC item over a given subtile.
+
+    Parameters
+    ----------
+    stac_item : pystac.Item
+        The STAC item representing a Sentinel-2 scene. Must have an 'id' attribute and be compatible with sen2nbar.
+    s2_crs : rasterio.crs.CRS
+        The CRS of the Sentinel-2 data as a rasterio CRS object.
+    subtile_bounds_utm : tuple[float, float, float, float]
+        The bounds of the subtile in UTM coordinates (left, bottom, right, top).
+
+    Returns
+    -------
+    np.ndarray
+        The c-factor array interpolated to the subtile grid, to be multiplied with reflectance bands for NBAR correction.
+    """
 
     # get top-left coordinates of subtile
     x_coords = np.arange(subtile_bounds_utm[0], subtile_bounds_utm[2], 10)
