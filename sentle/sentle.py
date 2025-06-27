@@ -527,10 +527,12 @@ def retrieve_timestamps(time_composite_freq: str, datetime: DatetimeLike,
         else:
             start_str = end_str = parsed_datetime
 
-        start = pd.to_datetime(start_str)
-        end = pd.to_datetime(end_str)
+        # rounding start for backwards compatibility and so that every
+        # timeseries is aligned regardless of the requested start/end
+        start = pd.to_datetime(start_str).round(time_composite_freq)
+        end = max(pd.to_datetime(end_str), start)
 
-        # TODO needs to rounded to be backward compatible with old code
+        # get all timestamps with freq
         timestamps = pd.date_range(start, end, freq=time_composite_freq)[::-1]
 
         return [{
