@@ -1,5 +1,6 @@
 import itertools
 import multiprocessing as mp
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -12,9 +13,10 @@ from shapely.geometry import Polygon, box
 
 from .cloud_mask import (S2_cloud_mask_band, S2_cloud_prob_bands,
                          worker_get_cloud_mask)
-from .const import *
+from .const import S2_RAW_BAND_RESOLUTION, S2_RAW_BANDS, S2_subtile_size
+from .reproject_util import (bounds_from_transform_height_width_res,
+                             calculate_aligned_transform, recrop_write_window)
 from .nbar import get_c_factor_value
-from .reproject_util import *
 from .snow_mask import S2_snow_mask_band, compute_potential_snow_layer
 
 
@@ -44,7 +46,10 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
     s2grid = s2grid[s2grid["geometry"].intersects(transformed_bounds)].copy()
 
     general_subtile_windows = [
-        windows.Window(col_off, row_off, S2_subtile_size, S2_subtile_size)
+        windows.Window(col_off=col_off,
+                       row_off=row_off,
+                       width=S2_subtile_size,
+                       height=S2_subtile_size)
         for col_off, row_off in itertools.product(
             np.arange(0, 10980, S2_subtile_size),
             np.arange(0, 10980, S2_subtile_size))
@@ -453,7 +458,7 @@ def process_ptile_S2(
 
         # this happens when the href is not available
         # -> planetary computer issue
-        if subtile_array_ret is None:
+        if subtile_array_ret is None or write_win is None or subtile_array_bands is None:
             continue
 
         # also replace nan with 0 so that the mean computation works

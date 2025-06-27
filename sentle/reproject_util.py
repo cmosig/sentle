@@ -48,6 +48,9 @@ def calculate_aligned_transform(src_crs, dst_crs, height, width, left, bottom,
         tf.i,
     )
 
+    if repr_width is None or repr_height is None:
+        raise ValueError("calculate_default_transform returned None for width or height")
+
     # include one more pixel because rounding down
     repr_width += 1
     repr_height += 1

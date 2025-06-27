@@ -1,3 +1,5 @@
 sentle/data
 __pycache__
 *.egg-info
+.zed/settings.json
+pyrightconfig.json

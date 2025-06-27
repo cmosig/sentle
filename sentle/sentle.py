@@ -13,22 +13,27 @@ import numpy as np
 import pandas as pd
 import pkg_resources
 import zarr
+import zarr.storage
 from joblib import Parallel, delayed, parallel_backend
 from numcodecs import Blosc
 from pystac_client.item_search import DatetimeLike
-from rasterio import transform, warp, windows
+from rasterio import warp
 from rasterio.crs import CRS
 from tqdm.auto import tqdm
 from zarr.sync import ProcessSynchronizer
 
 from .cloud_mask import (S2_cloud_mask_band, S2_cloud_prob_bands,
                          init_cloud_prediction_service)
-from .const import *
-from .reproject_util import *
+from .snow_mask import S2_snow_mask_band
+from .const import (S1_ASSETS, S2_RAW_BANDS, ZARR_BAND_ATTRS, ZARR_DATA_ATTRS,
+                    ZARR_TIME_ATTRS, ZARR_X_ATTRS, ZARR_Y_ATTRS)
+from .reproject_util import (check_and_round_bounds,
+                             height_width_from_bounds_res,
+                             transform_height_width_from_bounds_res)
 from .sentinel1 import process_ptile_S1
 from .sentinel2 import obtain_subtiles, process_ptile_S2_dispatcher
-from .stac import *
-from .utils import *
+from .stac import open_catalog
+from .utils import GLOBAL_QUEUE_MANAGER, GLOBAL_QUEUES, tqdm_joblib
 
 
 def catalog_search_ptile(collection: str, ts, time_composite_freq, bound_left,
@@ -209,9 +214,13 @@ def validate_user_input(target_crs: CRS | str,
         try:
             target_crs = CRS.from_user_input(target_crs)
         except Exception as e:
-            raise ValueError(f"target_crs string could not be interpreted by rasterio.crs.CRS.from_user_input(): {e}")
+            raise ValueError(
+                f"target_crs string could not be interpreted by rasterio.crs.CRS.from_user_input(): {e}"
+            )
     if not isinstance(target_crs, CRS):
-        raise ValueError("target_crs must be an instance of rasterio.crs.CRS or a string interpretable by CRS.from_user_input()")
+        raise ValueError(
+            "target_crs must be an instance of rasterio.crs.CRS or a string interpretable by CRS.from_user_input()"
+        )
 
     # check if the target resolution is valid
     if not isinstance(target_resolution, (int, float)):
@@ -322,25 +331,22 @@ def validate_user_input(target_crs: CRS | str,
         raise ValueError("S2_nbar must be a boolean")
 
 
-def setup_zarr_storage(
-    zarr_store: str | zarr.storage.Store,
-    df: pd.DataFrame,
-    height: int,
-    width: int,
-    bound_left: float,
-    bound_right: float,
-    bound_top: float,
-    bound_bottom: float,
-    target_resolution: float,
-    processing_spatial_chunk_size: int,
-    zarr_store_chunk_size: dict,
-    S2_bands_to_save: list[str],
-    total_bands_to_save: list[str],
-    target_crs: CRS,
-    overwrite: bool = False,
-    coord_save_mode: str = "top-left"
-) -> None:
-
+def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
+                       timestamp_list: list[str],
+                       height: int,
+                       width: int,
+                       bound_left: float,
+                       bound_right: float,
+                       bound_top: float,
+                       bound_bottom: float,
+                       target_resolution: float,
+                       processing_spatial_chunk_size: int,
+                       zarr_store_chunk_size: dict,
+                       S2_bands_to_save: list[str],
+                       total_bands_to_save: list[str],
+                       target_crs: CRS,
+                       overwrite: bool = False,
+                       coord_save_mode: str = "top-left") -> None | str:
     """
     Parameters
     ----------
@@ -373,16 +379,20 @@ def setup_zarr_storage(
 
     # create array for where to store the processed sentinel data
     # chunk size is the number of S2 bands, because we parallelize S1/S2
-    data = zarr.create(
-        shape=(df["ts"].count(), len(total_bands_to_save), height, width),
-        chunks=(zarr_store_chunk_size["time"], len(S2_bands_to_save),
-                zarr_store_chunk_size["y"], zarr_store_chunk_size["x"]),
-        dtype=np.float32,
-        fill_value=float("nan"),
-        store=store,
-        path="/sentle",
-        write_empty_chunks=False,
-        compressor=Blosc(cname="lz4"))
+    unique_timestamps = sorted(set(item["ts"] for item in timestamp_list),
+                               reverse=True)
+    data = zarr.create(shape=(len(unique_timestamps), len(total_bands_to_save),
+                              height, width),
+                       chunks=(zarr_store_chunk_size["time"],
+                               len(S2_bands_to_save),
+                               zarr_store_chunk_size["y"],
+                               zarr_store_chunk_size["x"]),
+                       dtype=np.float32,
+                       fill_value=float("nan"),
+                       store=store,
+                       path="/sentle",
+                       write_empty_chunks=False,
+                       compressor=Blosc(cname="lz4"))
     data.attrs.update(ZARR_DATA_ATTRS)
 
     # ------
@@ -404,9 +414,11 @@ def setup_zarr_storage(
                     path="/x",
                     overwrite=overwrite)
     if coord_save_mode == "center":
-        x[:] = (np.arange(bound_left, bound_right, target_resolution) + target_resolution / 2).astype(np.float32)
+        x[:] = (np.arange(bound_left, bound_right, target_resolution) +
+                target_resolution / 2).astype(np.float32)
     else:
-        x[:] = np.arange(bound_left, bound_right, target_resolution).astype(np.float32)
+        x[:] = np.arange(bound_left, bound_right,
+                         target_resolution).astype(np.float32)
     x.attrs.update(ZARR_X_ATTRS)
     x.attrs["coord_save_mode"] = coord_save_mode
 
@@ -417,28 +429,33 @@ def setup_zarr_storage(
                     path="/y",
                     overwrite=overwrite)
     if coord_save_mode == "center":
-        y[:] = (np.arange(bound_top, bound_bottom, -target_resolution) - target_resolution / 2).astype(np.float32)
+        y[:] = (np.arange(bound_top, bound_bottom, -target_resolution) -
+                target_resolution / 2).astype(np.float32)
     else:
-        y[:] = np.arange(bound_top, bound_bottom, -target_resolution).astype(np.float32)
+        y[:] = np.arange(bound_top, bound_bottom,
+                         -target_resolution).astype(np.float32)
     y.attrs.update(ZARR_Y_ATTRS)
     y.attrs["coord_save_mode"] = coord_save_mode
     if coord_save_mode == "center":
-        y[:] = (np.arange(bound_top, bound_bottom, -target_resolution) - target_resolution / 2).astype(np.float32)
+        y[:] = (np.arange(bound_top, bound_bottom, -target_resolution) -
+                target_resolution / 2).astype(np.float32)
     else:
-        y[:] = np.arange(bound_top, bound_bottom, -target_resolution).astype(np.float32)
+        y[:] = np.arange(bound_top, bound_bottom,
+                         -target_resolution).astype(np.float32)
     y.attrs.update(ZARR_Y_ATTRS)
     y.attrs["coord_save_mode"] = coord_save_mode
 
     # time dimension
-    time = zarr.create(shape=(df["ts"].count()),
+    time = zarr.create(shape=(len(unique_timestamps)),
                        dtype="int64",
                        store=store,
                        path="/time",
                        fill_value=None,
                        overwrite=overwrite)
 
-    time[:] = (df["ts"].drop_duplicates().dt.tz_localize(tz=None) -
-               pd.Timestamp(0, tz=None)).dt.days.tolist()
+    for i, ts in enumerate(unique_timestamps):
+        time[i] = (ts.tz_localize(tz=None) -
+                   pd.Timestamp(0, tz=None)).total_seconds()
     time.attrs.update(ZARR_TIME_ATTRS)
 
     # consolidating metadata
@@ -448,6 +465,80 @@ def setup_zarr_storage(
     store.close()
 
     return sync_file_path
+
+
+def retrieve_timestamps(time_composite_freq: str, datetime: DatetimeLike,
+                        bound_left: float, bound_bottom: float,
+                        bound_right: float, bound_top: float, target_crs: CRS,
+                        collections: list[str]) -> list[dict]:
+
+    if time_composite_freq is None:
+        # get all items within date range and area
+
+        # sign into planetary computer
+        catalog = open_catalog()
+
+        search = catalog.search(collections=collections,
+                                datetime=datetime,
+                                bbox=warp.transform_bounds(src_crs=target_crs,
+                                                           dst_crs="EPSG:4326",
+                                                           left=bound_left,
+                                                           bottom=bound_bottom,
+                                                           right=bound_right,
+                                                           top=bound_top))
+
+        # sort timesteps and filter duplicates -> multiple items can have the
+        # exact same timestamp
+        df = pd.DataFrame()
+        items = list(search.item_collection())
+        if len(items) == 0:
+            print("No items found for specified time range and area.")
+            return
+
+        df["ts_raw"] = [i.datetime for i in items]
+        df["collection"] = [i.collection_id for i in items]
+
+        # remove duplicates for timeaxis
+        df = df.drop_duplicates(["ts_raw", "collection"])
+
+        # make sure ts is sorted in the correct order
+        df = df.sort_values("ts_raw", ascending=False)
+
+        return [
+            dict(collection=row["collection"], ts=row["ts_raw"])
+            for _, row in df.iterrows()
+        ]
+
+    else:
+        # Use pystac_client.ItemSearch to parse/expand the datetime
+        from pystac_client import ItemSearch
+
+        # Create a minimal ItemSearch instance to use its datetime parsing logic
+        bs = ItemSearch(
+            url="http://dummy",
+            datetime=datetime,
+        )
+        parsed_datetime = bs.get_parameters()["datetime"]
+
+        # Now parsed_datetime is a string like "YYYY-MM-DDTHH:MM:SSZ/YYYY-MM-DDTHH:MM:SSZ"
+        # Parse the start and end from this string
+        if "/" in parsed_datetime:
+            start_str, end_str = parsed_datetime.split("/")
+        else:
+            start_str = end_str = parsed_datetime
+
+        # rounding start for backwards compatibility and so that every
+        # timeseries is aligned regardless of the requested start/end
+        start = pd.to_datetime(start_str).round(time_composite_freq)
+        end = max(pd.to_datetime(end_str), start)
+
+        # get all timestamps with freq
+        timestamps = pd.date_range(start, end, freq=time_composite_freq)[::-1]
+
+        return [{
+            "collection": collection,
+            "ts": ts
+        } for ts in timestamps for collection in collections]
 
 
 def process(
@@ -576,51 +667,21 @@ def process(
     if S1_assets is not None:
         total_bands_to_save += S1_assets
 
-    # sign into planetary computer
-    catalog = open_catalog()
-
-    # get all items within date range and area
-    collections = ["sentinel-2-l2a"]
-    if S1_assets is not None:
-        collections.append("sentinel-1-rtc")
-    search = catalog.search(collections=collections,
-                            datetime=datetime,
-                            bbox=warp.transform_bounds(src_crs=target_crs,
-                                                       dst_crs="EPSG:4326",
-                                                       left=bound_left,
-                                                       bottom=bound_bottom,
-                                                       right=bound_right,
-                                                       top=bound_top))
-
-    # sort timesteps and filter duplicates -> multiple items can have the
-    # exact same timestamp
-    df = pd.DataFrame()
-    items = list(search.item_collection())
-    if len(items) == 0:
-        print("No items found for specified time range and area.")
-        return
-
-    df["ts_raw"] = [i.datetime for i in items]
-    df["collection"] = [i.collection_id for i in items]
-
-    if time_composite_freq is not None:
-        df["ts"] = df["ts_raw"].dt.round(freq=time_composite_freq)
-    else:
-        df["ts"] = df["ts_raw"]
-
-    # remove duplicates for timeaxis
-    df = df.drop_duplicates(["ts", "collection"])
-
-    # get only one row for each final timestamp
-    df = df.groupby("ts")[["collection"]].apply(
-        lambda x: x["collection"].tolist()).rename("collection").reset_index()
-
-    # make sure ts is sorted in the correct order
-    df = df.sort_values("ts", ascending=False)
+    timestamp_list = retrieve_timestamps(
+        time_composite_freq=time_composite_freq,
+        bound_left=bound_left,
+        bound_bottom=bound_bottom,
+        bound_right=bound_right,
+        bound_top=bound_top,
+        target_crs=target_crs,
+        datetime=datetime,
+        collections=["sentinel-2-l2a"]
+        if S1_assets is None else ["sentinel-2-l2a", "sentinel-1-rtc"])
 
     # compute bounds, with and height  for the entire dataset
     bound_left, bound_bottom, bound_right, bound_top = check_and_round_bounds(
         bound_left, bound_bottom, bound_right, bound_top, target_resolution)
+
     height, width = height_width_from_bounds_res(bound_left, bound_bottom,
                                                  bound_right, bound_top,
                                                  target_resolution)
@@ -628,7 +689,7 @@ def process(
     # setup zarr storage
     sync_file_path = setup_zarr_storage(
         zarr_store=zarr_store,
-        df=df,
+        timestamp_list=timestamp_list,
         height=height,
         width=width,
         bound_left=bound_left,
@@ -689,64 +750,67 @@ def process(
             for yi, y_min in enumerate(
                     range(bound_bottom, bound_top,
                           processing_spatial_chunk_size_in_CRS_unit)):
-                for tsi, (_, ser) in enumerate(df[["ts",
-                                                   "collection"]].iterrows()):
-                    for collection in ser["collection"]:
-                        ret_config = dict(config)
-                        ret_config["bound_left"] = x_min
-                        ret_config["bound_bottom"] = y_min
-                        # cap at the top
-                        ret_config["bound_right"] = min(
-                            x_min + processing_spatial_chunk_size_in_CRS_unit,
-                            bound_right)
-                        ret_config["bound_top"] = min(
-                            y_min + processing_spatial_chunk_size_in_CRS_unit,
-                            bound_top)
-                        ret_config["ts"] = ser["ts"]
-                        ret_config["collection"] = collection
-                        ret_config["zarr_save_slice"] = dict(
-                            x=slice(
-                                xi * processing_spatial_chunk_size,
-                                min((xi + 1) * processing_spatial_chunk_size,
-                                    width)),
-                            y=slice(
-                                max(
-                                    0, height -
-                                    (yi + 1) * processing_spatial_chunk_size),
-                                height - yi * processing_spatial_chunk_size),
-                            band=slice(0, len(S2_bands_to_save))
-                            if collection == "sentinel-2-l2a" else slice(
-                                len(S2_bands_to_save),
-                                len(total_bands_to_save)),
-                            time=tsi)
-                        ret_config["S2_subtiles"] = obtain_subtiles(
-                            target_crs=target_crs,
-                            left=ret_config["bound_left"],
-                            bottom=ret_config["bound_bottom"],
-                            right=ret_config["bound_right"],
-                            top=ret_config["bound_top"],
-                            s2grid=s2grid,
-                        ) if collection == "sentinel-2-l2a" else None
-                        if S2_cloud_classification and collection == "sentinel-2-l2a":
-                            GLOBAL_QUEUES[job_id] = GLOBAL_QUEUE_MANAGER.Queue(
-                                maxsize=1)
-                            ret_config["cloud_response_queue"] = GLOBAL_QUEUES[
-                                job_id]
-                            ret_config["job_id"] = job_id
-                            job_id += 1
-                        else:
-                            ret_config["cloud_response_queue"] = None
-                            ret_config["job_id"] = None
-                        yield ret_config
+                last_ts = timestamp_list[0]["ts"]
+                ts_save_index = 0
+                for item in timestamp_list:
 
-    num_chunks = df["collection"].explode().count() * (ceil(
-        width / processing_spatial_chunk_size)) * (ceil(
-            height / processing_spatial_chunk_size))
+                    ret_config = dict(config)
+                    ret_config["bound_left"] = x_min
+                    ret_config["bound_bottom"] = y_min
+                    # cap at the top
+                    ret_config["bound_right"] = min(
+                        x_min + processing_spatial_chunk_size_in_CRS_unit,
+                        bound_right)
+                    ret_config["bound_top"] = min(
+                        y_min + processing_spatial_chunk_size_in_CRS_unit,
+                        bound_top)
+                    ret_config["ts"] = item["ts"]
+                    ret_config["collection"] = item["collection"]
+
+                    if item["ts"] != last_ts:
+                        last_ts = item["ts"]
+                        ts_save_index += 1
+
+                    ret_config["zarr_save_slice"] = dict(
+                        x=slice(
+                            xi * processing_spatial_chunk_size,
+                            min((xi + 1) * processing_spatial_chunk_size,
+                                width)),
+                        y=slice(
+                            max(
+                                0, height -
+                                (yi + 1) * processing_spatial_chunk_size),
+                            height - yi * processing_spatial_chunk_size),
+                        band=slice(0, len(S2_bands_to_save))
+                        if item["collection"] == "sentinel-2-l2a" else slice(
+                            len(S2_bands_to_save), len(total_bands_to_save)),
+                        time=ts_save_index)
+                    ret_config["S2_subtiles"] = obtain_subtiles(
+                        target_crs=target_crs,
+                        left=ret_config["bound_left"],
+                        bottom=ret_config["bound_bottom"],
+                        right=ret_config["bound_right"],
+                        top=ret_config["bound_top"],
+                        s2grid=s2grid,
+                    ) if item["collection"] == "sentinel-2-l2a" else None
+                    if S2_cloud_classification and item[
+                            "collection"] == "sentinel-2-l2a":
+                        GLOBAL_QUEUES[job_id] = GLOBAL_QUEUE_MANAGER.Queue(
+                            maxsize=1)
+                        ret_config["cloud_response_queue"] = GLOBAL_QUEUES[
+                            job_id]
+                        ret_config["job_id"] = job_id
+                        job_id += 1
+                    else:
+                        ret_config["cloud_response_queue"] = None
+                        ret_config["job_id"] = None
+                    yield ret_config
+
     with tqdm_joblib(
             tqdm(desc="processing",
                  unit="ptiles",
                  dynamic_ncols=True,
-                 total=num_chunks)) as progress_bar:
+                 total=len(timestamp_list))) as progress_bar:
 
         with parallel_backend("cleanupqueue"):
             # backend can be loky or threading (or maybe something else)
