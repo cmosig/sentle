@@ -380,7 +380,7 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
     # create array for where to store the processed sentinel data
     # chunk size is the number of S2 bands, because we parallelize S1/S2
     unique_timestamps = sorted(set(item["ts"] for item in timestamp_list),
-                               reverse=False)
+                               reverse=True)
     data = zarr.create(shape=(len(unique_timestamps), len(total_bands_to_save),
                               height, width),
                        chunks=(zarr_store_chunk_size["time"],
