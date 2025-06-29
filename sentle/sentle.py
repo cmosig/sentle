@@ -183,26 +183,27 @@ def process_ptile(
     return job_id
 
 
-def validate_user_input(target_crs: CRS | str,
-                        target_resolution: float,
-                        zarr_store: str | zarr.storage.Store,
-                        bound_left: float,
-                        bound_bottom: float,
-                        bound_right: float,
-                        bound_top: float,
-                        zarr_store_chunk_size: dict,
-                        datetime: DatetimeLike,
-                        S2_nbar: bool,
-                        processing_spatial_chunk_size: int = 4000,
-                        S1_assets: list[str] = S1_ASSETS,
-                        S2_mask_snow: bool = False,
-                        S2_cloud_classification: bool = False,
-                        S2_cloud_classification_device="cpu",
-                        S2_return_cloud_probabilities: bool = False,
-                        num_workers: int = 1,
-                        time_composite_freq: str = None,
-                        S2_apply_snow_mask: bool = False,
-                        S2_apply_cloud_mask: bool = False,
+def validate_user_input(
+    target_crs: CRS | str,
+    target_resolution: float,
+    zarr_store: str | zarr.storage.Store,
+    bound_left: float,
+    bound_bottom: float,
+    bound_right: float,
+    bound_top: float,
+    zarr_store_chunk_size: dict,
+    datetime: DatetimeLike,
+    S2_nbar: bool,
+    processing_spatial_chunk_size: int = 4000,
+    S1_assets: list[str] = S1_ASSETS,
+    S2_mask_snow: bool = False,
+    S2_cloud_classification: bool = False,
+    S2_cloud_classification_device="cpu",
+    S2_return_cloud_probabilities: bool = False,
+    num_workers: int = 1,
+    time_composite_freq: str = None,
+    S2_apply_snow_mask: bool = False,
+    S2_apply_cloud_mask: bool = False,
 ):
 
     # validate type zarr store
@@ -210,16 +211,11 @@ def validate_user_input(target_crs: CRS | str,
         raise ValueError("zarr_store must be a string or zarr.storage.Store")
 
     # check if the target CRS is valid, allow string and convert if needed
-    if isinstance(target_crs, str):
-        try:
-            target_crs = CRS.from_user_input(target_crs)
-        except Exception as e:
-            raise ValueError(
-                f"target_crs string could not be interpreted by rasterio.crs.CRS.from_user_input(): {e}"
-            )
-    if not isinstance(target_crs, CRS):
+    try:
+        target_crs = CRS.from_user_input(target_crs)
+    except Exception as e:
         raise ValueError(
-            "target_crs must be an instance of rasterio.crs.CRS or a string interpretable by CRS.from_user_input()"
+            f"target_crs string must by interpretable with rasterio.crs.CRS.from_user_input(), for example 'EPSG:3031': {e}"
         )
 
     # check if the target resolution is valid
@@ -568,7 +564,6 @@ def process(
         "y": 100,
     },
     coord_save_mode: str = "top-left",
-
 ):
     """
     Parameters
