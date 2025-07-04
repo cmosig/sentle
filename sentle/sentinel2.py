@@ -13,7 +13,7 @@ from shapely.geometry import Polygon, box
 
 from .cloud_mask import (S2_cloud_mask_band, S2_cloud_prob_bands,
                          worker_get_cloud_mask)
-from .const import S2_RAW_BAND_RESOLUTION, S2_RAW_BANDS, S2_subtile_size
+from .const import S2_RAW_BAND_RESOLUTION, S2_RAW_BANDS, S2_subtile_size, S2_NBAR_INDICES_RAW_BANDS
 from .reproject_util import (bounds_from_transform_height_width_res,
                              calculate_aligned_transform, recrop_write_window)
 from .nbar import get_c_factor_value
