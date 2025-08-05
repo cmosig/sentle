@@ -152,6 +152,12 @@ def process_S2_subtile(
                 # harmonization
                 if float(
                         stac_item.properties["s2:processing_baseline"]) >= 4.0:
+
+                    # clip values to minimum 1000
+                    # we do this here instead of clipping to zero later to avoid
+                    # integer underflow when using a uint16 potentially later on
+                    read_data[read_data < 1000] = 1000
+
                     # adjust reflectance for non-zero values
                     read_data[read_data != 0] -= 1000
 
