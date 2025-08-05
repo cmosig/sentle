@@ -19,6 +19,7 @@ from numcodecs import Blosc
 from pystac_client.item_search import DatetimeLike
 from rasterio import warp
 from rasterio.crs import CRS
+from rasterio.enums import Resampling
 from tqdm.auto import tqdm
 from zarr.sync import ProcessSynchronizer
 
@@ -94,6 +95,7 @@ def process_ptile(
     cloud_response_queue: mp.Queue,
     job_id: int,
     sync_file_path: str,
+    resampling_method: Resampling,
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
@@ -124,19 +126,22 @@ def process_ptile(
         return job_id
 
     if collection == "sentinel-1-rtc":
-        ptile_array = process_ptile_S1(bound_left=bound_left,
-                                       bound_bottom=bound_bottom,
-                                       bound_right=bound_right,
-                                       bound_top=bound_top,
-                                       target_crs=target_crs,
-                                       ts=ts,
-                                       ptile_height=ptile_height,
-                                       ptile_width=ptile_width,
-                                       ptile_transform=ptile_transform,
-                                       item_list=item_list,
-                                       target_resolution=target_resolution,
-                                       time_composite_freq=time_composite_freq,
-                                       S1_assets=S1_assets)
+        ptile_array = process_ptile_S1(
+            bound_left=bound_left,
+            bound_bottom=bound_bottom,
+            bound_right=bound_right,
+            bound_top=bound_top,
+            target_crs=target_crs,
+            ts=ts,
+            ptile_height=ptile_height,
+            ptile_width=ptile_width,
+            ptile_transform=ptile_transform,
+            item_list=item_list,
+            target_resolution=target_resolution,
+            time_composite_freq=time_composite_freq,
+            S1_assets=S1_assets,
+            resampling_method=resampling_method,
+        )
     elif collection == "sentinel-2-l2a":
         ptile_array = process_ptile_S2_dispatcher(
             bound_left=bound_left,
@@ -162,6 +167,7 @@ def process_ptile(
             S2_subtiles=S2_subtiles,
             cloud_request_queue=cloud_request_queue,
             cloud_response_queue=cloud_response_queue,
+            resampling_method=resampling_method,
         )
 
     else:
@@ -194,6 +200,7 @@ def validate_user_input(
     zarr_store_chunk_size: dict,
     datetime: DatetimeLike,
     S2_nbar: bool,
+    resampling_method: Resampling,
     processing_spatial_chunk_size: int = 4000,
     S1_assets: list[str] = S1_ASSETS,
     S2_mask_snow: bool = False,
@@ -325,6 +332,10 @@ def validate_user_input(
     # validate that S2_nbar is a boolean
     if not isinstance(S2_nbar, bool):
         raise ValueError("S2_nbar must be a boolean")
+
+    if not isinstance(resampling_method, Resampling):
+        raise ValueError(
+            "resampling_method must be a rasterio.enums.Resampling")
 
 
 def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
@@ -564,6 +575,7 @@ def process(
         "y": 100,
     },
     coord_save_mode: str = "top-left",
+    resampling_method: Resampling = Resampling.nearest,
 ):
     """
     Parameters
@@ -614,6 +626,10 @@ def process(
          - "top-left": (default) coordinates represent the top-left corner of each pixel (current behavior)
          - "center": coordinates represent the center of each pixel (shifted by half a pixel)
        Note: This does not affect the processing scheme, only how coordinates are saved in the zarr store.
+    resampling_method: rasterio.enums.Resampling, default=rasterio.enums.Resampling.nearest
+        Specifies the resampling method that is used to reproject the raw data
+        into the target CRS. It is recommended to use nearest neighbor to
+        prevent potential issues near cloud edges and dynamic range changes.
     """
 
     # Accept either a CRS or a string for target_crs
@@ -641,6 +657,7 @@ def process(
         S2_apply_cloud_mask=S2_apply_cloud_mask,
         zarr_store_chunk_size=zarr_store_chunk_size,
         S2_nbar=S2_nbar,
+        resampling_method=resampling_method,
     )
 
     # TODO support to only download subset of bands (mutually exclusive with
@@ -723,6 +740,7 @@ def process(
         "cloud_request_queue": cloud_request_queue,
         "sync_file_path": sync_file_path,
         "S2_nbar": S2_nbar,
+        "resampling_method": resampling_method
     }
 
     processing_spatial_chunk_size_in_CRS_unit = processing_spatial_chunk_size * target_resolution

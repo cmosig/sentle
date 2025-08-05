@@ -15,7 +15,8 @@ from .reproject_util import (bounds_from_transform_height_width_res,
 def process_ptile_S1(target_crs: CRS, target_resolution: float,
                      time_composite_freq: str, bound_left, bound_right,
                      bound_bottom, bound_top, ts, S1_assets, ptile_height,
-                     ptile_width, ptile_transform, item_list):
+                     ptile_width, ptile_transform, item_list,
+                     resampling_method):
     """Processes a single sentinel 1 ptile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution. The function
     returns the reprojected ptile.
@@ -111,7 +112,7 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                                    src_nodata=0,
                                    dst_nodata=0,
                                    dst_transform=tile_repr_transform,
-                                   resampling=Resampling.bilinear)
+                                   resampling=resampling_method)
 
                     # explicit clear
                     del data
