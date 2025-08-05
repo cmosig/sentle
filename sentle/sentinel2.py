@@ -108,6 +108,7 @@ def process_S2_subtile(
     S2_nbar: bool,
     cloud_request_queue: mp.Queue,
     cloud_response_queue: mp.Queue,
+    resampling_method: Resampling,
 ):
     """Processes a single sentinel 2 subtile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution, applying
@@ -235,7 +236,7 @@ def process_S2_subtile(
                    src_nodata=0,
                    dst_nodata=0,
                    dst_transform=subtile_repr_transform,
-                   resampling=Resampling.bilinear)
+                   resampling=resampling_method)
     # explicit clear
     del subtile_array
 
@@ -289,6 +290,7 @@ def process_ptile_S2_dispatcher(
     S2_subtiles,
     cloud_request_queue: mp.Queue,
     cloud_response_queue: mp.Queue,
+    resampling_method: Resampling,
 ):
 
     items = pd.DataFrame()
@@ -332,6 +334,7 @@ def process_ptile_S2_dispatcher(
             items=items[items["ts"] == ts],
             cloud_request_queue=cloud_request_queue,
             cloud_response_queue=cloud_response_queue,
+            resampling_method=resampling_method,
         )
 
         # this happens when the href is not available in subtile -> planetary
@@ -414,6 +417,7 @@ def process_ptile_S2(
     S2_cloud_classification: bool,
     S2_return_cloud_probabilities: bool,
     S2_nbar: bool,
+    resampling_method: Resampling,
 ):
     # cloud classification layer and snow mask is added later
     num_bands = len(S2_RAW_BANDS)
@@ -460,7 +464,9 @@ def process_ptile_S2(
             S2_cloud_classification_device=S2_cloud_classification_device,
             S2_nbar=S2_nbar,
             cloud_response_queue=cloud_response_queue,
-            cloud_request_queue=cloud_request_queue)
+            cloud_request_queue=cloud_request_queue,
+            resampling_method=resampling_method,
+        )
 
         # this happens when the href is not available
         # -> planetary computer issue
