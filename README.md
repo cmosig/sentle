@@ -18,20 +18,22 @@ detection, snow masking, harmonization, merging, and temporal composites.</em>
 </p>
 
 ---
- 
+
 ## Important Notes
 
-1) **This package is in early alpha stage. There will be bugs!** If you encounter any error, warning, memory issue, etc. please open a GitHub issue with the code to reproduce.
-2) This package is meant for large-scale processing and any area that is smaller than 8km in width and height will not run faster because of the underlying processing scheme. 
+1. **This package is in early alpha stage. There will be bugs!** If you encounter any error, warning, memory issue, etc. please open a GitHub issue with the code to reproduce.
+2. This package is meant for large-scale processing and any area that is smaller than 8km in width and height will not run faster because of the underlying processing scheme.
 
 ## Installing
 
-This package is tested with Python 3.12.*. It may or may not work with other versions. 
+This package is tested with Python 3.12.\*. It may or may not work with other versions.
 
 ```
 pip install sentle
 ```
-or 
+
+or
+
 ```
 git clone git@github.com:cmosig/sentle.git
 cd sentle
@@ -67,13 +69,14 @@ sentle.process(
     num_workers=10,
 )
 ```
-This code downloads data for a 40km by 40km area with one year of both Sentinel-1 and Sentinel-2. Clouds and snow are detected and replaced with NaNs. Data is also averaged every 7 days. 
+
+This code downloads data for a 40km by 40km area with one year of both Sentinel-1 and Sentinel-2. Clouds and snow are detected and replaced with NaNs. Data is also averaged every 7 days.
 
 Everything is parallelized across 10 workers and each worker immediately saves its results to the specified path to a `zarr_store`. This ensures you can download larger-than-memory cubes.
 
 **Visualize**
 
-Load the data with xarray. 
+Load the data with xarray.
 
 ```
 import xarray as xr
@@ -102,34 +105,35 @@ The package contains only one main function for retrieving and processing Sentin
 
 #### Required Parameters
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `target_crs` | `rasterio.crs.CRS` or `str` | Specifies the target CRS that all data will be reprojected to. You can provide either a `rasterio.crs.CRS` object or a string (e.g., `"EPSG:32633"`). |
-| `target_resolution` | `float` | Determines the resolution that all data is reprojected to in the `target_crs`. |
-| `bound_left` | `float` | Left bound of area that is supposed to be covered. Unit is in `target_crs`. |
-| `bound_bottom` | `float` | Bottom bound of area that is supposed to be covered. Unit is in `target_crs`. |
-| `bound_right` | `float` | Right bound of area that is supposed to be covered. Unit is in `target_crs`. |
-| `bound_top` | `float` | Top bound of area that is supposed to be covered. Unit is in `target_crs`. |
-| `datetime` | `DatetimeLike` | Specifies time range of data to be downloaded. This is forwarded to the respective STAC interface. |
-| `zarr_store` | `str` or `zarr.storage.Store` | Path of where to create the zarr storage. |
+| Parameter           | Type                          | Description                                                                                                                                           |
+| ------------------- | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `target_crs`        | `rasterio.crs.CRS` or `str`   | Specifies the target CRS that all data will be reprojected to. You can provide either a `rasterio.crs.CRS` object or a string (e.g., `"EPSG:32633"`). |
+| `target_resolution` | `float`                       | Determines the resolution that all data is reprojected to in the `target_crs`.                                                                        |
+| `bound_left`        | `float`                       | Left bound of area that is supposed to be covered. Unit is in `target_crs`.                                                                           |
+| `bound_bottom`      | `float`                       | Bottom bound of area that is supposed to be covered. Unit is in `target_crs`.                                                                         |
+| `bound_right`       | `float`                       | Right bound of area that is supposed to be covered. Unit is in `target_crs`.                                                                          |
+| `bound_top`         | `float`                       | Top bound of area that is supposed to be covered. Unit is in `target_crs`.                                                                            |
+| `datetime`          | `DatetimeLike`                | Specifies time range of data to be downloaded. This is forwarded to the respective STAC interface.                                                    |
+| `zarr_store`        | `str` or `zarr.storage.Store` | Path of where to create the zarr storage.                                                                                                             |
 
 #### Optional Parameters
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `processing_spatial_chunk_size` | `int` | `4000` | Size of spatial chunks across which parallelization is performed in pixels. |
-| `S1_assets` | `list[str]` | `["vh_asc", "vh_desc", "vv_asc", "vv_desc"]` | Specify which bands to download for Sentinel-1. Only "vh_asc", "vh_desc", "vv_asc", "vv_desc" are supported. Empty list will be converted to None (no Sentinel-1 data). |
-| `S2_mask_snow` | `bool` | `False` | Whether to create a snow mask. Based on https://doi.org/10.1016/j.rse.2011.10.028. |
-| `S2_cloud_classification` | `bool` | `False` | Whether to create cloud classification layer, where `0=clear sky`, `2=thick cloud`, `3=thin cloud`, `4=shadow`. |
-| `S2_cloud_classification_device` | `str` | `"cpu"` | On which device to run cloud classification. Either `"cpu"` or `"cuda"`. |
-| `S2_return_cloud_probabilities` | `bool` | `False` | Whether to return raw cloud probabilities which were used to determine the cloud classes. |
-| `S2_nbar` | `bool` | `False` | Whether to apply Nadir BRDF (Bidirectional Reflectance Distribution Function) correction to Sentinel-2 surface reflectance using the [sen2nbar](https://github.com/cosminpopescu/sen2nbar) package. This correction harmonizes reflectance values as if observed from nadir, reducing angular effects and improving consistency for time series analysis. |
-| `num_workers` | `int` | `1` | Number of cores to scale computation across. Plan 2GiB of RAM per worker. -1 uses all available cores. |
-| `time_composite_freq` | `str` | `None` | Rounding interval across which data is averaged. |
-| `S2_apply_snow_mask` | `bool` | `False` | Whether to replace snow with NaN. |
-| `S2_apply_cloud_mask` | `bool` | `False` | Whether to replace anything that is not clear sky with NaN. |
-| `overwrite` | `bool` | `False` | Whether to overwrite existing zarr storage. |
-| `zarr_store_chunk_size` | `dict` | `{"time": 50, "x": 100, "y": 100}` | Chunk sizes for zarr storage. Must contain the keys 'time', 'y', and 'x'. Controls the size of data chunks for efficient storage and retrieval. |
+| Parameter                        | Type                        | Default                                      | Description                                                                                                                                                                                                                                                                                                                                               |
+| -------------------------------- | --------------------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `processing_spatial_chunk_size`  | `int`                       | `4000`                                       | Size of spatial chunks across which parallelization is performed in pixels.                                                                                                                                                                                                                                                                               |
+| `S1_assets`                      | `list[str]`                 | `["vh_asc", "vh_desc", "vv_asc", "vv_desc"]` | Specify which bands to download for Sentinel-1. Only "vh_asc", "vh_desc", "vv_asc", "vv_desc" are supported. Empty list will be converted to None (no Sentinel-1 data).                                                                                                                                                                                   |
+| `S2_mask_snow`                   | `bool`                      | `False`                                      | Whether to create a snow mask. Based on https://doi.org/10.1016/j.rse.2011.10.028.                                                                                                                                                                                                                                                                        |
+| `S2_cloud_classification`        | `bool`                      | `False`                                      | Whether to create cloud classification layer, where `0=clear sky`, `2=thick cloud`, `3=thin cloud`, `4=shadow`.                                                                                                                                                                                                                                           |
+| `S2_cloud_classification_device` | `str`                       | `"cpu"`                                      | On which device to run cloud classification. Either `"cpu"` or `"cuda"`.                                                                                                                                                                                                                                                                                  |
+| `S2_return_cloud_probabilities`  | `bool`                      | `False`                                      | Whether to return raw cloud probabilities which were used to determine the cloud classes.                                                                                                                                                                                                                                                                 |
+| `S2_nbar`                        | `bool`                      | `False`                                      | Whether to apply Nadir BRDF (Bidirectional Reflectance Distribution Function) correction to Sentinel-2 surface reflectance using the [sen2nbar](https://github.com/cosminpopescu/sen2nbar) package. This correction harmonizes reflectance values as if observed from nadir, reducing angular effects and improving consistency for time series analysis. |
+| `num_workers`                    | `int`                       | `1`                                          | Number of cores to scale computation across. Plan 2GiB of RAM per worker. -1 uses all available cores.                                                                                                                                                                                                                                                    |
+| `time_composite_freq`            | `str`                       | `None`                                       | Rounding interval across which data is averaged.                                                                                                                                                                                                                                                                                                          |
+| `S2_apply_snow_mask`             | `bool`                      | `False`                                      | Whether to replace snow with NaN.                                                                                                                                                                                                                                                                                                                         |
+| `S2_apply_cloud_mask`            | `bool`                      | `False`                                      | Whether to replace anything that is not clear sky with NaN.                                                                                                                                                                                                                                                                                               |
+| `overwrite`                      | `bool`                      | `False`                                      | Whether to overwrite existing zarr storage.                                                                                                                                                                                                                                                                                                               |
+| `zarr_store_chunk_size`          | `dict`                      | `{"time": 50, "x": 100, "y": 100}`           | Chunk sizes for zarr storage. Must contain the keys 'time', 'y', and 'x'. Controls the size of data chunks for efficient storage and retrieval.                                                                                                                                                                                                           |
+| `resampling_method`              | `rasterio.enums.Resampling` | `Resampling.nearest`                         | Specifies the resampling method that is used to reproject the raw data into the target CRS. It is recommended to use nearest neighbor to prevent potential issues near cloud edges and dynamic range changes.                                                                                                                                             |
 
 #### Notes
 
@@ -143,12 +147,13 @@ The package contains only one main function for retrieving and processing Sentin
 ## Questions you may have
 
 #### How do I scale this program?
+
 Increase the number of workers using the `num_workers` parameter when calling `sentle.process`. With default spatial chunk size of 4000, specified by `processing_spatial_chunk_size`, you should plan with 2GiB per worker.
 
 ## Contributing
 
 Please submit issues or pull requests if you feel like something is missing or
-needs to be fixed. 
+needs to be fixed.
 
 ## License
 
@@ -158,4 +163,4 @@ This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md
 
 - Thank you to [Cesar Aybar](https://csaybar.github.io/) for his cloud detection model. All cloud detection in this package is performed using his model. The paper: [link](https://www.nature.com/articles/s41597-022-01878-2)
 - Thank you to [David Montero](https://github.com/davemlz) for all the
-discussions and his awesome packages which inspired this.
+  discussions and his awesome packages which inspired this.
