@@ -1,7 +1,8 @@
-import planetary_computer
+import planetary_computer as pc
 import pystac_client
 from pystac_client.stac_api_io import StacApiIO
 from urllib3 import Retry
+from urllib.parse import urlparse, urlunparse
 
 from .const import STAC_ENDPOINT
 
@@ -22,5 +23,10 @@ def get_stac_api_io():
 
 def open_catalog():
     return pystac_client.Client.open(STAC_ENDPOINT,
-                                     modifier=planetary_computer.sign_inplace,
                                      stac_io=get_stac_api_io())
+
+def refresh_sas_token(url):
+    parsed = urlparse(url)
+    unsigned = urlunparse(parsed._replace(query=""))
+    new_signed = pc.sign(unsigned)
+    return new_signed

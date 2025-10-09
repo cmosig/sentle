@@ -10,6 +10,7 @@ from rasterio.enums import Resampling
 from .const import ORBIT_STATE_ABBREVIATION, S1_TRUE_ASSETS
 from .reproject_util import (bounds_from_transform_height_width_res,
                              calculate_aligned_transform, recrop_write_window)
+from .stac import refresh_sas_token
 
 
 def process_ptile_S1(target_crs: CRS, target_resolution: float,
@@ -64,9 +65,10 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
 
             # compute index to save
             band_save_index = S1_assets.index(band_index_string)
+            href = refresh_sas_token(item.assets[s1_true_asset].href)
 
             try:
-                with rasterio.open(item.assets[s1_true_asset].href) as dr:
+                with rasterio.open(href) as dr:
 
                     # reproject ptile bounds to S1 tile CRS
                     ptile_bounds_local_crs = warp.transform_bounds(
@@ -157,9 +159,10 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
 
             except rasterio.errors.RasterioIOError as e:
                 print("Failed to read from stac repository.", type(e))
+                print("RasterioIOError", e)
                 print(
                     "This is a planetary computer issue, not a sentle issue.")
-                print("Asset", item.assets[s1_true_asset])
+                print("Asset", href)
 
     if perform_aggregation:
         with warnings.catch_warnings():

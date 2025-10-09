@@ -18,6 +18,7 @@ from .reproject_util import (bounds_from_transform_height_width_res,
                              calculate_aligned_transform, recrop_write_window)
 from .nbar import get_c_factor_value
 from .snow_mask import S2_snow_mask_band, compute_potential_snow_layer
+from .stac import refresh_sas_token
 
 
 def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
@@ -129,7 +130,7 @@ def process_S2_subtile(
     s2_tile_transform = None
     # retrieve each band for subtile in sentinel tile
     for i, band in enumerate(S2_RAW_BANDS):
-        href = stac_item.assets[band].href
+        href = refresh_sas_token(stac_item.assets[band].href)
         try:
             with rasterio.open(href) as dr:
 
@@ -175,6 +176,7 @@ def process_S2_subtile(
                     s2_tile_transform = dr.transform
         except rasterio.errors.RasterioIOError as e:
             print("Failed to read from stac repository.", type(e))
+            print("RasterioIOError", e)
             print("This is a planetary computer issue, not a sentle issue")
             print("Asset", band, href)
 
