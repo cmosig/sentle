@@ -365,8 +365,7 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
 
     if isinstance(zarr_store, str):
         # setup zarr storage
-        store = zarr.storage.DirectoryStore(zarr_store,
-                                            dimension_separator=".")
+        store = zarr.storage.LocalStore(zarr_store, dimension_separator=".")
     else:
         store = zarr_store
 
