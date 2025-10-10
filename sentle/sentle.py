@@ -461,9 +461,6 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.StoreLike,
                    pd.Timestamp(0, tz=None)).total_seconds()
     time.attrs.update(ZARR_TIME_ATTRS)
 
-    # consolidating metadata
-    zarr.consolidate_metadata(store)
-
     # close up store as we are done with init
     store.close()
 
