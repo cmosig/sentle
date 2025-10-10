@@ -395,7 +395,7 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.StoreLike,
                        fill_value=float("nan"),
                        store=store,
                        path="/sentle",
-                       write_empty_chunks=False)
+                       config=dict(write_empty_chunks=False))
     data.attrs.update(ZARR_DATA_ATTRS)
 
     # ------
@@ -403,7 +403,7 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.StoreLike,
 
     # band dimension
     band = zarr.create(shape=(len(total_bands_to_save)),
-                       dtype="<U32",
+                       dtype="string",
                        store=store,
                        path="/band",
                        overwrite=overwrite)
