@@ -7,6 +7,7 @@ from math import ceil
 from os import path
 from time import time as currenttime
 
+import json
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -385,18 +386,18 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.StoreLike,
     # chunk size is the number of S2 bands, because we parallelize S1/S2
     unique_timestamps = sorted(set(item["ts"] for item in timestamp_list),
                                reverse=True)
-    data = zarr.create(shape=(len(unique_timestamps), len(total_bands_to_save),
-                              height, width),
-                       chunks=(zarr_store_chunk_size["time"],
-                               len(S2_bands_to_save),
-                               zarr_store_chunk_size["y"],
-                               zarr_store_chunk_size["x"]),
-                       dtype=np.float32,
-                       fill_value=float("nan"),
-                       store=store,
-                       path="/sentle",
-                       config=dict(write_empty_chunks=False))
-    data.attrs.update(ZARR_DATA_ATTRS)
+    data = zarr.create(
+        shape=(len(unique_timestamps), len(total_bands_to_save), height,
+               width),
+        chunks=(zarr_store_chunk_size["time"], len(S2_bands_to_save),
+                zarr_store_chunk_size["y"], zarr_store_chunk_size["x"]),
+        dtype=np.float32,
+        fill_value=float("nan"),
+        store=store,
+        path="/sentle",
+        config=dict(write_empty_chunks=False),
+        dimension_names=["time", "band", "y", "x"],
+    )
 
     # ------
     # arrays for storage of dimension information
@@ -406,23 +407,23 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.StoreLike,
                        dtype="string",
                        store=store,
                        path="/band",
-                       overwrite=overwrite)
+                       overwrite=overwrite,
+                       dimension_names=["band"])
     band[:] = total_bands_to_save
-    band.attrs.update(ZARR_BAND_ATTRS)
 
     # x dimension
     x = zarr.create(shape=(width),
                     dtype="float32",
                     store=store,
                     path="/x",
-                    overwrite=overwrite)
+                    overwrite=overwrite,
+                    dimension_names=["x"])
     if coord_save_mode == "center":
         x[:] = (np.arange(bound_left, bound_right, target_resolution) +
                 target_resolution / 2).astype(np.float32)
     else:
         x[:] = np.arange(bound_left, bound_right,
                          target_resolution).astype(np.float32)
-    x.attrs.update(ZARR_X_ATTRS)
     x.attrs["coord_save_mode"] = coord_save_mode
 
     # y dimension
@@ -430,14 +431,14 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.StoreLike,
                     dtype="float32",
                     store=store,
                     path="/y",
-                    overwrite=overwrite)
+                    overwrite=overwrite,
+                    dimension_names=["x"])
     if coord_save_mode == "center":
         y[:] = (np.arange(bound_top, bound_bottom, -target_resolution) -
                 target_resolution / 2).astype(np.float32)
     else:
         y[:] = np.arange(bound_top, bound_bottom,
                          -target_resolution).astype(np.float32)
-    y.attrs.update(ZARR_Y_ATTRS)
     y.attrs["coord_save_mode"] = coord_save_mode
     if coord_save_mode == "center":
         y[:] = (np.arange(bound_top, bound_bottom, -target_resolution) -
@@ -445,7 +446,6 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.StoreLike,
     else:
         y[:] = np.arange(bound_top, bound_bottom,
                          -target_resolution).astype(np.float32)
-    y.attrs.update(ZARR_Y_ATTRS)
     y.attrs["coord_save_mode"] = coord_save_mode
 
     # time dimension
@@ -454,7 +454,8 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.StoreLike,
                        store=store,
                        path="/time",
                        fill_value=None,
-                       overwrite=overwrite)
+                       overwrite=overwrite,
+                       dimension_names=["time"])
 
     for i, ts in enumerate(unique_timestamps):
         time[i] = (ts.tz_localize(tz=None) -
