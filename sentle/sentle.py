@@ -21,7 +21,7 @@ from rasterio import warp
 from rasterio.crs import CRS
 from rasterio.enums import Resampling
 from tqdm.auto import tqdm
-from zarr.sync import ProcessSynchronizer
+from filelock import FileLock
 
 from .cloud_mask import (S2_cloud_mask_band, S2_cloud_prob_bands,
                          init_cloud_prediction_service)
@@ -180,9 +180,9 @@ def process_ptile(
     if ptile_array is not None and not np.isnan(ptile_array).all():
 
         # save to zarr
-        dst = zarr.open(
-            zarr_store,
-            synchronizer=ProcessSynchronizer(sync_file_path))["sentle"]
+        lock = FileLock(sync_file_path)
+        with lock:
+            dst = zarr.open(zarr_store)["sentle"]
         dst[zarr_save_slice["time"], zarr_save_slice["band"],
             zarr_save_slice["y"], zarr_save_slice["x"]] = ptile_array
 
@@ -381,7 +381,7 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
 
         # get a uuid for sync file
         sync_file_path = path.join(tempfile.gettempdir(),
-                                   f"sentle_{currenttime()}.sync")
+                                   f"sentle_{currenttime()}.lock")
 
     # create array for where to store the processed sentinel data
     # chunk size is the number of S2 bands, because we parallelize S1/S2
