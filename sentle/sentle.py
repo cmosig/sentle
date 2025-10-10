@@ -7,7 +7,6 @@ from math import ceil
 from os import path
 from time import time as currenttime
 
-import json
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -25,8 +24,7 @@ from filelock import FileLock
 from .cloud_mask import (S2_cloud_mask_band, S2_cloud_prob_bands,
                          init_cloud_prediction_service)
 from .snow_mask import S2_snow_mask_band
-from .const import (S1_ASSETS, S2_RAW_BANDS, ZARR_BAND_ATTRS, ZARR_DATA_ATTRS,
-                    ZARR_TIME_ATTRS, ZARR_X_ATTRS, ZARR_Y_ATTRS)
+from .const import (S1_ASSETS, S2_RAW_BANDS, ZARR_TIME_ATTRS)
 from .reproject_util import (check_and_round_bounds,
                              height_width_from_bounds_res,
                              transform_height_width_from_bounds_res)
@@ -352,6 +350,7 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.StoreLike,
                        S2_bands_to_save: list[str],
                        total_bands_to_save: list[str],
                        target_crs: CRS,
+                       consolidate_metadata: bool,
                        overwrite: bool = False,
                        coord_save_mode: str = "top-left") -> None | str:
     """
@@ -462,6 +461,12 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.StoreLike,
                    pd.Timestamp(0, tz=None)).total_seconds()
     time.attrs.update(ZARR_TIME_ATTRS)
 
+    # see https://zarr.readthedocs.io/en/main/user-guide/consolidated_metadata/
+    if consolidate_metadata:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            zarr.consolidate_metadata(store)
+
     # close up store as we are done with init
     store.close()
 
@@ -570,6 +575,7 @@ def process(
     },
     coord_save_mode: str = "top-left",
     resampling_method: Resampling = Resampling.nearest,
+    consolidate_metadata: bool = True,
 ):
     """
     Parameters
@@ -708,7 +714,8 @@ def process(
         S2_bands_to_save=S2_bands_to_save,
         total_bands_to_save=total_bands_to_save,
         target_crs=target_crs,
-        coord_save_mode=coord_save_mode)
+        coord_save_mode=coord_save_mode,
+        consolidate_metadata=consolidate_metadata)
 
     cloud_request_queue = None
     if S2_cloud_classification:
