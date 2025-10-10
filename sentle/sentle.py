@@ -8,14 +8,12 @@ from os import path
 from time import time as currenttime
 
 import geopandas as gpd
-import numcodecs
 import numpy as np
 import pandas as pd
 import pkg_resources
 import zarr
 import zarr.storage
 from joblib import Parallel, delayed, parallel_backend
-from numcodecs import Blosc
 from pystac_client.item_search import DatetimeLike
 from rasterio import warp
 from rasterio.crs import CRS
@@ -192,7 +190,7 @@ def process_ptile(
 def validate_user_input(
     target_crs: CRS | str,
     target_resolution: float,
-    zarr_store: str | zarr.storage.Store,
+    zarr_store: str | zarr.storage.StoreLike,
     bound_left: float,
     bound_bottom: float,
     bound_right: float,
@@ -214,8 +212,9 @@ def validate_user_input(
 ):
 
     # validate type zarr store
-    if not isinstance(zarr_store, (str, zarr.storage.Store)):
-        raise ValueError("zarr_store must be a string or zarr.storage.Store")
+    if not isinstance(zarr_store, (str, zarr.storage.StoreLike)):
+        raise ValueError(
+            "zarr_store must be a string or zarr.storage.StoreLike")
 
     # check if the target CRS is valid, allow string and convert if needed
     try:
@@ -338,7 +337,7 @@ def validate_user_input(
             "resampling_method must be a rasterio.enums.Resampling")
 
 
-def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
+def setup_zarr_storage(zarr_store: str | zarr.storage.StoreLike,
                        timestamp_list: list[str],
                        height: int,
                        width: int,
@@ -365,7 +364,7 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
 
     if isinstance(zarr_store, str):
         # setup zarr storage
-        store = zarr.storage.LocalStore(zarr_store, dimension_separator=".")
+        store = zarr.storage.LocalStore(zarr_store)
     else:
         store = zarr_store
 
@@ -377,7 +376,6 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
     if not (zarr_store_chunk_size["time"] == 1
             and zarr_store_chunk_size["y"] == processing_spatial_chunk_size
             and zarr_store_chunk_size["x"] == processing_spatial_chunk_size):
-        numcodecs.blosc.use_threads = False
 
         # get a uuid for sync file
         sync_file_path = path.join(tempfile.gettempdir(),
@@ -397,8 +395,7 @@ def setup_zarr_storage(zarr_store: str | zarr.storage.Store,
                        fill_value=float("nan"),
                        store=store,
                        path="/sentle",
-                       write_empty_chunks=False,
-                       compressor=Blosc(cname="lz4"))
+                       write_empty_chunks=False)
     data.attrs.update(ZARR_DATA_ATTRS)
 
     # ------
@@ -555,7 +552,7 @@ def process(
     bound_right: float,
     bound_top: float,
     datetime: DatetimeLike,
-    zarr_store: str | zarr.storage.Store,
+    zarr_store: str | zarr.storage.StoreLike,
     processing_spatial_chunk_size: int = 4000,
     S1_assets: list[str] = S1_ASSETS,
     S2_mask_snow: bool = False,
@@ -612,7 +609,7 @@ def process(
         Whether to replace anything that is not clear sky with NaN.
     S2_nbar: bool, default=False
         Whether to apply Nadir BRFD correction with sen2nbar package.
-    zarr_store: str | zarr.storage.Store
+    zarr_store: str | zarr.storage.StoreLike
        Path of where to create the zarr storage.
     processing_spatial_chunk_size: int, default=4000
        Size of spatial chunks across which we perform parallization.

@@ -22,10 +22,9 @@ setup(name="sentle",
       install_requires=[
           "pystac-client>=0.7.7", "pystac>=1.10.1", "rasterio>=1.3.10",
           "affine>=2.4.0", "pandas>=2.2.2", "numpy>=1.26.4", "shapely>=2.0.4",
-          "zarr>=2.18.1", "geopandas>=0.14.4", "planetary_computer>=1.0.0",
-          "numcodecs>=0.12.1", "scipy>=1.13.0", "torch>=2.3.0",
-          "joblib>=1.4.2", "tqdm>=4.66.4", "sen2nbar>=2024.6.0",
-          "xarray>=2025.3.1", "filelock>=3.0.0"
+          "zarr>3", "geopandas>=0.14.4", "planetary_computer>=1.0.0",
+          "scipy>=1.13.0", "torch>=2.3.0", "joblib>=1.4.2", "tqdm>=4.66.4",
+          "sen2nbar>=2024.6.0", "xarray>=2025.3.1", "filelock>=3.0.0"
       ],
       classifiers=[
           "Development Status :: 3 - Alpha",
