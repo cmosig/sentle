@@ -462,7 +462,7 @@ def setup_zarr_storage(
         store=store,
         path="/y",
         overwrite=overwrite,
-        dimension_names=["x"],
+        dimension_names=["y"],
     )
     if coord_save_mode == "center":
         y[:] = (
