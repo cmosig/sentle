@@ -109,6 +109,7 @@ def process_ptile(
     job_id: int,
     sync_file_path: str,
     resampling_method: Resampling,
+    save_as_uint16: bool,
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
@@ -192,6 +193,18 @@ def process_ptile(
 
     # only save to zarr if we have data
     if ptile_array is not None and not np.isnan(ptile_array).all():
+        if save_as_uint16:
+            if collection != "sentinel-2-l2a":
+                raise ValueError(
+                    "save_as_uint16 can only be used when Sentinel-1 processing is disabled."
+                )
+            ptile_array = np.nan_to_num(ptile_array, nan=0)
+            # round to nearest integer before casting to uint16 to avoid truncation artifacts
+            ptile_array = np.rint(ptile_array, out=ptile_array)
+            np.clip(ptile_array, 0, np.iinfo(np.uint16).max, out=ptile_array)
+            if ptile_array.dtype != np.uint16:
+                ptile_array = ptile_array.astype(np.uint16)
+
         # save to zarr
         lock = FileLock(sync_file_path)
         with lock:
@@ -228,6 +241,7 @@ def validate_user_input(
     time_composite_freq: str = None,
     S2_apply_snow_mask: bool = False,
     S2_apply_cloud_mask: bool = False,
+    save_as_uint16: bool = False,
 ):
     # validate type zarr store
     if not isinstance(zarr_store, (str, zarr.storage.StoreLike)):
@@ -354,6 +368,18 @@ def validate_user_input(
     if not isinstance(resampling_method, Resampling):
         raise ValueError("resampling_method must be a rasterio.enums.Resampling")
 
+    if not isinstance(save_as_uint16, bool):
+        raise ValueError("save_as_uint16 must be a boolean")
+
+    if save_as_uint16:
+        sentinel1_disabled = (S1_assets is None) or (
+            isinstance(S1_assets, list) and len(S1_assets) == 0
+        )
+        if not sentinel1_disabled:
+            raise ValueError(
+                "save_as_uint16 can only be used when Sentinel-1 is disabled (set S1_assets to None or an empty list)."
+            )
+
 
 def setup_zarr_storage(
     zarr_store: str | zarr.storage.StoreLike,
@@ -373,6 +399,7 @@ def setup_zarr_storage(
     consolidate_metadata: bool,
     overwrite: bool = False,
     coord_save_mode: str = "top-left",
+    save_as_uint16: bool = False,
 ) -> None | str:
     """
     Parameters
@@ -407,6 +434,9 @@ def setup_zarr_storage(
     # create array for where to store the processed sentinel data
     # chunk size is the number of S2 bands, because we parallelize S1/S2
     unique_timestamps = sorted(set(item["ts"] for item in timestamp_list), reverse=True)
+    data_dtype = np.uint16 if save_as_uint16 else np.float32
+    data_fill_value = 0 if save_as_uint16 else float("nan")
+
     data = zarr.create(
         shape=(len(unique_timestamps), len(total_bands_to_save), height, width),
         chunks=(
@@ -415,8 +445,8 @@ def setup_zarr_storage(
             zarr_store_chunk_size["y"],
             zarr_store_chunk_size["x"],
         ),
-        dtype=np.float32,
-        fill_value=float("nan"),
+        dtype=data_dtype,
+        fill_value=data_fill_value,
         store=store,
         path="/sentle",
         config=dict(write_empty_chunks=False),
@@ -621,6 +651,7 @@ def process(
     coord_save_mode: str = "top-left",
     resampling_method: Resampling = Resampling.nearest,
     consolidate_metadata: bool = True,
+    save_as_uint16: bool = False,
 ):
     """
     Parameters
@@ -675,6 +706,8 @@ def process(
         Specifies the resampling method that is used to reproject the raw data
         into the target CRS. It is recommended to use nearest neighbor to
         prevent potential issues near cloud edges and dynamic range changes.
+    save_as_uint16 : bool, default=False
+        When True and Sentinel-1 is disabled, persist Sentinel-2 data using unsigned 16-bit integers with zero fill.
     """
 
     # Accept either a CRS or a string for target_crs
@@ -703,6 +736,7 @@ def process(
         zarr_store_chunk_size=zarr_store_chunk_size,
         S2_nbar=S2_nbar,
         resampling_method=resampling_method,
+        save_as_uint16=save_as_uint16,
     )
 
     # TODO support to only download subset of bands (mutually exclusive with
@@ -720,6 +754,9 @@ def process(
     # if S1_assets are supplied as empty list, convert to None
     if isinstance(S1_assets, list) and len(S1_assets) == 0:
         S1_assets = None
+
+    if save_as_uint16 and S1_assets is not None:
+        raise ValueError("save_as_uint16 requires Sentinel-1 assets to be disabled.")
 
     if S1_assets is not None:
         total_bands_to_save += S1_assets
@@ -764,6 +801,7 @@ def process(
         target_crs=target_crs,
         coord_save_mode=coord_save_mode,
         consolidate_metadata=consolidate_metadata,
+        save_as_uint16=save_as_uint16,
     )
 
     cloud_request_queue = None
@@ -792,6 +830,7 @@ def process(
         "sync_file_path": sync_file_path,
         "S2_nbar": S2_nbar,
         "resampling_method": resampling_method,
+        "save_as_uint16": save_as_uint16,
     }
 
     processing_spatial_chunk_size_in_CRS_unit = (
@@ -881,6 +920,7 @@ def process(
                     else:
                         ret_config["cloud_response_queue"] = None
                         ret_config["job_id"] = None
+                    ret_config["save_as_uint16"] = save_as_uint16
                     yield ret_config
 
     with tqdm_joblib(

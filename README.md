@@ -134,6 +134,8 @@ The package contains only one main function for retrieving and processing Sentin
 | `overwrite`                      | `bool`                      | `False`                                      | Whether to overwrite existing zarr storage.                                                                                                                                                                                                                                                                                                               |
 | `zarr_store_chunk_size`          | `dict`                      | `{"time": 50, "x": 100, "y": 100}`           | Chunk sizes for zarr storage. Must contain the keys 'time', 'y', and 'x'. Controls the size of data chunks for efficient storage and retrieval.                                                                                                                                                                                                           |
 | `resampling_method`              | `rasterio.enums.Resampling` | `Resampling.nearest`                         | Specifies the resampling method that is used to reproject the raw data into the target CRS. It is recommended to use nearest neighbor to prevent potential issues near cloud edges and dynamic range changes.                                                                                                                                             |
+| `save_as_uint16` | `bool` | `False` | When `True` and `S1_assets` is `None`, store Sentinel-2 bands as unsigned 16-bit integers with zeros for nodata. NaNs are rounded and clipped into `[0, 65535]` before saving. |
+
 
 #### Notes
 
