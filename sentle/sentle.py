@@ -644,9 +644,9 @@ def process(
     S2_nbar: bool = False,
     overwrite: bool = False,
     zarr_store_chunk_size: dict = {
-        "time": 50,
-        "x": 100,
-        "y": 100,
+        "time": 10,
+        "x": 250,
+        "y": 250,
     },
     coord_save_mode: str = "top-left",
     resampling_method: Resampling = Resampling.nearest,
