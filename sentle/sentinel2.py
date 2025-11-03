@@ -175,10 +175,9 @@ def process_S2_subtile(
                 if band == "B02":
                     s2_tile_transform = dr.transform
         except rasterio.errors.RasterioIOError as e:
-            print("Failed to read from stac repository.", type(e))
-            print("RasterioIOError", e)
-            print("This is a planetary computer issue, not a sentle issue")
-            print("Asset", band, href)
+            warnings.warn(
+                f"stac_read_failure asset={href} band={band} exception_type={type(e).__name__} message={e} note=planetary_computer_issue"
+            )
 
     # in this case we have no data for this subtile
     if s2_tile_transform is None:
