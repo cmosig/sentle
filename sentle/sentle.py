@@ -76,8 +76,7 @@ def catalog_search_ptile(
                 right=bound_right,
                 top=bound_top,
             ),
-        ).item_collection()
-    )
+        ).item_collection())
 
     return item_list
 
@@ -115,8 +114,7 @@ def process_ptile(
 
     # determine ptile dimensions and transform from bounds
     ptile_transform, ptile_height, ptile_width = transform_height_width_from_bounds_res(
-        bound_left, bound_bottom, bound_right, bound_top, target_resolution
-    )
+        bound_left, bound_bottom, bound_right, bound_top, target_resolution)
 
     # TODO too many unessary stac requests are created here
     # when not using aggregation across large spatial scales
@@ -245,7 +243,8 @@ def validate_user_input(
 ):
     # validate type zarr store
     if not isinstance(zarr_store, (str, zarr.storage.StoreLike)):
-        raise ValueError("zarr_store must be a string or zarr.storage.StoreLike")
+        raise ValueError(
+            "zarr_store must be a string or zarr.storage.StoreLike")
 
     # check if the target CRS is valid, allow string and convert if needed
     try:
@@ -265,9 +264,8 @@ def validate_user_input(
 
     # check if the bounds are valid
     if not all(
-        isinstance(bound, (int, float))
-        for bound in [bound_left, bound_bottom, bound_right, bound_top]
-    ):
+            isinstance(bound, (int, float))
+            for bound in [bound_left, bound_bottom, bound_right, bound_top]):
         raise ValueError(
             "bound_left, bound_bottom, bound_right, and bound_top must be integers or floats"
         )
@@ -283,11 +281,11 @@ def validate_user_input(
         raise ValueError("processing_spatial_chunk_size must be an integer")
     # check if chunk size is greater than 1000
     if processing_spatial_chunk_size < 1000:
-        raise ValueError("processing_spatial_chunk_size must be greater than 1000")
+        raise ValueError(
+            "processing_spatial_chunk_size must be greater than 1000")
 
-    if time_composite_freq is not None and (
-        not S2_apply_snow_mask and not S2_apply_cloud_mask
-    ):
+    if time_composite_freq is not None and (not S2_apply_snow_mask
+                                            and not S2_apply_cloud_mask):
         warnings.warn(
             "Temporal aggregation is specified, but neither cloud or snow mask is set to be applied. This may yield useless aggregations for Sentinel-2 data."
         )
@@ -319,8 +317,7 @@ def validate_user_input(
     # check if S2_cloud_classification_device is either cpu or cuda
     if S2_cloud_classification_device not in ["cpu", "cuda"]:
         raise ValueError(
-            "S2_cloud_classification_device must be either 'cpu' or 'cuda'"
-        )
+            "S2_cloud_classification_device must be either 'cpu' or 'cuda'")
 
     # check if S2_return_cloud_probabilities is a boolean
     if not isinstance(S2_return_cloud_probabilities, bool):
@@ -331,7 +328,8 @@ def validate_user_input(
         raise ValueError("num_workers must be an integer")
 
     # check if time_composite_freq is a string
-    if time_composite_freq is not None and not isinstance(time_composite_freq, str):
+    if time_composite_freq is not None and not isinstance(
+            time_composite_freq, str):
         raise ValueError("time_composite_freq must be a string")
 
     # check if S2_apply_snow_mask is a boolean
@@ -358,23 +356,23 @@ def validate_user_input(
         raise ValueError("zarr_store_chunk_size must be a dictionary")
     if not all(key in zarr_store_chunk_size for key in ["time", "y", "x"]):
         raise ValueError(
-            "zarr_store_chunk_size must contain the keys 'time', 'y', and 'x'"
-        )
+            "zarr_store_chunk_size must contain the keys 'time', 'y', and 'x'")
 
     # validate that S2_nbar is a boolean
     if not isinstance(S2_nbar, bool):
         raise ValueError("S2_nbar must be a boolean")
 
     if not isinstance(resampling_method, Resampling):
-        raise ValueError("resampling_method must be a rasterio.enums.Resampling")
+        raise ValueError(
+            "resampling_method must be a rasterio.enums.Resampling")
 
     if not isinstance(save_as_uint16, bool):
         raise ValueError("save_as_uint16 must be a boolean")
 
     if save_as_uint16:
-        sentinel1_disabled = (S1_assets is None) or (
-            isinstance(S1_assets, list) and len(S1_assets) == 0
-        )
+        sentinel1_disabled = (S1_assets
+                              is None) or (isinstance(S1_assets, list)
+                                           and len(S1_assets) == 0)
         if not sentinel1_disabled:
             raise ValueError(
                 "save_as_uint16 can only be used when Sentinel-1 is disabled (set S1_assets to None or an empty list)."
@@ -421,24 +419,23 @@ def setup_zarr_storage(
     root.attrs["crs_wkt"] = target_crs.to_wkt()
 
     sync_file_path = None
-    if not (
-        zarr_store_chunk_size["time"] == 1
-        and zarr_store_chunk_size["y"] == processing_spatial_chunk_size
-        and zarr_store_chunk_size["x"] == processing_spatial_chunk_size
-    ):
+    if not (zarr_store_chunk_size["time"] == 1
+            and zarr_store_chunk_size["y"] == processing_spatial_chunk_size
+            and zarr_store_chunk_size["x"] == processing_spatial_chunk_size):
         # get a uuid for sync file
-        sync_file_path = path.join(
-            tempfile.gettempdir(), f"sentle_{currenttime()}.lock"
-        )
+        sync_file_path = path.join(tempfile.gettempdir(),
+                                   f"sentle_{currenttime()}.lock")
 
     # create array for where to store the processed sentinel data
     # chunk size is the number of S2 bands, because we parallelize S1/S2
-    unique_timestamps = sorted(set(item["ts"] for item in timestamp_list), reverse=True)
+    unique_timestamps = sorted(set(item["ts"] for item in timestamp_list),
+                               reverse=True)
     data_dtype = np.uint16 if save_as_uint16 else np.float32
     data_fill_value = 0 if save_as_uint16 else float("nan")
 
     data = zarr.create(
-        shape=(len(unique_timestamps), len(total_bands_to_save), height, width),
+        shape=(len(unique_timestamps), len(total_bands_to_save), height,
+               width),
         chunks=(
             zarr_store_chunk_size["time"],
             len(S2_bands_to_save),
@@ -477,12 +474,11 @@ def setup_zarr_storage(
         dimension_names=["x"],
     )
     if coord_save_mode == "center":
-        x[:] = (
-            np.arange(bound_left, bound_right, target_resolution)
-            + target_resolution / 2
-        ).astype(np.float32)
+        x[:] = (np.arange(bound_left, bound_right, target_resolution) +
+                target_resolution / 2).astype(np.float32)
     else:
-        x[:] = np.arange(bound_left, bound_right, target_resolution).astype(np.float32)
+        x[:] = np.arange(bound_left, bound_right,
+                         target_resolution).astype(np.float32)
     x.attrs["coord_save_mode"] = coord_save_mode
 
     # y dimension
@@ -495,20 +491,18 @@ def setup_zarr_storage(
         dimension_names=["y"],
     )
     if coord_save_mode == "center":
-        y[:] = (
-            np.arange(bound_top, bound_bottom, -target_resolution)
-            - target_resolution / 2
-        ).astype(np.float32)
+        y[:] = (np.arange(bound_top, bound_bottom, -target_resolution) -
+                target_resolution / 2).astype(np.float32)
     else:
-        y[:] = np.arange(bound_top, bound_bottom, -target_resolution).astype(np.float32)
+        y[:] = np.arange(bound_top, bound_bottom,
+                         -target_resolution).astype(np.float32)
     y.attrs["coord_save_mode"] = coord_save_mode
     if coord_save_mode == "center":
-        y[:] = (
-            np.arange(bound_top, bound_bottom, -target_resolution)
-            - target_resolution / 2
-        ).astype(np.float32)
+        y[:] = (np.arange(bound_top, bound_bottom, -target_resolution) -
+                target_resolution / 2).astype(np.float32)
     else:
-        y[:] = np.arange(bound_top, bound_bottom, -target_resolution).astype(np.float32)
+        y[:] = np.arange(bound_top, bound_bottom,
+                         -target_resolution).astype(np.float32)
     y.attrs["coord_save_mode"] = coord_save_mode
 
     # time dimension
@@ -523,7 +517,8 @@ def setup_zarr_storage(
     )
 
     for i, ts in enumerate(unique_timestamps):
-        time[i] = (ts.tz_localize(tz=None) - pd.Timestamp(0, tz=None)).total_seconds()
+        time[i] = (ts.tz_localize(tz=None) -
+                   pd.Timestamp(0, tz=None)).total_seconds()
     time.attrs.update(ZARR_TIME_ATTRS)
 
     # see https://zarr.readthedocs.io/en/main/user-guide/consolidated_metadata/
@@ -573,7 +568,7 @@ def retrieve_timestamps(
         items = list(search.item_collection())
         if len(items) == 0:
             print("No items found for specified time range and area.")
-            return
+            exit()
 
         df["ts_raw"] = [i.datetime for i in items]
         df["collection"] = [i.collection_id for i in items]
@@ -615,11 +610,10 @@ def retrieve_timestamps(
         # get all timestamps with freq
         timestamps = pd.date_range(start, end, freq=time_composite_freq)[::-1]
 
-        return [
-            {"collection": collection, "ts": ts}
-            for ts in timestamps
-            for collection in collections
-        ]
+        return [{
+            "collection": collection,
+            "ts": ts
+        } for ts in timestamps for collection in collections]
 
 
 def process(
@@ -756,7 +750,8 @@ def process(
         S1_assets = None
 
     if save_as_uint16 and S1_assets is not None:
-        raise ValueError("save_as_uint16 requires Sentinel-1 assets to be disabled.")
+        raise ValueError(
+            "save_as_uint16 requires Sentinel-1 assets to be disabled.")
 
     if S1_assets is not None:
         total_bands_to_save += S1_assets
@@ -770,18 +765,16 @@ def process(
         target_crs=target_crs,
         datetime=datetime,
         collections=["sentinel-2-l2a"]
-        if S1_assets is None
-        else ["sentinel-2-l2a", "sentinel-1-rtc"],
+        if S1_assets is None else ["sentinel-2-l2a", "sentinel-1-rtc"],
     )
 
     # compute bounds, with and height  for the entire dataset
     bound_left, bound_bottom, bound_right, bound_top = check_and_round_bounds(
-        bound_left, bound_bottom, bound_right, bound_top, target_resolution
-    )
+        bound_left, bound_bottom, bound_right, bound_top, target_resolution)
 
-    height, width = height_width_from_bounds_res(
-        bound_left, bound_bottom, bound_right, bound_top, target_resolution
-    )
+    height, width = height_width_from_bounds_res(bound_left, bound_bottom,
+                                                 bound_right, bound_top,
+                                                 target_resolution)
 
     # setup zarr storage
     sync_file_path = setup_zarr_storage(
@@ -809,8 +802,7 @@ def process(
         global GLOBAL_QUEUE_MANAGER
 
         GLOBAL_QUEUE_MANAGER, cloud_request_queue = init_cloud_prediction_service(
-            device=S2_cloud_classification_device
-        )
+            device=S2_cloud_classification_device)
 
     # figure out jobs for multiprocessing -> one per chunk
     config = {
@@ -834,13 +826,10 @@ def process(
     }
 
     processing_spatial_chunk_size_in_CRS_unit = (
-        processing_spatial_chunk_size * target_resolution
-    )
+        processing_spatial_chunk_size * target_resolution)
     s2grid = gpd.read_file(
         pkg_resources.resource_filename(
-            __name__, "data/sentinel2_grid_stripped_with_epsg.gpkg"
-        )
-    )
+            __name__, "data/sentinel2_grid_stripped_with_epsg.gpkg"))
 
     def job_generator():
         global GLOBAL_QUEUE_MANAGER
@@ -848,21 +837,15 @@ def process(
         job_id = 0
 
         for xi, x_min in enumerate(
-            range(bound_left, bound_right, processing_spatial_chunk_size_in_CRS_unit)
-        ):
-            num_y_indices = (
-                ceil(
-                    (bound_top - bound_bottom)
-                    / processing_spatial_chunk_size_in_CRS_unit
-                )
-                - 1
-            )
+                range(bound_left, bound_right,
+                      processing_spatial_chunk_size_in_CRS_unit)):
+            num_y_indices = (ceil(
+                (bound_top - bound_bottom) /
+                processing_spatial_chunk_size_in_CRS_unit) - 1)
 
             for yi, y_min in enumerate(
-                range(
-                    bound_bottom, bound_top, processing_spatial_chunk_size_in_CRS_unit
-                )
-            ):
+                    range(bound_bottom, bound_top,
+                          processing_spatial_chunk_size_in_CRS_unit)):
                 last_ts = timestamp_list[0]["ts"]
                 ts_save_index = 0
                 for item in timestamp_list:
@@ -871,11 +854,11 @@ def process(
                     ret_config["bound_bottom"] = y_min
                     # cap at the top
                     ret_config["bound_right"] = min(
-                        x_min + processing_spatial_chunk_size_in_CRS_unit, bound_right
-                    )
+                        x_min + processing_spatial_chunk_size_in_CRS_unit,
+                        bound_right)
                     ret_config["bound_top"] = min(
-                        y_min + processing_spatial_chunk_size_in_CRS_unit, bound_top
-                    )
+                        y_min + processing_spatial_chunk_size_in_CRS_unit,
+                        bound_top)
                     ret_config["ts"] = item["ts"]
                     ret_config["collection"] = item["collection"]
 
@@ -886,35 +869,34 @@ def process(
                     ret_config["zarr_save_slice"] = dict(
                         x=slice(
                             xi * processing_spatial_chunk_size,
-                            min((xi + 1) * processing_spatial_chunk_size, width),
+                            min((xi + 1) * processing_spatial_chunk_size,
+                                width),
                         ),
                         y=slice(
-                            max(0, height - (yi + 1) * processing_spatial_chunk_size),
+                            max(
+                                0, height -
+                                (yi + 1) * processing_spatial_chunk_size),
                             height - yi * processing_spatial_chunk_size,
                         ),
                         band=slice(0, len(S2_bands_to_save))
-                        if item["collection"] == "sentinel-2-l2a"
-                        else slice(len(S2_bands_to_save), len(total_bands_to_save)),
+                        if item["collection"] == "sentinel-2-l2a" else slice(
+                            len(S2_bands_to_save), len(total_bands_to_save)),
                         time=ts_save_index,
                     )
-                    ret_config["S2_subtiles"] = (
-                        obtain_subtiles(
-                            target_crs=target_crs,
-                            left=ret_config["bound_left"],
-                            bottom=ret_config["bound_bottom"],
-                            right=ret_config["bound_right"],
-                            top=ret_config["bound_top"],
-                            s2grid=s2grid,
-                        )
-                        if item["collection"] == "sentinel-2-l2a"
-                        else None
-                    )
-                    if (
-                        S2_cloud_classification
-                        and item["collection"] == "sentinel-2-l2a"
-                    ):
-                        GLOBAL_QUEUES[job_id] = GLOBAL_QUEUE_MANAGER.Queue(maxsize=1)
-                        ret_config["cloud_response_queue"] = GLOBAL_QUEUES[job_id]
+                    ret_config["S2_subtiles"] = (obtain_subtiles(
+                        target_crs=target_crs,
+                        left=ret_config["bound_left"],
+                        bottom=ret_config["bound_bottom"],
+                        right=ret_config["bound_right"],
+                        top=ret_config["bound_top"],
+                        s2grid=s2grid,
+                    ) if item["collection"] == "sentinel-2-l2a" else None)
+                    if (S2_cloud_classification
+                            and item["collection"] == "sentinel-2-l2a"):
+                        GLOBAL_QUEUES[job_id] = GLOBAL_QUEUE_MANAGER.Queue(
+                            maxsize=1)
+                        ret_config["cloud_response_queue"] = GLOBAL_QUEUES[
+                            job_id]
                         ret_config["job_id"] = job_id
                         job_id += 1
                     else:
@@ -924,18 +906,17 @@ def process(
                     yield ret_config
 
     with tqdm_joblib(
-        tqdm(
-            desc="processing",
-            unit="ptiles",
-            dynamic_ncols=True,
-            total=len(timestamp_list),
-        )
-    ) as progress_bar:
+            tqdm(
+                desc="processing",
+                unit="ptiles",
+                dynamic_ncols=True,
+                total=len(timestamp_list),
+            )) as progress_bar:
         with parallel_backend("cleanupqueue"):
             # backend can be loky or threading (or maybe something else)
-            Parallel(n_jobs=num_workers, batch_size=1)(
-                delayed(process_ptile)(**p) for p in job_generator()
-            )
+            Parallel(n_jobs=num_workers,
+                     batch_size=1)(delayed(process_ptile)(**p)
+                                   for p in job_generator())
 
     # close cloud queue
     if S2_cloud_classification:
