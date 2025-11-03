@@ -74,7 +74,8 @@ def compute_cloud_mask(array: np.ndarray, model: torch.jit.ScriptModule,
 
     # Compute the cloud mask
     with torch.no_grad():
-        cloud_probabilities = model(tensor.type(torch.float32)).cpu().numpy()
+        cloud_logits = model(tensor.type(torch.float32))
+        cloud_probabilities = torch.softmax(cloud_logits, dim=1).cpu().numpy()
 
     # remove padding again
     cloud_probabilities = cloud_probabilities[0, :, 2:-2, 2:-2]
