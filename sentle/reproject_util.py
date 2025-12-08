@@ -49,7 +49,8 @@ def calculate_aligned_transform(src_crs, dst_crs, height, width, left, bottom,
     )
 
     if repr_width is None or repr_height is None:
-        raise ValueError("calculate_default_transform returned None for width or height")
+        raise ValueError(
+            "calculate_default_transform returned None for width or height")
 
     # include one more pixel because rounding down
     repr_width += 1
@@ -130,6 +131,15 @@ def recrop_write_window(win, overall_height, overall_width):
         width=gwidth).round_offsets().round_lengths(), windows.Window(
             row_off=lrow, col_off=lcol, height=lheight,
             width=lwidth).round_offsets().round_lengths()
+
+
+def window_overlaps_bounds(win, overall_height, overall_width):
+    """Return True if the window intersects the bounding box."""
+    overlap_width = min(overall_width, win.col_off + win.width) - max(
+        0, win.col_off)
+    overlap_height = min(overall_height, win.row_off + win.height) - max(
+        0, win.row_off)
+    return overlap_width > 0 and overlap_height > 0
 
 
 def bounds_from_transform_height_width_res(tf, height, width, resolution):

@@ -11,12 +11,20 @@ from rasterio.crs import CRS
 from rasterio.enums import Resampling
 from shapely.geometry import Polygon, box
 
-from .cloud_mask import (S2_cloud_mask_band, S2_cloud_prob_bands,
-                         worker_get_cloud_mask)
-from .const import S2_RAW_BAND_RESOLUTION, S2_RAW_BANDS, S2_subtile_size, S2_NBAR_INDICES_RAW_BANDS
-from .reproject_util import (bounds_from_transform_height_width_res,
-                             calculate_aligned_transform, recrop_write_window)
+from .cloud_mask import S2_cloud_mask_band, S2_cloud_prob_bands, worker_get_cloud_mask
+from .const import (
+    S2_NBAR_INDICES_RAW_BANDS,
+    S2_RAW_BAND_RESOLUTION,
+    S2_RAW_BANDS,
+    S2_subtile_size,
+)
 from .nbar import get_c_factor_value
+from .reproject_util import (
+    bounds_from_transform_height_width_res,
+    calculate_aligned_transform,
+    recrop_write_window,
+    window_overlaps_bounds,
+)
 from .snow_mask import S2_snow_mask_band, compute_potential_snow_layer
 from .stac import refresh_sas_token
 
@@ -252,6 +260,9 @@ def process_S2_subtile(
     write_win = windows.from_bounds(
         *subtile_bounds_tcrs,
         transform=ptile_transform).round_offsets().round_lengths()
+
+    if not window_overlaps_bounds(write_win, ptile_height, ptile_width):
+        return None, None, None
 
     write_win, local_win = recrop_write_window(write_win, ptile_height,
                                                ptile_width)

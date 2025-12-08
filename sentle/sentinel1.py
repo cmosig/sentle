@@ -8,8 +8,12 @@ from rasterio.crs import CRS
 from rasterio.enums import Resampling
 
 from .const import ORBIT_STATE_ABBREVIATION, S1_TRUE_ASSETS
-from .reproject_util import (bounds_from_transform_height_width_res,
-                             calculate_aligned_transform, recrop_write_window)
+from .reproject_util import (
+    bounds_from_transform_height_width_res,
+    calculate_aligned_transform,
+    recrop_write_window,
+    window_overlaps_bounds,
+)
 from .stac import refresh_sas_token
 
 
@@ -131,6 +135,10 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                     write_win = windows.from_bounds(
                         *tile_bounds_trcs, transform=ptile_transform
                     ).round_offsets().round_lengths()
+
+                    if not window_overlaps_bounds(write_win, ptile_height,
+                                                  ptile_width):
+                        continue
 
                     # determine crop to avoid out of bounds
                     write_win, local_win = recrop_write_window(
