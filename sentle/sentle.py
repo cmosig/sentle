@@ -207,12 +207,12 @@ def process_ptile(
         lock = FileLock(sync_file_path)
         with lock:
             dst = zarr.open(zarr_store)["sentle"]
-        dst[
-            zarr_save_slice["time"],
-            zarr_save_slice["band"],
-            zarr_save_slice["y"],
-            zarr_save_slice["x"],
-        ] = ptile_array
+            dst[
+                zarr_save_slice["time"],
+                zarr_save_slice["band"],
+                zarr_save_slice["y"],
+                zarr_save_slice["x"],
+            ] = ptile_array
 
     return job_id
 
