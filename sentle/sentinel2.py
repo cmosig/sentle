@@ -330,7 +330,7 @@ def process_ptile_S2_dispatcher(
     ptile_array_bands = None
     timestamps_it = items["ts"].drop_duplicates().tolist()
     for ts in timestamps_it:
-        ptile_timestamp, ptile_array_bands = process_ptile_S2(
+        ptile_timestamp, ret_bands = process_ptile_S2(
             timestamp=ts,
             target_crs=target_crs,
             target_resolution=target_resolution,
@@ -353,6 +353,11 @@ def process_ptile_S2_dispatcher(
         # computer issue
         if ptile_timestamp is None:
             continue
+
+        # only assign the sentinel/band accumulator for valid timestamps, so a
+        # last acquisition returning None cannot clobber it and discard the
+        # composite assembled from earlier valid acquisitions
+        ptile_array_bands = ret_bands
 
         # replace nans with zero, to that sum works properly
         ptile_timestamp = np.nan_to_num(ptile_timestamp, 0)
@@ -462,7 +467,7 @@ def process_ptile_S2(
         # sentinel2 repository
         stac_item = subdf["item"].iloc[0]
 
-        subtile_array_ret, write_win, subtile_array_bands = process_S2_subtile(
+        subtile_array_ret, write_win, ret_bands = process_S2_subtile(
             intersecting_windows=st.intersecting_windows,
             stac_item=stac_item,
             timestamp=timestamp,
@@ -482,8 +487,13 @@ def process_ptile_S2(
 
         # this happens when the href is not available
         # -> planetary computer issue
-        if subtile_array_ret is None or write_win is None or subtile_array_bands is None:
+        if subtile_array_ret is None or write_win is None or ret_bands is None:
             continue
+
+        # only assign the sentinel/band accumulator for valid subtiles, so an
+        # out-of-bounds last subtile cannot clobber it back to None and discard
+        # data accumulated from earlier valid subtiles
+        subtile_array_bands = ret_bands
 
         # also replace nan with 0 so that the mean computation works
         # (this is reverted later)
