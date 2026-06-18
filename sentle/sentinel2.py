@@ -187,8 +187,8 @@ def process_S2_subtile(
                 f"stac_read_failure asset={href} band={band} exception_type={type(e).__name__} message={e} note=planetary_computer_issue"
             )
 
-    # in this case we have no data for this subtile
-    if s2_tile_transform is None:
+    # in this case we have no data for this subtile, or the tile has no CRS
+    if s2_tile_transform is None or not s2_crs:
         return None, None, None
 
     # determine bounds based on subtile window and tile transform
