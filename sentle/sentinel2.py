@@ -10,6 +10,7 @@ from rasterio import transform, warp, windows
 from rasterio.crs import CRS
 from rasterio.enums import Resampling
 from shapely.geometry import Polygon, box
+from shapely.ops import unary_union
 
 from .cloud_mask import S2_cloud_mask_band, S2_cloud_prob_bands, worker_get_cloud_mask
 from .const import (
@@ -76,30 +77,80 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
     s2grid["tile_transform"] = s2grid["s2_footprint_utm"].apply(
         lambda x: transform.from_bounds(*x.bounds, width=10980, height=10980))
 
-    # convert read window to polygon in S2 local CRS, then transform to
-    # s2grid.crs and check overlap with transformed bounds
-    s2grid["intersecting_windows"] = s2grid[["tile_transform", "crs"]].apply(
-        lambda ser: [
-            win_subtile for win_subtile in general_subtile_windows
-            if transformed_bounds.intersects(
-                Polygon(*warp.transform_geom(
-                    src_crs=ser["crs"],
-                    dst_crs=s2grid.crs,
-                    geom=box(*windows.bounds(win_subtile, ser["tile_transform"]
-                                             )))["coordinates"]))
-        ],
-        axis=1)
+    # For each tile, compute the subtile windows intersecting the bounds
+    # together with their geographic footprint (in s2grid.crs). The footprint
+    # is reused below to eliminate downloads that are redundant because of the
+    # Sentinel-2 MGRS tile overlap (see Bauer-Marschallinger & Falkner, 2023:
+    # adjacent UTM/MGRS tiles overlap, so a single location is covered by up to
+    # 6 tiles -- downloading it from more than one is wasted bandwidth).
+    def _intersecting_window_footprints(ser):
+        out = []
+        for win_subtile in general_subtile_windows:
+            footprint = Polygon(*warp.transform_geom(
+                src_crs=ser["crs"],
+                dst_crs=s2grid.crs,
+                geom=box(*windows.bounds(win_subtile, ser["tile_transform"])))
+                                ["coordinates"])
+            if transformed_bounds.intersects(footprint):
+                out.append((win_subtile, footprint))
+        return out
 
-    # each line contains one subtile of a sentinel that we want to download and
-    # process because it intersects the specified bounds to download
-    s2grid = s2grid.explode("intersecting_windows")
+    s2grid["window_footprints"] = s2grid[["tile_transform", "crs"]].apply(
+        _intersecting_window_footprints, axis=1)
 
-    # remove sentinel tiles that do not intersect with the bounds
-    # this can happen in edge cases
-    s2grid = s2grid.dropna(subset=["intersecting_windows"])
+    # drop tiles whose windows do not intersect the bounds (edge cases)
+    s2grid = s2grid[s2grid["window_footprints"].apply(len) > 0]
 
-    # only keep columns that we also need later
-    return s2grid[['name', 'intersecting_windows']]
+    # ------------------------------------------------------------------
+    # redundancy elimination across overlapping MGRS tiles
+    #
+    # We greedily assign geography to tiles, processing the tiles that cover
+    # the largest share of the requested area first (this keeps the number of
+    # partially-overlapping boundary subtiles minimal). A subtile window is
+    # only kept if it contributes geography that is not already covered by a
+    # higher-priority tile. This preserves full coverage (every location that
+    # is covered by at least one tile stays covered by the highest-priority
+    # tile covering it) while never downloading the same location twice.
+    # ------------------------------------------------------------------
+
+    # the area each tile contributes within the requested bounds; used both as
+    # the priority key and (clipped) as the "claimed" region
+    s2grid["aoi_footprint"] = s2grid["window_footprints"].apply(
+        lambda wf: unary_union([fp for _, fp in wf]).intersection(
+            transformed_bounds))
+    s2grid["aoi_area"] = s2grid["aoi_footprint"].apply(lambda g: g.area)
+
+    # process tiles covering the most area first; name as deterministic tiebreak
+    s2grid = s2grid.sort_values(["aoi_area", "name"],
+                                ascending=[False, True])
+
+    # fraction of a subtile footprint that must be newly covered for the
+    # subtile to be worth downloading; small enough to only drop fully
+    # redundant subtiles (and numerical slivers), never genuine sub-pixel data
+    keep_frac_threshold = 1e-6
+
+    claimed = None
+    kept_names = []
+    kept_windows = []
+    for row in s2grid.itertuples(index=False):
+        for win_subtile, footprint in row.window_footprints:
+            if claimed is None:
+                keep = True
+            else:
+                covered_area = footprint.intersection(claimed).area
+                keep = (footprint.area -
+                        covered_area) > keep_frac_threshold * footprint.area
+            if keep:
+                kept_names.append(row.name)
+                kept_windows.append(win_subtile)
+        claimed = (row.aoi_footprint
+                   if claimed is None else claimed.union(row.aoi_footprint))
+
+    # each row is one subtile of a sentinel tile to download and process
+    return pd.DataFrame({
+        "name": kept_names,
+        "intersecting_windows": kept_windows
+    })
 
 
 def process_S2_subtile(
