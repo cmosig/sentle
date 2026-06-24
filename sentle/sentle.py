@@ -836,6 +836,11 @@ def process(
         global GLOBAL_QUEUES
         job_id = 0
 
+        # the S2 subtiles depend only on the spatial chunk, not on the
+        # timestamp, so cache them per spatial chunk to avoid recomputing the
+        # (relatively expensive) geometry intersection for every timestamp
+        subtile_cache = {}
+
         for xi, x_min in enumerate(
                 range(bound_left, bound_right,
                       processing_spatial_chunk_size_in_CRS_unit)):
@@ -883,14 +888,19 @@ def process(
                             len(S2_bands_to_save), len(total_bands_to_save)),
                         time=ts_save_index,
                     )
-                    ret_config["S2_subtiles"] = (obtain_subtiles(
-                        target_crs=target_crs,
-                        left=ret_config["bound_left"],
-                        bottom=ret_config["bound_bottom"],
-                        right=ret_config["bound_right"],
-                        top=ret_config["bound_top"],
-                        s2grid=s2grid,
-                    ) if item["collection"] == "sentinel-2-l2a" else None)
+                    if item["collection"] == "sentinel-2-l2a":
+                        if (xi, yi) not in subtile_cache:
+                            subtile_cache[(xi, yi)] = obtain_subtiles(
+                                target_crs=target_crs,
+                                left=ret_config["bound_left"],
+                                bottom=ret_config["bound_bottom"],
+                                right=ret_config["bound_right"],
+                                top=ret_config["bound_top"],
+                                s2grid=s2grid,
+                            )
+                        ret_config["S2_subtiles"] = subtile_cache[(xi, yi)]
+                    else:
+                        ret_config["S2_subtiles"] = None
                     if (S2_cloud_classification
                             and item["collection"] == "sentinel-2-l2a"):
                         GLOBAL_QUEUES[job_id] = GLOBAL_QUEUE_MANAGER.Queue(
