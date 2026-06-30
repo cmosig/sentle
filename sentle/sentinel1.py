@@ -12,6 +12,7 @@ from .reproject_util import (
     bounds_from_transform_height_width_res,
     calculate_aligned_transform,
     recrop_write_window,
+    reproject_nodata_zero,
     window_overlaps_bounds,
 )
 from .stac import refresh_sas_token
@@ -107,18 +108,17 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                                          dtype=np.float32)
 
                     # billinear reprojection for everything
-                    warp.reproject(source=data,
-                                   destination=data_repr,
-                                   src_transform=transform.from_bounds(
-                                       *ptile_bounds_local_crs,
-                                       height=read_win.height,
-                                       width=read_win.width),
-                                   src_crs=dr.crs,
-                                   dst_crs=target_crs,
-                                   src_nodata=0,
-                                   dst_nodata=0,
-                                   dst_transform=tile_repr_transform,
-                                   resampling=resampling_method)
+                    reproject_nodata_zero(
+                        source=data,
+                        destination=data_repr,
+                        src_transform=transform.from_bounds(
+                            *ptile_bounds_local_crs,
+                            height=read_win.height,
+                            width=read_win.width),
+                        src_crs=dr.crs,
+                        dst_crs=target_crs,
+                        dst_transform=tile_repr_transform,
+                        resampling=resampling_method)
 
                     # explicit clear
                     del data

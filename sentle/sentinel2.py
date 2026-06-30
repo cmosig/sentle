@@ -24,6 +24,7 @@ from .reproject_util import (
     bounds_from_transform_height_width_res,
     calculate_aligned_transform,
     recrop_write_window,
+    reproject_nodata_zero,
     window_overlaps_bounds,
 )
 from .snow_mask import S2_snow_mask_band, compute_potential_snow_layer
@@ -286,17 +287,16 @@ def process_S2_subtile(
     subtile_array_repr = np.empty(
         (len(band_names), subtile_repr_height, subtile_repr_width),
         dtype=np.float32)
-    warp.reproject(source=subtile_array,
-                   destination=subtile_array_repr,
-                   src_transform=transform.from_bounds(*subtile_bounds_utm,
-                                                       width=S2_subtile_size,
-                                                       height=S2_subtile_size),
-                   src_crs=s2_crs,
-                   dst_crs=target_crs,
-                   src_nodata=0,
-                   dst_nodata=0,
-                   dst_transform=subtile_repr_transform,
-                   resampling=resampling_method)
+    reproject_nodata_zero(source=subtile_array,
+                          destination=subtile_array_repr,
+                          src_transform=transform.from_bounds(
+                              *subtile_bounds_utm,
+                              width=S2_subtile_size,
+                              height=S2_subtile_size),
+                          src_crs=s2_crs,
+                          dst_crs=target_crs,
+                          dst_transform=subtile_repr_transform,
+                          resampling=resampling_method)
     # explicit clear
     del subtile_array
 
