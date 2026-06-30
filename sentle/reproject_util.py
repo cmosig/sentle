@@ -1,7 +1,47 @@
 import warnings
 
+import numpy as np
 from affine import Affine
 from rasterio import transform, warp, windows
+
+
+def reproject_nodata_zero(*, source, destination, src_transform, src_crs,
+                          dst_transform, dst_crs, resampling):
+    """Reproject ``source`` into ``destination`` treating 0 as NoData.
+
+    sentle uses an exact ``== 0`` comparison as its NoData sentinel everywhere
+    downstream of reprojection (NoData masks, cloud masks, valid-pixel counts).
+    The natural call is therefore ``warp.reproject(..., src_nodata=0,
+    dst_nodata=0)``.
+
+    However, GDAL >= 3.11 refuses to write a *valid* (non-NoData) pixel whose
+    resampled value happens to equal ``dst_nodata``: with ``dst_nodata=0`` it
+    silently bumps such pixels to ~1.4013e-45 (FLT_TRUE_MIN) and logs a
+    ``CPLE_AppDefined`` warning ("Value 0 ... changed to 1.4013e-45 ... to
+    avoid being treated as NoData"). In a multi-band warp this fires for every
+    pixel that is zero in some-but-not-all bands. Those bumped values are no
+    longer exactly 0, so they leak past sentle's ``== 0`` masks -- under-masking
+    NoData and dropping clear pixels as cloudy. See GDAL issue #13677.
+
+    To avoid the collision entirely we warp with ``dst_nodata=NaN`` (valid
+    reflectance can never equal NaN, so GDAL never bumps and never warns) and
+    then normalize the NaN fill back to 0, preserving sentle's 0-based NoData
+    convention. The result is byte-identical to ``dst_nodata=0`` on GDAL < 3.11.
+    """
+    warp.reproject(source=source,
+                   destination=destination,
+                   src_transform=src_transform,
+                   src_crs=src_crs,
+                   dst_transform=dst_transform,
+                   dst_crs=dst_crs,
+                   src_nodata=0,
+                   dst_nodata=np.nan,
+                   resampling=resampling)
+
+    # restore sentle's 0-based NoData sentinel (NaN fill -> 0)
+    np.nan_to_num(destination, copy=False, nan=0.0)
+
+    return destination
 
 
 def check_and_round_bounds(left, bottom, right, top, res):
