@@ -91,3 +91,35 @@ def test_cube_contains_plausible_reflectance(cube):
     assert finite.min() >= 0
     assert np.nanmedian(finite) > 0
     assert finite.max() < 20000
+
+
+def test_small_subtile_size_with_cloud_classification(tmp_path_factory):
+    """Issue #30: a smaller subtile size (244) must work end-to-end, including
+    the cloud model whose input is padded to a multiple of 32."""
+    store = str(tmp_path_factory.mktemp("e2e_sub") / "sub.zarr")
+    process(
+        target_crs=TARGET_CRS,
+        target_resolution=RES,
+        bound_left=LEFT,
+        bound_bottom=BOTTOM,
+        bound_right=RIGHT,
+        bound_top=TOP,
+        datetime=DATETIME,
+        zarr_store=store,
+        S1_assets=None,
+        S2_subtile_size=244,
+        S2_cloud_classification=True,
+        S2_cloud_classification_device="cpu",
+        num_workers=1,
+        resampling_method=Resampling.nearest,
+    )
+    ds = xr.open_zarr(store)
+    assert "S2_cloud_classification" in list(ds["band"].values)
+    cc = ds.sel(band="S2_cloud_classification")["sentle"].values
+    classes = np.unique(cc[np.isfinite(cc)])
+    # cloud classes are a subset of {clear, thick, thin, shadow}
+    assert set(classes).issubset({0.0, 1.0, 2.0, 3.0})
+    # reflectance still looks sane
+    b02 = ds.sel(band="B02")["sentle"].values
+    b02 = b02[np.isfinite(b02)]
+    assert b02.size > 0 and b02.min() >= 0

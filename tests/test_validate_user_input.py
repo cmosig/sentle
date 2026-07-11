@@ -183,3 +183,30 @@ class TestResamplingAndStore:
     def test_zarr_store_wrong_type_raises(self):
         with pytest.raises(ValueError, match="zarr_store"):
             validate_user_input(**_valid_kwargs(zarr_store=12345))
+
+
+class TestS2SubtileSize:
+    @pytest.mark.parametrize("size", [244, 305, 366, 610, 732, 10980])
+    def test_valid_divisors_are_allowed(self, size):
+        validate_user_input(**_valid_kwargs(S2_subtile_size=size))
+
+    def test_default_is_valid(self):
+        # the default 732 must always pass
+        validate_user_input(**_valid_kwargs())
+
+    def test_non_integer_raises(self):
+        with pytest.raises(ValueError, match="S2_subtile_size must be an integer"):
+            validate_user_input(**_valid_kwargs(S2_subtile_size=732.0))
+
+    def test_non_divisor_raises(self):
+        with pytest.raises(ValueError, match="divisor of 10980"):
+            validate_user_input(**_valid_kwargs(S2_subtile_size=500))
+
+    def test_too_small_raises(self):
+        # 183 divides 10980 but is below the 244 floor
+        with pytest.raises(ValueError, match="between 244 and 10980"):
+            validate_user_input(**_valid_kwargs(S2_subtile_size=183))
+
+    def test_too_large_raises(self):
+        with pytest.raises(ValueError, match="divisor of 10980"):
+            validate_user_input(**_valid_kwargs(S2_subtile_size=20000))

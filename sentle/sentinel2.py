@@ -32,20 +32,22 @@ from .stac import refresh_sas_token
 
 
 def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
-                    top: float, s2grid):
+                    top: float, s2grid, subtile_size: int = S2_subtile_size):
     """Retrieves the sentinel subtiles that intersect the with the specified
     bounds. The bounds are interpreted based on the given target_crs.
+
+    ``subtile_size`` is the side length (in 10 m pixels) of each subtile a
+    Sentinel-2 tile is split into for download; it must be a divisor of 10980.
     """
 
     # TODO make it possible to not only use naive bounds but also MultiPolygons
 
     # check if supplied sub_tile_width makes sense
-    assert (S2_subtile_size >= 16) and (
-        S2_subtile_size
-        <= 10980), "S2_subtile_size needs to within 16 and 10980"
+    assert (subtile_size >= 16) and (
+        subtile_size <= 10980), "subtile_size needs to within 16 and 10980"
     assert (
         10980 %
-        S2_subtile_size) == 0, "S2_subtile_size needs to be a divisor of 10980"
+        subtile_size) == 0, "subtile_size needs to be a divisor of 10980"
 
     # convert bounds to sentinel grid crs
     transformed_bounds = Polygon(*warp.transform_geom(
@@ -59,11 +61,11 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
     general_subtile_windows = [
         windows.Window(col_off=col_off,
                        row_off=row_off,
-                       width=S2_subtile_size,
-                       height=S2_subtile_size)
+                       width=subtile_size,
+                       height=subtile_size)
         for col_off, row_off in itertools.product(
-            np.arange(0, 10980, S2_subtile_size),
-            np.arange(0, 10980, S2_subtile_size))
+            np.arange(0, 10980, subtile_size),
+            np.arange(0, 10980, subtile_size))
     ]
 
     # reproject s2 footprint to local utm footprint
@@ -170,17 +172,20 @@ def process_S2_subtile(
     cloud_request_queue: mp.Queue,
     cloud_response_queue: mp.Queue,
     resampling_method: Resampling,
+    subtile_size: int = S2_subtile_size,
 ):
     """Processes a single sentinel 2 subtile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution, applying
     cloud and snow masks and computing NBAR if requested. The function returns
     the reprojected subtile, the write window and the band names of the
     reprojected subtile.
+
+    ``subtile_size`` is the side length (in 10 m pixels) of the subtile.
     """
 
     # init array that needs to be filled
     subtile_array = np.empty(
-        (len(S2_RAW_BANDS), S2_subtile_size, S2_subtile_size),
+        (len(S2_RAW_BANDS), subtile_size, subtile_size),
         dtype=np.float32)
     band_names = S2_RAW_BANDS.copy()
 
@@ -207,8 +212,8 @@ def process_S2_subtile(
                 # nearest-neighbor (default)
                 read_data = dr.read(indexes=1,
                                     window=read_window,
-                                    out_shape=(S2_subtile_size,
-                                               S2_subtile_size),
+                                    out_shape=(subtile_size,
+                                               subtile_size),
                                     out_dtype=np.float32)
 
                 # harmonization
@@ -248,10 +253,10 @@ def process_S2_subtile(
                                         s2_tile_transform)
     assert (
         subtile_bounds_utm[2] - subtile_bounds_utm[0]
-    ) // 10 == S2_subtile_size, "mismatch between subtile size and bounds on x-axis"
+    ) // 10 == subtile_size, "mismatch between subtile size and bounds on x-axis"
     assert (
         subtile_bounds_utm[3] - subtile_bounds_utm[1]
-    ) // 10 == S2_subtile_size, "mismatch between subtile size and bounds on y-axis"
+    ) // 10 == subtile_size, "mismatch between subtile size and bounds on y-axis"
 
     if S2_cloud_classification:
         # this waits for the cloud mask to be computed in the service
@@ -291,8 +296,8 @@ def process_S2_subtile(
                           destination=subtile_array_repr,
                           src_transform=transform.from_bounds(
                               *subtile_bounds_utm,
-                              width=S2_subtile_size,
-                              height=S2_subtile_size),
+                              width=subtile_size,
+                              height=subtile_size),
                           src_crs=s2_crs,
                           dst_crs=target_crs,
                           dst_transform=subtile_repr_transform,
@@ -354,6 +359,7 @@ def process_ptile_S2_dispatcher(
     cloud_request_queue: mp.Queue,
     cloud_response_queue: mp.Queue,
     resampling_method: Resampling,
+    subtile_size: int = S2_subtile_size,
 ):
 
     items = pd.DataFrame()
@@ -398,6 +404,7 @@ def process_ptile_S2_dispatcher(
             cloud_request_queue=cloud_request_queue,
             cloud_response_queue=cloud_response_queue,
             resampling_method=resampling_method,
+            subtile_size=subtile_size,
         )
 
         # this happens when the href is not available in subtile -> planetary
@@ -486,6 +493,7 @@ def process_ptile_S2(
     S2_return_cloud_probabilities: bool,
     S2_nbar: bool,
     resampling_method: Resampling,
+    subtile_size: int = S2_subtile_size,
 ):
     # cloud classification layer and snow mask is added later
     num_bands = len(S2_RAW_BANDS)
@@ -534,6 +542,7 @@ def process_ptile_S2(
             cloud_response_queue=cloud_response_queue,
             cloud_request_queue=cloud_request_queue,
             resampling_method=resampling_method,
+            subtile_size=subtile_size,
         )
 
         # this happens when the href is not available

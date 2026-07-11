@@ -27,7 +27,12 @@ from .cloud_mask import (
     init_cloud_prediction_service,
 )
 from .snow_mask import S2_snow_mask_band
-from .const import S1_ASSETS, S2_RAW_BANDS, ZARR_TIME_ATTRS
+from .const import (
+    S1_ASSETS,
+    S2_RAW_BANDS,
+    S2_subtile_size as S2_subtile_size_default,
+    ZARR_TIME_ATTRS,
+)
 from .reproject_util import (
     check_and_round_bounds,
     height_width_from_bounds_res,
@@ -90,6 +95,7 @@ def process_ptile(
     bound_top,
     collection,
     S2_bands_to_save,
+    S2_subtile_size,
     S1_assets,
     target_crs: CRS,
     target_resolution: float,
@@ -178,6 +184,7 @@ def process_ptile(
             S2_apply_cloud_mask=S2_apply_cloud_mask,
             S2_bands_to_save=S2_bands_to_save,
             S2_subtiles=S2_subtiles,
+            subtile_size=S2_subtile_size,
             cloud_request_queue=cloud_request_queue,
             cloud_response_queue=cloud_response_queue,
             resampling_method=resampling_method,
@@ -240,6 +247,7 @@ def validate_user_input(
     S2_apply_snow_mask: bool = False,
     S2_apply_cloud_mask: bool = False,
     save_as_uint16: bool = False,
+    S2_subtile_size: int = S2_subtile_size_default,
 ):
     # validate type zarr store
     # ``zarr.storage.StoreLike`` is a typing union that includes a
@@ -384,6 +392,20 @@ def validate_user_input(
             raise ValueError(
                 "save_as_uint16 can only be used when Sentinel-1 is disabled (set S1_assets to None or an empty list)."
             )
+
+    # validate the Sentinel-2 subtile size (download granularity)
+    if not isinstance(S2_subtile_size, int) or isinstance(
+            S2_subtile_size, bool):
+        raise ValueError("S2_subtile_size must be an integer")
+    if 10980 % S2_subtile_size != 0:
+        raise ValueError(
+            f"S2_subtile_size must be a divisor of 10980, got {S2_subtile_size}"
+        )
+    # smaller than 244 leaves too little context for cloud detection (and its
+    # divisible-by-32 padding); larger than a full tile is meaningless
+    if not (244 <= S2_subtile_size <= 10980):
+        raise ValueError(
+            "S2_subtile_size must be between 244 and 10980 (inclusive)")
 
 
 def setup_zarr_storage(
@@ -653,6 +675,7 @@ def process(
     resampling_method: Resampling = Resampling.nearest,
     consolidate_metadata: bool = True,
     save_as_uint16: bool = False,
+    S2_subtile_size: int = S2_subtile_size_default,
 ):
     """
     Parameters
@@ -709,6 +732,13 @@ def process(
         prevent potential issues near cloud edges and dynamic range changes.
     save_as_uint16 : bool, default=False
         When True and Sentinel-1 is disabled, persist Sentinel-2 data using unsigned 16-bit integers with zero fill.
+    S2_subtile_size : int, default=732
+        Side length (in 10 m pixels) of the subtiles each Sentinel-2 tile is
+        split into for download. Must be a divisor of 10980 and between 244 and
+        10980. Smaller values (e.g. 244) make small cubes cheaper to generate
+        by downloading less unused area per subtile; 732 is a good default for
+        larger areas. Works with cloud detection (the model input is padded to
+        a multiple of 32 automatically).
     """
 
     # Accept either a CRS or a string for target_crs
@@ -738,6 +768,7 @@ def process(
         S2_nbar=S2_nbar,
         resampling_method=resampling_method,
         save_as_uint16=save_as_uint16,
+        S2_subtile_size=S2_subtile_size,
     )
 
     # TODO support to only download subset of bands (mutually exclusive with
@@ -824,6 +855,7 @@ def process(
         "S2_return_cloud_probabilities": S2_return_cloud_probabilities,
         "zarr_store": zarr_store,
         "S2_bands_to_save": S2_bands_to_save,
+        "S2_subtile_size": S2_subtile_size,
         "S1_assets": S1_assets,
         "cloud_request_queue": cloud_request_queue,
         "sync_file_path": sync_file_path,
@@ -904,6 +936,7 @@ def process(
                                 right=ret_config["bound_right"],
                                 top=ret_config["bound_top"],
                                 s2grid=s2grid,
+                                subtile_size=S2_subtile_size,
                             )
                         ret_config["S2_subtiles"] = subtile_cache[(xi, yi)]
                     else:

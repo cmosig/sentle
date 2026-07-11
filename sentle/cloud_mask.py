@@ -55,12 +55,21 @@ def cloud_prediction_loop(request_queue: mp.Queue, device: str):
 def compute_cloud_mask(array: np.ndarray, model: torch.jit.ScriptModule,
                        device: str):
 
-    assert array.shape == (
-        12, 732,
-        732), "only supporting shape (12, 732, 732) for cloud masking for now"
+    assert array.ndim == 3 and array.shape[0] == 12, (
+        "cloud masking expects a (12, H, W) array")
+    assert array.shape[1] == array.shape[2], (
+        "cloud masking expects square subtiles")
 
-    # add padding so that shape is divisable by 16 for cloudsen
-    array = np.pad(array, [(0, 0), (2, 2), (2, 2)], "edge")
+    # cloudsen's U-Net downsamples by 32, so the spatial dims must be divisible
+    # by 32; pad (symmetrically where possible) up to the next multiple of 32
+    # and remove the padding afterwards. e.g. 732 -> 736 (pad 2/2),
+    # 244 -> 256 (pad 6/6).
+    size = array.shape[1]
+    pad_total = (-size) % 32
+    pad_before = pad_total // 2
+    pad_after = pad_total - pad_before
+    array = np.pad(array, [(0, 0), (pad_before, pad_after),
+                           (pad_before, pad_after)], "edge")
 
     # expand one dim because it needs it
     array = np.expand_dims(array, axis=0)
@@ -77,8 +86,10 @@ def compute_cloud_mask(array: np.ndarray, model: torch.jit.ScriptModule,
         cloud_logits = model(tensor.type(torch.float32))
         cloud_probabilities = torch.softmax(cloud_logits, dim=1).cpu().numpy()
 
-    # remove padding again
-    cloud_probabilities = cloud_probabilities[0, :, 2:-2, 2:-2]
+    # remove padding again (crop back to the original subtile extent)
+    cloud_probabilities = cloud_probabilities[0, :,
+                                              pad_before:pad_before + size,
+                                              pad_before:pad_before + size]
 
     return cloud_probabilities
 
