@@ -14,7 +14,7 @@ from shapely.ops import unary_union
 
 from .cloud_mask import S2_cloud_mask_band, S2_cloud_prob_bands, worker_get_cloud_mask
 from .const import (
-    S2_NBAR_INDICES_RAW_BANDS,
+    S2_NBAR_BANDS,
     S2_RAW_BAND_RESOLUTION,
     S2_RAW_BANDS,
     S2_subtile_size,
@@ -170,26 +170,36 @@ def process_S2_subtile(
     cloud_request_queue: mp.Queue,
     cloud_response_queue: mp.Queue,
     resampling_method: Resampling,
+    S2_bands: list = None,
 ):
     """Processes a single sentinel 2 subtile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution, applying
     cloud and snow masks and computing NBAR if requested. The function returns
     the reprojected subtile, the write window and the band names of the
     reprojected subtile.
+
+    ``S2_bands`` selects which raw reflectance bands to download (a subset of
+    ``S2_RAW_BANDS``); defaults to all of them. Cloud classification always
+    requires the full set (enforced upstream).
     """
+
+    # which raw bands to actually download for this subtile
+    if S2_bands is None:
+        S2_bands = S2_RAW_BANDS
+    download_bands = list(S2_bands)
 
     # init array that needs to be filled
     subtile_array = np.empty(
-        (len(S2_RAW_BANDS), S2_subtile_size, S2_subtile_size),
+        (len(download_bands), S2_subtile_size, S2_subtile_size),
         dtype=np.float32)
-    band_names = S2_RAW_BANDS.copy()
+    band_names = download_bands.copy()
 
     # save CRS of downloaded sentinel tiles
     s2_crs = None
     # save transformation of sentinel tile for later processing
     s2_tile_transform = None
     # retrieve each band for subtile in sentinel tile
-    for i, band in enumerate(S2_RAW_BANDS):
+    for i, band in enumerate(download_bands):
         href = refresh_sas_token(stac_item.assets[band].href)
         try:
             with rasterio.open(href) as dr:
@@ -266,8 +276,11 @@ def process_S2_subtile(
         # needs to happen at a per-item level after after clouds were detected
         c = get_c_factor_value(stac_item, s2_crs, subtile_bounds_utm)
 
-        # apply c-factor to array
-        subtile_array[S2_NBAR_INDICES_RAW_BANDS] *= c
+        # apply c-factor to array; indices are relative to the downloaded band
+        # subset (which is guaranteed to contain every NBAR band upstream) and
+        # kept in NBAR-band order so they line up with the c-factor bands
+        nbar_indices = [download_bands.index(b) for b in S2_NBAR_BANDS]
+        subtile_array[nbar_indices] *= c
 
     # 3 reproject to target_crs for each band
     # determine transform --> round to target resolution so that reprojected
@@ -354,7 +367,13 @@ def process_ptile_S2_dispatcher(
     cloud_request_queue: mp.Queue,
     cloud_response_queue: mp.Queue,
     resampling_method: Resampling,
+    S2_bands: list = None,
 ):
+
+    # the raw reflectance bands to download/save (subset of S2_RAW_BANDS)
+    if S2_bands is None:
+        S2_bands = S2_RAW_BANDS
+    S2_bands = list(S2_bands)
 
     items = pd.DataFrame()
     items["item"] = item_list
@@ -398,6 +417,7 @@ def process_ptile_S2_dispatcher(
             cloud_request_queue=cloud_request_queue,
             cloud_response_queue=cloud_response_queue,
             resampling_method=resampling_method,
+            S2_bands=S2_bands,
         )
 
         # this happens when the href is not available in subtile -> planetary
@@ -460,10 +480,12 @@ def process_ptile_S2_dispatcher(
     # determine nodata mask based on where values are zero -> mean nodata for S2...
     # (need to do this here, because after computing mean there will be nans
     # from divide by zero)
+    # only the raw reflectance bands actually present drive the NoData mask
+    raw_bands_present = [b for b in ptile_array_bands if b in S2_RAW_BANDS]
     ptile_array[:,
                 np.any(ptile_array[
                     [ptile_array_bands.index(band)
-                     for band in S2_RAW_BANDS]] == 0,
+                     for band in raw_bands_present]] == 0,
                        axis=0)] = np.nan
 
     return ptile_array
@@ -486,9 +508,15 @@ def process_ptile_S2(
     S2_return_cloud_probabilities: bool,
     S2_nbar: bool,
     resampling_method: Resampling,
+    S2_bands: list = None,
 ):
+    # the raw reflectance bands to download/save (subset of S2_RAW_BANDS)
+    if S2_bands is None:
+        S2_bands = S2_RAW_BANDS
+    S2_bands = list(S2_bands)
+
     # cloud classification layer and snow mask is added later
-    num_bands = len(S2_RAW_BANDS)
+    num_bands = len(S2_bands)
 
     if S2_cloud_classification:
         # we need the probs here, will remove when returning
@@ -534,6 +562,7 @@ def process_ptile_S2(
             cloud_response_queue=cloud_response_queue,
             cloud_request_queue=cloud_request_queue,
             resampling_method=resampling_method,
+            S2_bands=S2_bands,
         )
 
         # this happens when the href is not available

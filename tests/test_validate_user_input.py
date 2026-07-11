@@ -183,3 +183,44 @@ class TestResamplingAndStore:
     def test_zarr_store_wrong_type_raises(self):
         with pytest.raises(ValueError, match="zarr_store"):
             validate_user_input(**_valid_kwargs(zarr_store=12345))
+
+
+class TestS2Bands:
+    def test_none_is_allowed(self):
+        validate_user_input(**_valid_kwargs(S2_bands=None))
+
+    def test_valid_subset_is_allowed(self):
+        validate_user_input(**_valid_kwargs(S2_bands=["B04", "B03", "B02"]))
+
+    def test_non_list_raises(self):
+        with pytest.raises(ValueError, match="S2_bands"):
+            validate_user_input(**_valid_kwargs(S2_bands="B02"))
+
+    def test_empty_list_raises(self):
+        with pytest.raises(ValueError, match="empty"):
+            validate_user_input(**_valid_kwargs(S2_bands=[]))
+
+    def test_unknown_band_raises(self):
+        with pytest.raises(ValueError, match="unknown"):
+            validate_user_input(**_valid_kwargs(S2_bands=["B02", "B99"]))
+
+    def test_subset_with_cloud_classification_raises(self):
+        with pytest.raises(ValueError, match="cloud model requires all bands"):
+            validate_user_input(**_valid_kwargs(
+                S2_bands=["B02", "B03", "B04"],
+                S2_cloud_classification=True))
+
+    def test_full_set_with_cloud_classification_is_allowed(self):
+        from sentle.const import S2_RAW_BANDS
+        validate_user_input(**_valid_kwargs(
+            S2_bands=list(S2_RAW_BANDS), S2_cloud_classification=True))
+
+    def test_snow_mask_requires_its_bands(self):
+        with pytest.raises(ValueError, match="B08"):
+            validate_user_input(**_valid_kwargs(
+                S2_bands=["B02", "B03", "B04"], S2_mask_snow=True))
+
+    def test_nbar_requires_its_bands(self):
+        with pytest.raises(ValueError, match="S2_nbar"):
+            validate_user_input(**_valid_kwargs(
+                S2_bands=["B02", "B03", "B04"], S2_nbar=True))
