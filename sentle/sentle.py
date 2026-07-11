@@ -240,6 +240,7 @@ def validate_user_input(
     S2_apply_snow_mask: bool = False,
     S2_apply_cloud_mask: bool = False,
     save_as_uint16: bool = False,
+    S2_enabled: bool = True,
 ):
     # validate type zarr store
     # ``zarr.storage.StoreLike`` is a typing union that includes a
@@ -385,6 +386,33 @@ def validate_user_input(
                 "save_as_uint16 can only be used when Sentinel-1 is disabled (set S1_assets to None or an empty list)."
             )
 
+    # validate the Sentinel-2 enable flag and the Sentinel-1-only combination
+    if not isinstance(S2_enabled, bool):
+        raise ValueError("S2_enabled must be a boolean")
+
+    if not S2_enabled:
+        sentinel1_enabled = isinstance(S1_assets, list) and len(S1_assets) > 0
+        if not sentinel1_enabled:
+            raise ValueError(
+                "S2_enabled=False requires Sentinel-1 to be enabled (pass "
+                "S1_assets), otherwise there is nothing to download")
+
+        # every Sentinel-2-only option must be off when S2 is disabled
+        s2_only_flags = {
+            "S2_mask_snow": S2_mask_snow,
+            "S2_cloud_classification": S2_cloud_classification,
+            "S2_return_cloud_probabilities": S2_return_cloud_probabilities,
+            "S2_apply_snow_mask": S2_apply_snow_mask,
+            "S2_apply_cloud_mask": S2_apply_cloud_mask,
+            "S2_nbar": S2_nbar,
+            "save_as_uint16": save_as_uint16,
+        }
+        enabled = [name for name, val in s2_only_flags.items() if val]
+        if enabled:
+            raise ValueError(
+                f"S2_enabled=False is incompatible with Sentinel-2 options "
+                f"{enabled}; disable them for a Sentinel-1-only run")
+
 
 def setup_zarr_storage(
     zarr_store: str | zarr.storage.StoreLike,
@@ -440,12 +468,17 @@ def setup_zarr_storage(
     data_dtype = np.uint16 if save_as_uint16 else np.float32
     data_fill_value = 0 if save_as_uint16 else float("nan")
 
+    # the band axis is chunked at the number of S2 bands so S1 and S2 write
+    # into disjoint band chunks. When S2 is disabled there are no S2 bands, so
+    # fall back to a single chunk spanning all (S1) bands.
+    band_chunk = len(S2_bands_to_save) if len(S2_bands_to_save) > 0 else len(
+        total_bands_to_save)
     data = zarr.create(
         shape=(len(unique_timestamps), len(total_bands_to_save), height,
                width),
         chunks=(
             zarr_store_chunk_size["time"],
-            len(S2_bands_to_save),
+            band_chunk,
             zarr_store_chunk_size["y"],
             zarr_store_chunk_size["x"],
         ),
@@ -634,6 +667,7 @@ def process(
     zarr_store: str | zarr.storage.StoreLike,
     processing_spatial_chunk_size: int = 4000,
     S1_assets: list[str] = S1_ASSETS,
+    S2_enabled: bool = True,
     S2_mask_snow: bool = False,
     S2_cloud_classification: bool = False,
     S2_cloud_classification_device="cpu",
@@ -696,6 +730,11 @@ def process(
        Size of spatial chunks across which we perform parallization.
     S1_assets: list[str], default=["vh_asc", "vh_desc", "vv_asc", "vv_desc"]
        Specify which bands to download for Sentinel-1. Only "vh" and "vv" are supported.
+    S2_enabled: bool, default=True
+       Whether to download and process Sentinel-2 at all. Set to ``False`` for
+       a Sentinel-1-only cube (requires ``S1_assets`` to be set). All
+       Sentinel-2-only options (cloud/snow masks, NBAR, cloud probabilities,
+       ``save_as_uint16``) must be disabled in that case.
     overwrite: bool, default=False
        Whether to overwrite existing zarr storage.
     coord_save_mode: str, default="top-left"
@@ -738,18 +777,23 @@ def process(
         S2_nbar=S2_nbar,
         resampling_method=resampling_method,
         save_as_uint16=save_as_uint16,
+        S2_enabled=S2_enabled,
     )
 
     # TODO support to only download subset of bands (mutually exclusive with
     # cloud classification and partially snow_mask) -> or no sentinel 2 at all
-    # derive bands to save from arguments
-    S2_bands_to_save = S2_RAW_BANDS.copy()
-    if S2_mask_snow and time_composite_freq is None:
-        S2_bands_to_save.append(S2_snow_mask_band)
-    if S2_cloud_classification and time_composite_freq is None:
-        S2_bands_to_save.append(S2_cloud_mask_band)
-    if S2_return_cloud_probabilities:
-        S2_bands_to_save += S2_cloud_prob_bands
+    # derive bands to save from arguments. When Sentinel-2 is disabled
+    # (Sentinel-1 only) there are no S2 bands at all.
+    if S2_enabled:
+        S2_bands_to_save = S2_RAW_BANDS.copy()
+        if S2_mask_snow and time_composite_freq is None:
+            S2_bands_to_save.append(S2_snow_mask_band)
+        if S2_cloud_classification and time_composite_freq is None:
+            S2_bands_to_save.append(S2_cloud_mask_band)
+        if S2_return_cloud_probabilities:
+            S2_bands_to_save += S2_cloud_prob_bands
+    else:
+        S2_bands_to_save = []
     total_bands_to_save = S2_bands_to_save.copy()
 
     # if S1_assets are supplied as empty list, convert to None
@@ -760,8 +804,20 @@ def process(
         raise ValueError(
             "save_as_uint16 requires Sentinel-1 assets to be disabled.")
 
+    if not S2_enabled and S1_assets is None:
+        raise ValueError(
+            "Nothing to download: Sentinel-2 is disabled (S2_enabled=False) "
+            "and Sentinel-1 is disabled (S1_assets is None/empty).")
+
     if S1_assets is not None:
         total_bands_to_save += S1_assets
+
+    # which collections to query -- either or both satellites
+    collections = []
+    if S2_enabled:
+        collections.append("sentinel-2-l2a")
+    if S1_assets is not None:
+        collections.append("sentinel-1-rtc")
 
     timestamp_list = retrieve_timestamps(
         time_composite_freq=time_composite_freq,
@@ -771,8 +827,7 @@ def process(
         bound_top=bound_top,
         target_crs=target_crs,
         datetime=datetime,
-        collections=["sentinel-2-l2a"]
-        if S1_assets is None else ["sentinel-2-l2a", "sentinel-1-rtc"],
+        collections=collections,
     )
 
     # compute bounds, with and height  for the entire dataset

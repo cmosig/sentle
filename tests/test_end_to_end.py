@@ -91,3 +91,29 @@ def test_cube_contains_plausible_reflectance(cube):
     assert finite.min() >= 0
     assert np.nanmedian(finite) > 0
     assert finite.max() < 20000
+
+
+def test_sentinel1_only_run(tmp_path_factory):
+    """Issue #64: download a Sentinel-1-only cube (S2 disabled)."""
+    store = str(tmp_path_factory.mktemp("e2e_s1") / "s1.zarr")
+    process(
+        target_crs=TARGET_CRS,
+        target_resolution=RES,
+        bound_left=LEFT,
+        bound_bottom=BOTTOM,
+        bound_right=RIGHT,
+        bound_top=TOP,
+        datetime=DATETIME,
+        zarr_store=store,
+        S2_enabled=False,
+        S1_assets=["vv_asc", "vh_asc"],
+        num_workers=1,
+        resampling_method=Resampling.nearest,
+    )
+    ds = xr.open_zarr(store)
+    assert list(ds["band"].values) == ["vv_asc", "vh_asc"]
+    assert set(ds["sentle"].dims) == {"time", "band", "y", "x"}
+    finite = ds["sentle"].values[np.isfinite(ds["sentle"].values)]
+    # Sentinel-1 RTC gamma0 backscatter is a small non-negative linear value
+    assert finite.size > 0
+    assert finite.min() >= 0

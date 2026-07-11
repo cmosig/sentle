@@ -183,3 +183,40 @@ class TestResamplingAndStore:
     def test_zarr_store_wrong_type_raises(self):
         with pytest.raises(ValueError, match="zarr_store"):
             validate_user_input(**_valid_kwargs(zarr_store=12345))
+
+
+class TestS2Enabled:
+    def test_must_be_boolean(self):
+        with pytest.raises(ValueError, match="S2_enabled"):
+            validate_user_input(**_valid_kwargs(S2_enabled="no"))
+
+    def test_s1_only_run_is_allowed(self):
+        # S2 disabled with S1 enabled and no S2-only options -> valid
+        validate_user_input(**_valid_kwargs(
+            S2_enabled=False, S1_assets=["vh_asc", "vv_asc"]))
+
+    def test_s2_disabled_without_s1_raises(self):
+        with pytest.raises(ValueError, match="nothing to download"):
+            validate_user_input(**_valid_kwargs(
+                S2_enabled=False, S1_assets=None))
+
+    def test_s2_disabled_with_empty_s1_raises(self):
+        with pytest.raises(ValueError, match="nothing to download"):
+            validate_user_input(**_valid_kwargs(
+                S2_enabled=False, S1_assets=[]))
+
+    @pytest.mark.parametrize("flag", [
+        "S2_mask_snow", "S2_cloud_classification",
+        "S2_return_cloud_probabilities", "S2_nbar",
+    ])
+    def test_s2_only_options_incompatible_with_disabled_s2(self, flag):
+        with pytest.raises(ValueError, match="Sentinel-1-only"):
+            validate_user_input(**_valid_kwargs(
+                S2_enabled=False, S1_assets=["vh_asc"], **{flag: True}))
+
+    def test_uint16_incompatible_with_disabled_s2(self):
+        # save_as_uint16 needs S1 disabled while S1-only needs S1 enabled -- an
+        # inherent conflict, caught by the earlier uint16 guard
+        with pytest.raises(ValueError, match="save_as_uint16"):
+            validate_user_input(**_valid_kwargs(
+                S2_enabled=False, S1_assets=["vh_asc"], save_as_uint16=True))
