@@ -242,7 +242,14 @@ def validate_user_input(
     save_as_uint16: bool = False,
 ):
     # validate type zarr store
-    if not isinstance(zarr_store, (str, zarr.storage.StoreLike)):
+    # ``zarr.storage.StoreLike`` is a typing union that includes a
+    # parameterized generic (``dict[str, Buffer]``), which cannot be used
+    # directly in ``isinstance`` (it raises ``TypeError``). Restrict the check
+    # to the union members that are concrete classes so an invalid store type
+    # yields a clean ``ValueError`` instead.
+    zarr_store_types = tuple(
+        t for t in zarr.storage.StoreLike.__args__ if isinstance(t, type))
+    if not isinstance(zarr_store, zarr_store_types):
         raise ValueError(
             "zarr_store must be a string or zarr.storage.StoreLike")
 
