@@ -3,7 +3,6 @@ import multiprocessing as mp
 import shutil
 import tempfile
 import warnings
-from math import ceil
 from os import path
 from time import time as currenttime
 
@@ -480,12 +479,13 @@ def setup_zarr_storage(
         overwrite=overwrite,
         dimension_names=["x"],
     )
+    # build coordinates from integer pixel indices (bound + i * resolution)
+    # rather than np.arange over the bounds, so a fractional resolution can
+    # never produce an off-by-one number of coordinates vs. width/height.
+    x_coords = bound_left + np.arange(width) * target_resolution
     if coord_save_mode == "center":
-        x[:] = (np.arange(bound_left, bound_right, target_resolution) +
-                target_resolution / 2).astype(np.float32)
-    else:
-        x[:] = np.arange(bound_left, bound_right,
-                         target_resolution).astype(np.float32)
+        x_coords = x_coords + target_resolution / 2
+    x[:] = x_coords.astype(np.float32)
     x.attrs["coord_save_mode"] = coord_save_mode
 
     # y dimension
@@ -497,19 +497,10 @@ def setup_zarr_storage(
         overwrite=overwrite,
         dimension_names=["y"],
     )
+    y_coords = bound_top - np.arange(height) * target_resolution
     if coord_save_mode == "center":
-        y[:] = (np.arange(bound_top, bound_bottom, -target_resolution) -
-                target_resolution / 2).astype(np.float32)
-    else:
-        y[:] = np.arange(bound_top, bound_bottom,
-                         -target_resolution).astype(np.float32)
-    y.attrs["coord_save_mode"] = coord_save_mode
-    if coord_save_mode == "center":
-        y[:] = (np.arange(bound_top, bound_bottom, -target_resolution) -
-                target_resolution / 2).astype(np.float32)
-    else:
-        y[:] = np.arange(bound_top, bound_bottom,
-                         -target_resolution).astype(np.float32)
+        y_coords = y_coords - target_resolution / 2
+    y[:] = y_coords.astype(np.float32)
     y.attrs["coord_save_mode"] = coord_save_mode
 
     # time dimension
@@ -832,8 +823,6 @@ def process(
         "save_as_uint16": save_as_uint16,
     }
 
-    processing_spatial_chunk_size_in_CRS_unit = (
-        processing_spatial_chunk_size * target_resolution)
     s2grid = gpd.read_file(
         pkg_resources.resource_filename(
             __name__, "data/sentinel2_grid_stripped_with_epsg.gpkg"))
@@ -848,29 +837,33 @@ def process(
         # (relatively expensive) geometry intersection for every timestamp
         subtile_cache = {}
 
-        for xi, x_min in enumerate(
-                range(bound_left, bound_right,
-                      processing_spatial_chunk_size_in_CRS_unit)):
-            num_y_indices = (ceil(
-                (bound_top - bound_bottom) /
-                processing_spatial_chunk_size_in_CRS_unit) - 1)
+        # iterate spatial chunks in integer *pixel* space and derive the CRS
+        # bounds from the pixel offsets. This avoids stepping ``range`` with a
+        # float stride (broken for fractional resolutions / lat-lon), while
+        # producing identical chunks to the old coordinate-space loop for the
+        # integer case.
+        for xi, x_off in enumerate(
+                range(0, width, processing_spatial_chunk_size)):
+            x_end = min(x_off + processing_spatial_chunk_size, width)
+            x_min = bound_left + x_off * target_resolution
+            x_max = bound_left + x_end * target_resolution
 
-            for yi, y_min in enumerate(
-                    range(bound_bottom, bound_top,
-                          processing_spatial_chunk_size_in_CRS_unit)):
+            for yi, y_off in enumerate(
+                    range(0, height, processing_spatial_chunk_size)):
+                y_end = min(y_off + processing_spatial_chunk_size, height)
+                # y_off counts pixels down from the top; the chunk's CRS bounds
+                # run from bottom (y_min) to top (y_max)
+                y_min = bound_top - y_end * target_resolution
+                y_max = bound_top - y_off * target_resolution
+
                 last_ts = timestamp_list[0]["ts"]
                 ts_save_index = 0
                 for item in timestamp_list:
                     ret_config = dict(config)
                     ret_config["bound_left"] = x_min
                     ret_config["bound_bottom"] = y_min
-                    # cap at the top
-                    ret_config["bound_right"] = min(
-                        x_min + processing_spatial_chunk_size_in_CRS_unit,
-                        bound_right)
-                    ret_config["bound_top"] = min(
-                        y_min + processing_spatial_chunk_size_in_CRS_unit,
-                        bound_top)
+                    ret_config["bound_right"] = x_max
+                    ret_config["bound_top"] = y_max
                     ret_config["ts"] = item["ts"]
                     ret_config["collection"] = item["collection"]
 
@@ -879,17 +872,8 @@ def process(
                         ts_save_index += 1
 
                     ret_config["zarr_save_slice"] = dict(
-                        x=slice(
-                            xi * processing_spatial_chunk_size,
-                            min((xi + 1) * processing_spatial_chunk_size,
-                                width),
-                        ),
-                        y=slice(
-                            max(
-                                0, height -
-                                (yi + 1) * processing_spatial_chunk_size),
-                            height - yi * processing_spatial_chunk_size,
-                        ),
+                        x=slice(x_off, x_end),
+                        y=slice(y_off, y_end),
                         band=slice(0, len(S2_bands_to_save))
                         if item["collection"] == "sentinel-2-l2a" else slice(
                             len(S2_bands_to_save), len(total_bands_to_save)),

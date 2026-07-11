@@ -20,10 +20,57 @@ from sentle.reproject_util import (
     calculate_aligned_transform,
     check_and_round_bounds,
     height_width_from_bounds_res,
+    pixel_count,
     recrop_write_window,
     transform_height_width_from_bounds_res,
     window_overlaps_bounds,
 )
+
+
+class TestFractionalResolution:
+    """Issue #4: fractional resolutions (e.g. 0.1 degrees for EPSG:4326) are
+    not exactly representable in floating point, so the pixel-count helpers
+    must round tolerantly instead of demanding an exact remainder of 0."""
+
+    def test_pixel_count_fractional_degrees(self):
+        # 11.05 - 11.00 = 0.05 (with float error) -> exactly 50 pixels at 0.001
+        assert pixel_count(11.05 - 11.00, 0.001) == 50
+        assert pixel_count(0.1, 0.1) == 1
+        assert pixel_count(0.5, 0.05) == 10
+
+    def test_pixel_count_rejects_non_integer_multiple(self):
+        with pytest.raises(AssertionError):
+            pixel_count(0.0525, 0.001)  # 52.5 pixels
+
+    def test_height_width_fractional_degrees_returns_ints(self):
+        h, w = height_width_from_bounds_res(11.0, 46.0, 11.05, 46.05, 0.001)
+        assert (h, w) == (50, 50)
+        assert isinstance(h, int) and isinstance(w, int)
+
+    def test_transform_height_width_fractional_degrees(self):
+        tf, h, w = transform_height_width_from_bounds_res(
+            11.0, 46.0, 11.05, 46.05, 0.001)
+        assert (h, w) == (50, 50)
+        assert tf.a == pytest.approx(0.001)
+        assert tf.e == pytest.approx(-0.001)
+        assert tf.c == pytest.approx(11.0)
+        assert tf.f == pytest.approx(46.05)
+
+    def test_check_and_round_fractional_divisible_is_silent(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            left, bottom, right, top = check_and_round_bounds(
+                11.0, 46.0, 11.05, 46.05, 0.001)
+        # a whole number of pixels -> nothing trimmed
+        assert pixel_count(right - left, 0.001) == 50
+        assert pixel_count(top - bottom, 0.001) == 50
+
+    def test_check_and_round_fractional_non_divisible_warns_and_trims(self):
+        with pytest.warns(UserWarning):
+            left, _, right, _ = check_and_round_bounds(
+                11.0, 46.0, 11.0525, 46.05, 0.001)
+        # trimmed down to a whole number of pixels
+        assert pixel_count(right - left, 0.001) == 52
 
 
 class TestCheckAndRoundBounds:

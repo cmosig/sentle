@@ -139,3 +139,24 @@ def test_band_chunk_equals_number_of_s2_bands(tmp_path):
     root = _build(tmp_path, S2_bands_to_save=BANDS,
                   total_bands_to_save=BANDS + ["vv_asc", "vh_asc"])
     assert root["sentle"].chunks[1] == len(BANDS)
+
+
+def test_fractional_degree_coordinates(tmp_path):
+    # issue #4: EPSG:4326 with a fractional-degree resolution must produce
+    # exactly width/height coordinates (no np.arange off-by-one), aligned to
+    # the requested bounds
+    root = _build(
+        tmp_path,
+        target_crs=CRS.from_epsg(4326),
+        target_resolution=0.001,
+        bound_left=11.0, bound_right=11.05,
+        bound_bottom=46.0, bound_top=46.05,
+        width=50, height=50)
+    x = root["x"][:]
+    y = root["y"][:]
+    assert len(x) == 50 and len(y) == 50
+    assert x[0] == pytest.approx(11.0, abs=1e-4)
+    assert y[0] == pytest.approx(46.05, abs=1e-4)
+    # spacing is the fractional resolution
+    assert np.allclose(np.diff(x), 0.001, atol=1e-5)
+    assert np.allclose(np.diff(y), -0.001, atol=1e-5)
