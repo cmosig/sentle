@@ -22,9 +22,81 @@ from sentle.reproject_util import (
     height_width_from_bounds_res,
     pixel_count,
     recrop_write_window,
+    spatial_chunk_grid,
     transform_height_width_from_bounds_res,
     window_overlaps_bounds,
 )
+
+
+def _legacy_chunks(bound_left, bound_bottom, bound_top, width, height, res,
+                   chunk):
+    """The pre-#4 coordinate-space chunk loop (integer resolution only),
+    reduced to the set of (x-slice, y-slice, bounds) it produced. Used to prove
+    the new pixel-space ``spatial_chunk_grid`` does not regress that behaviour.
+    """
+    bound_right = bound_left + width * res
+    chunk_crs = chunk * res
+    out = set()
+    for xi, x_min in enumerate(range(bound_left, bound_right, chunk_crs)):
+        for yi, y_min in enumerate(range(bound_bottom, bound_top, chunk_crs)):
+            x_max = min(x_min + chunk_crs, bound_right)
+            y_max = min(y_min + chunk_crs, bound_top)
+            x_slice = (xi * chunk, min((xi + 1) * chunk, width))
+            y_slice = (max(0, height - (yi + 1) * chunk), height - yi * chunk)
+            out.add((x_slice, y_slice, (x_min, y_min, x_max, y_max)))
+    return out
+
+
+class TestSpatialChunkGrid:
+    def _new_chunks(self, bound_left, bound_top, width, height, res, chunk):
+        out = set()
+        for (xi, yi, x_off, x_end, y_off, y_end,
+             bounds) in spatial_chunk_grid(bound_left, bound_top, width, height,
+                                           res, chunk):
+            out.add(((x_off, x_end), (y_off, y_end), bounds))
+        return out
+
+    def test_matches_legacy_coordinate_loop_integer_resolution(self):
+        # regression guard: same chunks as the old coordinate-space loop
+        left, bottom, top = 300000, 5000000, 5030000
+        width, height, res, chunk = 4200, 3000, 10, 4000
+        new = self._new_chunks(left, top, width, height, res, chunk)
+        legacy = _legacy_chunks(left, bottom, top, width, height, res, chunk)
+        assert new == legacy
+
+    @pytest.mark.parametrize("width,height,res,chunk", [
+        (4000, 4000, 10, 4000),      # single chunk, exact
+        (4200, 3000, 10, 4000),      # ragged last chunk both axes
+        (10000, 8000, 10, 4000),     # multiple chunks
+        (50, 50, 1, 4000),           # chunk larger than grid
+    ])
+    def test_pixel_slices_tile_the_grid_exactly(self, width, height, res,
+                                                chunk):
+        covered = np.zeros((height, width), dtype=int)
+        for (_, _, x_off, x_end, y_off, y_end, _) in spatial_chunk_grid(
+                0, height * res, width, height, res, chunk):
+            covered[y_off:y_end, x_off:x_end] += 1
+        # every pixel covered exactly once -> no gaps, no overlaps
+        assert covered.min() == 1 and covered.max() == 1
+
+    def test_bounds_match_pixel_offsets(self):
+        left, top, res = 11.0, 46.05, 0.001
+        width = height = 50
+        for (_, _, x_off, x_end, y_off, y_end,
+             (b_left, b_bottom, b_right, b_top)) in spatial_chunk_grid(
+                 left, top, width, height, res, 20):
+            assert b_left == pytest.approx(left + x_off * res)
+            assert b_right == pytest.approx(left + x_end * res)
+            assert b_top == pytest.approx(top - y_off * res)
+            assert b_bottom == pytest.approx(top - y_end * res)
+
+    def test_fractional_resolution_tiles_the_grid(self):
+        # the whole point of #4: a fractional stride must still tile cleanly
+        covered = np.zeros((50, 50), dtype=int)
+        for (_, _, x_off, x_end, y_off, y_end, _) in spatial_chunk_grid(
+                11.0, 46.05, 50, 50, 0.001, 20):
+            covered[y_off:y_end, x_off:x_end] += 1
+        assert covered.min() == 1 and covered.max() == 1
 
 
 class TestFractionalResolution:

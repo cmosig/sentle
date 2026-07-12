@@ -141,6 +141,29 @@ def test_band_chunk_equals_number_of_s2_bands(tmp_path):
     assert root["sentle"].chunks[1] == len(BANDS)
 
 
+def test_integer_resolution_coordinates_match_legacy_arange(tmp_path):
+    # regression guard for #4: the pixel-index coordinate generation must be
+    # identical to the previous np.arange(bound, bound_end, res) for the
+    # integer-resolution case it replaced
+    root = _build(tmp_path)
+    x = root["x"][:]
+    y = root["y"][:]
+    legacy_x = np.arange(LEFT, RIGHT, RES).astype(np.float32)
+    legacy_y = np.arange(TOP, BOTTOM, -RES).astype(np.float32)
+    assert np.array_equal(x, legacy_x)
+    assert np.array_equal(y, legacy_y)
+
+
+def test_integer_resolution_center_mode_matches_legacy(tmp_path):
+    root = _build(tmp_path, coord_save_mode="center")
+    x = root["x"][:]
+    y = root["y"][:]
+    legacy_x = (np.arange(LEFT, RIGHT, RES) + RES / 2).astype(np.float32)
+    legacy_y = (np.arange(TOP, BOTTOM, -RES) - RES / 2).astype(np.float32)
+    assert np.array_equal(x, legacy_x)
+    assert np.array_equal(y, legacy_y)
+
+
 def test_fractional_degree_coordinates(tmp_path):
     # issue #4: EPSG:4326 with a fractional-degree resolution must produce
     # exactly width/height coordinates (no np.arange off-by-one), aligned to

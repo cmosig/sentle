@@ -30,6 +30,7 @@ from .const import S1_ASSETS, S2_RAW_BANDS, ZARR_TIME_ATTRS
 from .reproject_util import (
     check_and_round_bounds,
     height_width_from_bounds_res,
+    spatial_chunk_grid,
     transform_height_width_from_bounds_res,
 )
 from .sentinel1 import process_ptile_S1
@@ -837,74 +838,61 @@ def process(
         # (relatively expensive) geometry intersection for every timestamp
         subtile_cache = {}
 
-        # iterate spatial chunks in integer *pixel* space and derive the CRS
-        # bounds from the pixel offsets. This avoids stepping ``range`` with a
-        # float stride (broken for fractional resolutions / lat-lon), while
-        # producing identical chunks to the old coordinate-space loop for the
-        # integer case.
-        for xi, x_off in enumerate(
-                range(0, width, processing_spatial_chunk_size)):
-            x_end = min(x_off + processing_spatial_chunk_size, width)
-            x_min = bound_left + x_off * target_resolution
-            x_max = bound_left + x_end * target_resolution
+        # iterate spatial chunks in integer *pixel* space (see
+        # ``spatial_chunk_grid``); the CRS bounds are derived from the pixel
+        # offsets so fractional resolutions / geographic CRSs work.
+        for (xi, yi, x_off, x_end, y_off, y_end,
+             (x_min, y_min, x_max, y_max)) in spatial_chunk_grid(
+                 bound_left, bound_top, width, height, target_resolution,
+                 processing_spatial_chunk_size):
+            last_ts = timestamp_list[0]["ts"]
+            ts_save_index = 0
+            for item in timestamp_list:
+                ret_config = dict(config)
+                ret_config["bound_left"] = x_min
+                ret_config["bound_bottom"] = y_min
+                ret_config["bound_right"] = x_max
+                ret_config["bound_top"] = y_max
+                ret_config["ts"] = item["ts"]
+                ret_config["collection"] = item["collection"]
 
-            for yi, y_off in enumerate(
-                    range(0, height, processing_spatial_chunk_size)):
-                y_end = min(y_off + processing_spatial_chunk_size, height)
-                # y_off counts pixels down from the top; the chunk's CRS bounds
-                # run from bottom (y_min) to top (y_max)
-                y_min = bound_top - y_end * target_resolution
-                y_max = bound_top - y_off * target_resolution
+                if item["ts"] != last_ts:
+                    last_ts = item["ts"]
+                    ts_save_index += 1
 
-                last_ts = timestamp_list[0]["ts"]
-                ts_save_index = 0
-                for item in timestamp_list:
-                    ret_config = dict(config)
-                    ret_config["bound_left"] = x_min
-                    ret_config["bound_bottom"] = y_min
-                    ret_config["bound_right"] = x_max
-                    ret_config["bound_top"] = y_max
-                    ret_config["ts"] = item["ts"]
-                    ret_config["collection"] = item["collection"]
-
-                    if item["ts"] != last_ts:
-                        last_ts = item["ts"]
-                        ts_save_index += 1
-
-                    ret_config["zarr_save_slice"] = dict(
-                        x=slice(x_off, x_end),
-                        y=slice(y_off, y_end),
-                        band=slice(0, len(S2_bands_to_save))
-                        if item["collection"] == "sentinel-2-l2a" else slice(
-                            len(S2_bands_to_save), len(total_bands_to_save)),
-                        time=ts_save_index,
-                    )
-                    if item["collection"] == "sentinel-2-l2a":
-                        if (xi, yi) not in subtile_cache:
-                            subtile_cache[(xi, yi)] = obtain_subtiles(
-                                target_crs=target_crs,
-                                left=ret_config["bound_left"],
-                                bottom=ret_config["bound_bottom"],
-                                right=ret_config["bound_right"],
-                                top=ret_config["bound_top"],
-                                s2grid=s2grid,
-                            )
-                        ret_config["S2_subtiles"] = subtile_cache[(xi, yi)]
-                    else:
-                        ret_config["S2_subtiles"] = None
-                    if (S2_cloud_classification
-                            and item["collection"] == "sentinel-2-l2a"):
-                        GLOBAL_QUEUES[job_id] = GLOBAL_QUEUE_MANAGER.Queue(
-                            maxsize=1)
-                        ret_config["cloud_response_queue"] = GLOBAL_QUEUES[
-                            job_id]
-                        ret_config["job_id"] = job_id
-                        job_id += 1
-                    else:
-                        ret_config["cloud_response_queue"] = None
-                        ret_config["job_id"] = None
-                    ret_config["save_as_uint16"] = save_as_uint16
-                    yield ret_config
+                ret_config["zarr_save_slice"] = dict(
+                    x=slice(x_off, x_end),
+                    y=slice(y_off, y_end),
+                    band=slice(0, len(S2_bands_to_save))
+                    if item["collection"] == "sentinel-2-l2a" else slice(
+                        len(S2_bands_to_save), len(total_bands_to_save)),
+                    time=ts_save_index,
+                )
+                if item["collection"] == "sentinel-2-l2a":
+                    if (xi, yi) not in subtile_cache:
+                        subtile_cache[(xi, yi)] = obtain_subtiles(
+                            target_crs=target_crs,
+                            left=ret_config["bound_left"],
+                            bottom=ret_config["bound_bottom"],
+                            right=ret_config["bound_right"],
+                            top=ret_config["bound_top"],
+                            s2grid=s2grid,
+                        )
+                    ret_config["S2_subtiles"] = subtile_cache[(xi, yi)]
+                else:
+                    ret_config["S2_subtiles"] = None
+                if (S2_cloud_classification
+                        and item["collection"] == "sentinel-2-l2a"):
+                    GLOBAL_QUEUES[job_id] = GLOBAL_QUEUE_MANAGER.Queue(
+                        maxsize=1)
+                    ret_config["cloud_response_queue"] = GLOBAL_QUEUES[job_id]
+                    ret_config["job_id"] = job_id
+                    job_id += 1
+                else:
+                    ret_config["cloud_response_queue"] = None
+                    ret_config["job_id"] = None
+                ret_config["save_as_uint16"] = save_as_uint16
+                yield ret_config
 
     with tqdm_joblib(
             tqdm(

@@ -135,6 +135,33 @@ def height_width_from_bounds_res(left, bottom, right, top, res):
     return height, width
 
 
+def spatial_chunk_grid(bound_left, bound_top, width, height, resolution,
+                       chunk_size):
+    """Yield the spatial processing chunks that tile a ``width`` x ``height``
+    pixel grid in ``chunk_size`` steps.
+
+    Iteration is in integer *pixel* space, deriving each chunk's CRS bounds
+    from the pixel offsets (``bound + offset * resolution``). This avoids
+    stepping ``range`` with a float stride -- which is invalid for fractional
+    resolutions / geographic CRSs -- while producing exactly the same chunks as
+    a coordinate-space loop for the integer case.
+
+    Yields tuples ``(xi, yi, x_off, x_end, y_off, y_end, (left, bottom, right,
+    top))`` where the ``*_off``/``*_end`` are pixel indices (the zarr write
+    window) and the bounds are in CRS units. ``y_off`` counts pixels **down
+    from the top**, so ``top`` is ``bound_top - y_off * resolution``.
+    """
+    for xi, x_off in enumerate(range(0, width, chunk_size)):
+        x_end = min(x_off + chunk_size, width)
+        left = bound_left + x_off * resolution
+        right = bound_left + x_end * resolution
+        for yi, y_off in enumerate(range(0, height, chunk_size)):
+            y_end = min(y_off + chunk_size, height)
+            top = bound_top - y_off * resolution
+            bottom = bound_top - y_end * resolution
+            yield xi, yi, x_off, x_end, y_off, y_end, (left, bottom, right, top)
+
+
 def recrop_write_window(win, overall_height, overall_width):
     """ Determine write window based on overlap with actual bounds and also
     return how the array that will be written needs to be cropped. """
