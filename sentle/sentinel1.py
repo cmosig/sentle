@@ -22,7 +22,7 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                      time_composite_freq: str, bound_left, bound_right,
                      bound_bottom, bound_top, ts, S1_assets, ptile_height,
                      ptile_width, ptile_transform, item_list,
-                     resampling_method):
+                     resampling_method, time_composite_method: str = "mean"):
     """Processes a single sentinel 1 ptile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution. The function
     returns the reprojected ptile.
