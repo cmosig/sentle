@@ -27,7 +27,7 @@ from .cloud_mask import (
     init_cloud_prediction_service,
 )
 from .snow_mask import S2_snow_mask_band
-from .const import S1_ASSETS, S2_RAW_BANDS, ZARR_TIME_ATTRS
+from .const import S1_ASSETS, S2_NBAR_BANDS, S2_RAW_BANDS, ZARR_TIME_ATTRS
 from .reproject_util import (
     check_and_round_bounds,
     height_width_from_bounds_res,
@@ -90,6 +90,7 @@ def process_ptile(
     bound_top,
     collection,
     S2_bands_to_save,
+    S2_bands,
     S1_assets,
     target_crs: CRS,
     target_resolution: float,
@@ -177,6 +178,7 @@ def process_ptile(
             S2_apply_snow_mask=S2_apply_snow_mask,
             S2_apply_cloud_mask=S2_apply_cloud_mask,
             S2_bands_to_save=S2_bands_to_save,
+            S2_bands=S2_bands,
             S2_subtiles=S2_subtiles,
             cloud_request_queue=cloud_request_queue,
             cloud_response_queue=cloud_response_queue,
@@ -240,6 +242,7 @@ def validate_user_input(
     S2_apply_snow_mask: bool = False,
     S2_apply_cloud_mask: bool = False,
     save_as_uint16: bool = False,
+    S2_bands: list[str] = S2_RAW_BANDS,
 ):
     # validate type zarr store
     # ``zarr.storage.StoreLike`` is a typing union that includes a
@@ -385,6 +388,70 @@ def validate_user_input(
                 "save_as_uint16 can only be used when Sentinel-1 is disabled (set S1_assets to None or an empty list)."
             )
 
+    # validate the Sentinel-2 band selection. ``S2_bands`` mirrors the way
+    # ``S1_assets`` works:
+    #   <all bands> (default) -> all bands
+    #   [...]                 -> a subset
+    #   None or []            -> Sentinel-2 disabled (Sentinel-1 only)
+    s2_disabled = S2_bands is None or (isinstance(S2_bands, list)
+                                       and len(S2_bands) == 0)
+    if s2_disabled:
+        # Sentinel-2 disabled -> require Sentinel-1 and no S2-only options
+        sentinel1_enabled = isinstance(S1_assets, list) and len(S1_assets) > 0
+        if not sentinel1_enabled:
+            raise ValueError(
+                "S2_bands=None or [] disables Sentinel-2, which requires "
+                "Sentinel-1 to be enabled (pass S1_assets); otherwise there is "
+                "nothing to download")
+
+        s2_only_flags = {
+            "S2_mask_snow": S2_mask_snow,
+            "S2_cloud_classification": S2_cloud_classification,
+            "S2_return_cloud_probabilities": S2_return_cloud_probabilities,
+            "S2_apply_snow_mask": S2_apply_snow_mask,
+            "S2_apply_cloud_mask": S2_apply_cloud_mask,
+            "S2_nbar": S2_nbar,
+            "save_as_uint16": save_as_uint16,
+        }
+        enabled = [name for name, val in s2_only_flags.items() if val]
+        if enabled:
+            raise ValueError(
+                f"S2_bands=None or [] disables Sentinel-2 and is incompatible "
+                f"with Sentinel-2 options {enabled}; disable them for a "
+                f"Sentinel-1-only run")
+    else:
+        if not isinstance(S2_bands, list) or not all(
+                isinstance(b, str) for b in S2_bands):
+            raise ValueError("S2_bands must be a list of band-name strings")
+
+        unknown = [b for b in S2_bands if b not in S2_RAW_BANDS]
+        if unknown:
+            raise ValueError(
+                f"S2_bands contains unknown bands {unknown}; valid bands "
+                f"are {S2_RAW_BANDS}")
+
+        # cloud classification feeds all 12 raw bands into the model, so a
+        # subset is not allowed together with it
+        if S2_cloud_classification and set(S2_bands) != set(S2_RAW_BANDS):
+            raise ValueError(
+                "S2_bands cannot be a subset when S2_cloud_classification "
+                "is True (the cloud model requires all bands)")
+
+        # snow mask is computed from B03/B08/B11
+        if S2_mask_snow:
+            missing = [b for b in ("B03", "B08", "B11") if b not in S2_bands]
+            if missing:
+                raise ValueError(
+                    f"S2_bands must include {missing} when S2_mask_snow is "
+                    f"True")
+
+        # NBAR corrects a fixed set of bands
+        if S2_nbar:
+            missing = [b for b in S2_NBAR_BANDS if b not in S2_bands]
+            if missing:
+                raise ValueError(
+                    f"S2_bands must include {missing} when S2_nbar is True")
+
 
 def setup_zarr_storage(
     zarr_store: str | zarr.storage.StoreLike,
@@ -440,12 +507,17 @@ def setup_zarr_storage(
     data_dtype = np.uint16 if save_as_uint16 else np.float32
     data_fill_value = 0 if save_as_uint16 else float("nan")
 
+    # the band axis is chunked at the number of S2 bands so S1 and S2 write
+    # into disjoint band chunks. When S2 is disabled there are no S2 bands, so
+    # fall back to a single chunk spanning all (S1) bands.
+    band_chunk = len(S2_bands_to_save) if len(S2_bands_to_save) > 0 else len(
+        total_bands_to_save)
     data = zarr.create(
         shape=(len(unique_timestamps), len(total_bands_to_save), height,
                width),
         chunks=(
             zarr_store_chunk_size["time"],
-            len(S2_bands_to_save),
+            band_chunk,
             zarr_store_chunk_size["y"],
             zarr_store_chunk_size["x"],
         ),
@@ -654,6 +726,7 @@ def process(
     zarr_store: str | zarr.storage.StoreLike,
     processing_spatial_chunk_size: int = 4000,
     S1_assets: list[str] = S1_ASSETS,
+    S2_bands: list[str] = S2_RAW_BANDS,
     S2_mask_snow: bool = False,
     S2_cloud_classification: bool = False,
     S2_cloud_classification_device="cpu",
@@ -716,6 +789,22 @@ def process(
        Size of spatial chunks across which we perform parallization.
     S1_assets: list[str], default=["vh_asc", "vh_desc", "vv_asc", "vv_desc"]
        Specify which bands to download for Sentinel-1. Only "vh" and "vv" are supported.
+    S2_bands: list[str], default=all 12 raw bands
+       Controls the Sentinel-2 band selection. Behaves like ``S1_assets``:
+         - the full band list (default): download all 12 raw reflectance
+           bands (``sentle.const.S2_RAW_BANDS``).
+         - a subset list, e.g. ``["B04", "B03", "B02"]``: download only those
+           bands, e.g. for an RGB cube. A subset is not allowed together with
+           ``S2_cloud_classification`` (the cloud model needs all bands); when
+           ``S2_mask_snow`` or ``S2_nbar`` are enabled, the bands they depend
+           on must be included.
+         - ``None`` or ``[]``: disable Sentinel-2 entirely for a
+           Sentinel-1-only cube (the two are equivalent, mirroring how
+           ``S1_assets=None``/``[]`` disables Sentinel-1). Requires
+           ``S1_assets`` to be set, and all Sentinel-2-only options (masks,
+           NBAR, cloud probabilities, ``save_as_uint16``) must be disabled.
+       Output band order always follows ``S2_RAW_BANDS`` regardless of the
+       order given.
     overwrite: bool, default=False
        Whether to overwrite existing zarr storage.
     coord_save_mode: str, default="top-left"
@@ -758,18 +847,31 @@ def process(
         S2_nbar=S2_nbar,
         resampling_method=resampling_method,
         save_as_uint16=save_as_uint16,
+        S2_bands=S2_bands,
     )
 
-    # TODO support to only download subset of bands (mutually exclusive with
-    # cloud classification and partially snow_mask) -> or no sentinel 2 at all
-    # derive bands to save from arguments
-    S2_bands_to_save = S2_RAW_BANDS.copy()
-    if S2_mask_snow and time_composite_freq is None:
-        S2_bands_to_save.append(S2_snow_mask_band)
-    if S2_cloud_classification and time_composite_freq is None:
-        S2_bands_to_save.append(S2_cloud_mask_band)
-    if S2_return_cloud_probabilities:
-        S2_bands_to_save += S2_cloud_prob_bands
+    # resolve which raw Sentinel-2 reflectance bands to download/save. This
+    # mirrors how S1_assets works:
+    #   S2_bands=<all bands>  -> all bands (the default)
+    #   S2_bands=[...]        -> just those bands (a subset)
+    #   S2_bands=None or []   -> Sentinel-2 disabled entirely (Sentinel-1 only)
+    # Order follows S2_RAW_BANDS regardless of the order the user passes.
+    s2_enabled = S2_bands is not None and len(S2_bands) > 0
+    if s2_enabled:
+        S2_bands = [b for b in S2_RAW_BANDS if b in S2_bands]
+
+        # derive bands to save from arguments
+        S2_bands_to_save = S2_bands.copy()
+        if S2_mask_snow and time_composite_freq is None:
+            S2_bands_to_save.append(S2_snow_mask_band)
+        if S2_cloud_classification and time_composite_freq is None:
+            S2_bands_to_save.append(S2_cloud_mask_band)
+        if S2_return_cloud_probabilities:
+            S2_bands_to_save += S2_cloud_prob_bands
+    else:
+        # Sentinel-2 disabled -> no S2 bands at all
+        S2_bands = []
+        S2_bands_to_save = []
     total_bands_to_save = S2_bands_to_save.copy()
 
     # if S1_assets are supplied as empty list, convert to None
@@ -780,8 +882,20 @@ def process(
         raise ValueError(
             "save_as_uint16 requires Sentinel-1 assets to be disabled.")
 
+    if not s2_enabled and S1_assets is None:
+        raise ValueError(
+            "Nothing to download: Sentinel-2 is disabled (S2_bands=None or "
+            "[]) and Sentinel-1 is disabled (S1_assets is None/empty).")
+
     if S1_assets is not None:
         total_bands_to_save += S1_assets
+
+    # which collections to query -- either or both satellites
+    collections = []
+    if s2_enabled:
+        collections.append("sentinel-2-l2a")
+    if S1_assets is not None:
+        collections.append("sentinel-1-rtc")
 
     timestamp_list = retrieve_timestamps(
         time_composite_freq=time_composite_freq,
@@ -791,8 +905,7 @@ def process(
         bound_top=bound_top,
         target_crs=target_crs,
         datetime=datetime,
-        collections=["sentinel-2-l2a"]
-        if S1_assets is None else ["sentinel-2-l2a", "sentinel-1-rtc"],
+        collections=collections,
     )
 
     # compute bounds, with and height  for the entire dataset
@@ -844,6 +957,7 @@ def process(
         "S2_return_cloud_probabilities": S2_return_cloud_probabilities,
         "zarr_store": zarr_store,
         "S2_bands_to_save": S2_bands_to_save,
+        "S2_bands": S2_bands,
         "S1_assets": S1_assets,
         "cloud_request_queue": cloud_request_queue,
         "sync_file_path": sync_file_path,

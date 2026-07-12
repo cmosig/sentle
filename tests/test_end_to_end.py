@@ -91,3 +91,56 @@ def test_cube_contains_plausible_reflectance(cube):
     assert finite.min() >= 0
     assert np.nanmedian(finite) > 0
     assert finite.max() < 20000
+
+
+def test_band_subset_downloads_only_requested_bands(tmp_path_factory):
+    """Issue #7: with cloud detection off, request only an RGB band subset."""
+    store = str(tmp_path_factory.mktemp("e2e_rgb") / "rgb.zarr")
+    process(
+        target_crs=TARGET_CRS,
+        target_resolution=RES,
+        bound_left=LEFT,
+        bound_bottom=BOTTOM,
+        bound_right=RIGHT,
+        bound_top=TOP,
+        datetime=DATETIME,
+        zarr_store=store,
+        S1_assets=None,
+        S2_bands=["B04", "B03", "B02"],   # requested in RGB order
+        S2_cloud_classification=False,
+        S2_mask_snow=False,
+        num_workers=1,
+        resampling_method=Resampling.nearest,
+    )
+    ds = xr.open_zarr(store)
+    # output band order follows S2_RAW_BANDS, not the requested order
+    assert list(ds["band"].values) == ["B02", "B03", "B04"]
+    assert ds.sizes["band"] == 3
+    finite = ds["sentle"].values[np.isfinite(ds["sentle"].values)]
+    assert finite.size > 0 and finite.min() >= 0
+
+
+def test_sentinel1_only_run(tmp_path_factory):
+    """Issue #64: download a Sentinel-1-only cube via S2_bands=[]."""
+    store = str(tmp_path_factory.mktemp("e2e_s1") / "s1.zarr")
+    process(
+        target_crs=TARGET_CRS,
+        target_resolution=RES,
+        bound_left=LEFT,
+        bound_bottom=BOTTOM,
+        bound_right=RIGHT,
+        bound_top=TOP,
+        datetime=DATETIME,
+        zarr_store=store,
+        S2_bands=[],                       # Sentinel-2 disabled
+        S1_assets=["vv_asc", "vh_asc"],
+        num_workers=1,
+        resampling_method=Resampling.nearest,
+    )
+    ds = xr.open_zarr(store)
+    assert list(ds["band"].values) == ["vv_asc", "vh_asc"]
+    assert set(ds["sentle"].dims) == {"time", "band", "y", "x"}
+    finite = ds["sentle"].values[np.isfinite(ds["sentle"].values)]
+    # Sentinel-1 RTC gamma0 backscatter is a small non-negative linear value
+    assert finite.size > 0
+    assert finite.min() >= 0
