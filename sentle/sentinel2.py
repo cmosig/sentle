@@ -273,14 +273,25 @@ def process_S2_subtile(
         subtile_array = np.concatenate([subtile_array, result_probs])
 
     if S2_nbar:
-        # needs to happen at a per-item level after after clouds were detected
-        c = get_c_factor_value(stac_item, s2_crs, subtile_bounds_utm)
+        # needs to happen at a per-item level after after clouds were detected.
+        # NBAR relies on the per-scene granule metadata, which is occasionally
+        # missing/unreadable for some scenes (see issue #59); in that case warn
+        # and continue with un-corrected reflectance rather than aborting the
+        # whole (potentially multi-hour) job.
+        try:
+            c = get_c_factor_value(stac_item, s2_crs, subtile_bounds_utm)
 
-        # apply c-factor to array; indices are relative to the downloaded band
-        # subset (which is guaranteed to contain every NBAR band upstream) and
-        # kept in NBAR-band order so they line up with the c-factor bands
-        nbar_indices = [download_bands.index(b) for b in S2_NBAR_BANDS]
-        subtile_array[nbar_indices] *= c
+            # apply c-factor to array; indices are relative to the downloaded
+            # band subset (which is guaranteed to contain every NBAR band
+            # upstream) and kept in NBAR-band order so they line up with the
+            # c-factor bands
+            nbar_indices = [download_bands.index(b) for b in S2_NBAR_BANDS]
+            subtile_array[nbar_indices] *= c
+        except Exception as e:
+            warnings.warn(
+                f"nbar_failure item={stac_item.id} "
+                f"exception_type={type(e).__name__} message={e} "
+                f"note=skipping_NBAR_for_this_subtile")
 
     # 3 reproject to target_crs for each band
     # determine transform --> round to target resolution so that reprojected

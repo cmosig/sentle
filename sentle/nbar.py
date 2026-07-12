@@ -5,8 +5,46 @@ import rasterio.crs
 import sen2nbar.c_factor
 from pystac import Item
 
+from .stac import refresh_sas_token
+
 # cheap least recently used cache
 c_factor_cache = OrderedDict()
+
+
+def _prepare_item_for_sen2nbar(stac_item: Item,
+                               s2_crs: rasterio.crs.CRS) -> Item:
+    """Make a STAC item digestible by ``sen2nbar.c_factor.c_factor_from_item``.
+
+    sen2nbar (2024.6.0) reads the source EPSG from ``item.properties["proj:epsg"]``
+    and fetches the ``granule-metadata`` asset over plain HTTP. Both break on the
+    current Planetary Computer catalog:
+
+    * PC dropped the deprecated ``proj:epsg`` (an int) in favour of the STAC
+      projection-extension ``proj:code`` (e.g. ``"EPSG:32632"``), so the lookup
+      raises ``KeyError: 'proj:epsg'`` (see issues #53, #59).
+    * the ``granule-metadata`` XML lives in a private blob container and needs a
+      SAS token, otherwise the request is rejected.
+
+    sentle already knows the tile CRS (``s2_crs``), so we inject ``proj:epsg``
+    from it and sign the metadata href. The mutation is idempotent (re-signing a
+    signed href just refreshes the token). Returns the same item for convenience.
+    """
+    # provide the source EPSG sen2nbar expects, if the catalog didn't
+    if "proj:epsg" not in stac_item.properties:
+        epsg = s2_crs.to_epsg()
+        if epsg is None:
+            # fall back to the newer proj:code if present
+            code = stac_item.properties.get("proj:code")
+            if code is not None:
+                epsg = int(str(code).split(":")[-1])
+        stac_item.properties["proj:epsg"] = epsg
+
+    # sign the granule-metadata asset so sen2nbar can download the XML
+    gm = stac_item.assets.get("granule-metadata")
+    if gm is not None:
+        gm.href = refresh_sas_token(gm.href)
+
+    return stac_item
 
 
 def get_c_factor_value(
@@ -44,6 +82,7 @@ def get_c_factor_value(
     else:
         assert s2_crs is not None, "s2_crs is None"
 
+        stac_item = _prepare_item_for_sen2nbar(stac_item, s2_crs)
         c = sen2nbar.c_factor.c_factor_from_item(stac_item,
                                                  f"EPSG:{s2_crs.to_epsg()}")
         c_factor_cache[item_id] = c
