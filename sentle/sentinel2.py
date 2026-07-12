@@ -28,7 +28,7 @@ from .reproject_util import (
     window_overlaps_bounds,
 )
 from .snow_mask import S2_snow_mask_band, compute_potential_snow_layer
-from .stac import refresh_sas_token
+from .stac import PlanetaryComputerProvider
 
 
 def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
@@ -177,6 +177,7 @@ def process_S2_subtile(
     cloud_response_queue: mp.Queue,
     resampling_method: Resampling,
     S2_bands: list = None,
+    provider=None,
 ):
     """Processes a single sentinel 2 subtile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution, applying
@@ -186,8 +187,12 @@ def process_S2_subtile(
 
     ``S2_bands`` selects which raw reflectance bands to download (a subset of
     ``S2_RAW_BANDS``); defaults to all of them. Cloud classification always
-    requires the full set (enforced upstream).
+    requires the full set (enforced upstream). ``provider`` supplies the
+    catalog-specific asset keys / href preparation / GDAL env (default:
+    Planetary Computer).
     """
+    if provider is None:
+        provider = PlanetaryComputerProvider()
 
     # which raw bands to actually download for this subtile
     if S2_bands is None:
@@ -204,56 +209,60 @@ def process_S2_subtile(
     s2_crs = None
     # save transformation of sentinel tile for later processing
     s2_tile_transform = None
-    # retrieve each band for subtile in sentinel tile
-    for i, band in enumerate(download_bands):
-        href = refresh_sas_token(stac_item.assets[band].href)
-        try:
-            with rasterio.open(href) as dr:
+    # per-scene processing baseline decides whether harmonization is applied
+    apply_harmonization = provider.s2_processing_baseline(stac_item) >= 4.0
 
-                # convert read window respective to tile resolution
-                # (lower resolution -> fewer pixels for same area)
-                factor = S2_RAW_BAND_RESOLUTION[band] // 10
-                orig_win = intersecting_windows
-                read_window = windows.Window(orig_win.col_off // factor,
-                                             orig_win.row_off // factor,
-                                             orig_win.width // factor,
-                                             orig_win.height // factor)
+    # retrieve each band for the subtile, within the provider's GDAL
+    # environment (e.g. CDSE S3 credentials)
+    with provider.rasterio_env():
+        for i, band in enumerate(download_bands):
+            href = provider.prepare_href(
+                stac_item.assets[provider.s2_asset_key(band)].href)
+            try:
+                with rasterio.open(href) as dr:
 
-                # read subtile and directly upsample to 10m resolution using
-                # nearest-neighbor (default)
-                read_data = dr.read(indexes=1,
-                                    window=read_window,
-                                    out_shape=(S2_subtile_size,
-                                               S2_subtile_size),
-                                    out_dtype=np.float32)
+                    # convert read window respective to tile resolution
+                    # (lower resolution -> fewer pixels for same area)
+                    factor = S2_RAW_BAND_RESOLUTION[band] // 10
+                    orig_win = intersecting_windows
+                    read_window = windows.Window(orig_win.col_off // factor,
+                                                 orig_win.row_off // factor,
+                                                 orig_win.width // factor,
+                                                 orig_win.height // factor)
 
-                # harmonization
-                if float(
-                        stac_item.properties["s2:processing_baseline"]) >= 4.0:
+                    # read subtile and directly upsample to 10m resolution
+                    # using nearest-neighbor (default)
+                    read_data = dr.read(indexes=1,
+                                        window=read_window,
+                                        out_shape=(S2_subtile_size,
+                                                   S2_subtile_size),
+                                        out_dtype=np.float32)
 
-                    # clip values to minimum 1000
-                    # we do this here instead of clipping to zero later to avoid
-                    # integer underflow when using a uint16 potentially later on
-                    read_data[read_data < 1000] = 1000
+                    # harmonization
+                    if apply_harmonization:
+                        # clip values to minimum 1000; done here instead of
+                        # clipping to zero later to avoid integer underflow
+                        # when using a uint16 potentially later on
+                        read_data[read_data < 1000] = 1000
+                        # adjust reflectance for non-zero values
+                        read_data[read_data != 0] -= 1000
 
-                    # adjust reflectance for non-zero values
-                    read_data[read_data != 0] -= 1000
+                    # save
+                    subtile_array[i] = read_data
 
-                # save
-                subtile_array[i] = read_data
+                    # save and validate epsg
+                    assert (s2_crs is None) or (
+                        s2_crs
+                        == dr.crs), "CRS mismatch within one sentinel tile"
+                    s2_crs = dr.crs
 
-                # save and validate epsg
-                assert (s2_crs is None) or (
-                    s2_crs == dr.crs), "CRS mismatch within one sentinel tile"
-                s2_crs = dr.crs
-
-                # save transform for a 10m band tile
-                if band == "B02":
-                    s2_tile_transform = dr.transform
-        except rasterio.errors.RasterioIOError as e:
-            warnings.warn(
-                f"stac_read_failure asset={href} band={band} exception_type={type(e).__name__} message={e} note=planetary_computer_issue"
-            )
+                    # save transform for a 10m band tile
+                    if band == "B02":
+                        s2_tile_transform = dr.transform
+            except rasterio.errors.RasterioIOError as e:
+                warnings.warn(
+                    f"stac_read_failure asset={href} band={band} exception_type={type(e).__name__} message={e} note=provider_issue"
+                )
 
     # in this case we have no data for this subtile, or the tile has no CRS
     if s2_tile_transform is None or not s2_crs:
@@ -386,7 +395,10 @@ def process_ptile_S2_dispatcher(
     resampling_method: Resampling,
     S2_bands: list = None,
     time_composite_method: str = "mean",
+    provider=None,
 ):
+    if provider is None:
+        provider = PlanetaryComputerProvider()
 
     # the raw reflectance bands to download/save (subset of S2_RAW_BANDS)
     if S2_bands is None:
@@ -395,7 +407,7 @@ def process_ptile_S2_dispatcher(
 
     items = pd.DataFrame()
     items["item"] = item_list
-    items["tile"] = items["item"].apply(lambda x: x.properties["s2:mgrs_tile"])
+    items["tile"] = items["item"].apply(provider.s2_mgrs_tile)
     items["ts"] = items["item"].apply(lambda x: x.datetime)
 
     # intiate one array representing the entire subtile for that timestamp
@@ -443,6 +455,7 @@ def process_ptile_S2_dispatcher(
             cloud_response_queue=cloud_response_queue,
             resampling_method=resampling_method,
             S2_bands=S2_bands,
+            provider=provider,
         )
 
         # this happens when the href is not available in subtile -> planetary
@@ -555,7 +568,11 @@ def process_ptile_S2(
     S2_nbar: bool,
     resampling_method: Resampling,
     S2_bands: list = None,
+    provider=None,
 ):
+    if provider is None:
+        provider = PlanetaryComputerProvider()
+
     # the raw reflectance bands to download/save (subset of S2_RAW_BANDS)
     if S2_bands is None:
         S2_bands = S2_RAW_BANDS
@@ -609,6 +626,7 @@ def process_ptile_S2(
             cloud_request_queue=cloud_request_queue,
             resampling_method=resampling_method,
             S2_bands=S2_bands,
+            provider=provider,
         )
 
         # this happens when the href is not available

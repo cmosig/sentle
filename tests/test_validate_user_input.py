@@ -194,6 +194,28 @@ class TestCompositeMethod:
             time_composite_method=method, S1_assets=["vh_asc", "vv_asc"]))
 
 
+class TestProvider:
+    def test_default_planetary_computer_allowed(self):
+        validate_user_input(**_valid_kwargs(provider="planetary_computer"))
+
+    def test_unknown_provider_raises(self):
+        with pytest.raises(ValueError, match="provider must be"):
+            validate_user_input(**_valid_kwargs(provider="earthsearch"))
+
+    def test_cdse_sentinel2_only_allowed(self):
+        validate_user_input(**_valid_kwargs(provider="cdse", S1_assets=None))
+
+    def test_cdse_with_sentinel1_raises(self):
+        with pytest.raises(ValueError, match="does not offer Sentinel-1"):
+            validate_user_input(**_valid_kwargs(
+                provider="cdse", S1_assets=["vh_asc"]))
+
+    def test_cdse_with_nbar_raises(self):
+        with pytest.raises(ValueError, match="does not support S2_nbar"):
+            validate_user_input(**_valid_kwargs(
+                provider="cdse", S1_assets=None, S2_nbar=True))
+
+
 class TestResamplingAndStore:
     def test_resampling_method_must_be_enum(self):
         with pytest.raises(ValueError, match="resampling_method"):

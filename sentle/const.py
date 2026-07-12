@@ -31,6 +31,10 @@ ZARR_TIME_ATTRS = {
 
 STAC_ENDPOINT = "https://planetarycomputer.microsoft.com/api/stac/v1"
 
+# Copernicus Data Space Ecosystem (alternative provider, Sentinel-2 only)
+CDSE_STAC_ENDPOINT = "https://stac.dataspace.copernicus.eu/v1"
+CDSE_S3_ENDPOINT = "eodata.dataspace.copernicus.eu"
+
 S1_ASSETS = ["vh_asc", "vh_desc", "vv_asc", "vv_desc"]
 S1_TRUE_ASSETS = ["vv", "vh"]
 

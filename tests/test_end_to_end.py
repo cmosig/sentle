@@ -262,3 +262,34 @@ def test_sentinel1_only_run(tmp_path_factory):
     # Sentinel-1 RTC gamma0 backscatter is a small non-negative linear value
     assert finite.size > 0
     assert finite.min() >= 0
+
+
+@pytest.mark.skipif(not os.environ.get("SENTLE_RUN_CDSE_E2E"),
+                    reason="set SENTLE_RUN_CDSE_E2E=1 (needs CDSE S3 credentials, "
+                           "e.g. AWS_PROFILE=cdse)")
+def test_cdse_matches_planetary_computer(tmp_path_factory):
+    """Issue #75: the CDSE provider must produce the same reflectances as
+    Planetary Computer (both serve the same ESA L2A product)."""
+    common = dict(
+        target_crs=TARGET_CRS, target_resolution=RES,
+        bound_left=LEFT, bound_bottom=BOTTOM, bound_right=RIGHT, bound_top=TOP,
+        datetime="2023-06-13/2023-06-17", S1_assets=None,
+        S2_cloud_classification=False, S2_mask_snow=False, num_workers=1,
+        resampling_method=Resampling.nearest)
+
+    def _run(store, prov):
+        process(zarr_store=store, provider=prov, **common)
+        return xr.open_zarr(store)
+
+    pc = _run(str(tmp_path_factory.mktemp("pc") / "pc.zarr"),
+              "planetary_computer")
+    cdse = _run(str(tmp_path_factory.mktemp("cdse") / "cdse.zarr"), "cdse")
+
+    assert list(cdse["band"].values) == list(pc["band"].values)
+    a, b = pc["sentle"].values, cdse["sentle"].values
+    assert a.shape == b.shape
+    assert np.array_equal(np.isnan(a), np.isnan(b))
+    both = np.isfinite(a) & np.isfinite(b)
+    assert both.sum() > 0
+    # byte-identical: same ESA product, just COG (PC) vs JP2 (CDSE) containers
+    assert np.array_equal(a[both], b[both])
