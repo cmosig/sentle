@@ -119,6 +119,33 @@ def test_median_composite_differs_from_mean(tmp_path_factory):
     assert np.nanmin(median[both]) >= 0 and np.nanmax(median[both]) < 20000
 
 
+def test_sentinel1_median_composite_differs_from_mean(tmp_path_factory):
+    """Issue #57: the aggregation methods apply to Sentinel-1 too. A wide
+    window (45 days) is used so several S1 acquisitions fall in one composite
+    (S1 revisit is ~12 days), making median != mean."""
+    common = dict(
+        target_crs=TARGET_CRS, target_resolution=RES,
+        bound_left=LEFT, bound_bottom=BOTTOM, bound_right=RIGHT, bound_top=TOP,
+        datetime="2023-06-01/2023-07-16", time_composite_freq="45D",
+        S2_bands=[], S1_assets=["vv_asc", "vh_asc"],
+        num_workers=1, resampling_method=Resampling.nearest)
+
+    def _run(store, method):
+        process(zarr_store=store, time_composite_method=method, **common)
+        return xr.open_zarr(store)["sentle"].values
+
+    mean = _run(str(tmp_path_factory.mktemp("s1mean") / "m.zarr"), "mean")
+    median = _run(str(tmp_path_factory.mktemp("s1med") / "d.zarr"), "median")
+
+    assert mean.shape == median.shape
+    assert np.array_equal(np.isnan(mean), np.isnan(median))
+    both = np.isfinite(mean) & np.isfinite(median)
+    assert both.sum() > 0
+    assert not np.allclose(mean[both], median[both])
+    # S1 RTC gamma0 backscatter stays non-negative
+    assert np.nanmin(median[both]) >= 0
+
+
 def test_nbar_runs_and_changes_reflectance(tmp_path_factory):
     """Issues #53/#59: NBAR (sen2nbar) must actually run against the current
     Planetary Computer catalog (it used to crash with KeyError: 'proj:epsg')

@@ -352,14 +352,6 @@ def validate_user_input(
         raise ValueError(
             f"time_composite_method must be one of {_valid_composite_methods}, "
             f"got {time_composite_method!r}")
-    # non-mean methods are currently implemented for Sentinel-2 only
-    if time_composite_method != "mean":
-        sentinel1_enabled = isinstance(S1_assets, list) and len(S1_assets) > 0
-        if sentinel1_enabled:
-            raise ValueError(
-                f"time_composite_method={time_composite_method!r} is currently "
-                f"only supported for Sentinel-2; use 'mean' or disable "
-                f"Sentinel-1 (S1_assets=None)")
 
     # check if S2_apply_snow_mask is a boolean
     if not isinstance(S2_apply_snow_mask, bool):

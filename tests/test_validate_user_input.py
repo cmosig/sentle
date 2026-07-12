@@ -178,9 +178,7 @@ class TestUint16:
 class TestCompositeMethod:
     @pytest.mark.parametrize("method", ["mean", "median", "min", "max"])
     def test_valid_methods_allowed(self, method):
-        # non-mean needs Sentinel-1 disabled (S2-only feature for now)
-        validate_user_input(**_valid_kwargs(
-            time_composite_method=method, S1_assets=None))
+        validate_user_input(**_valid_kwargs(time_composite_method=method))
 
     def test_default_mean_with_s1_allowed(self):
         validate_user_input(**_valid_kwargs(time_composite_method="mean"))
@@ -189,10 +187,11 @@ class TestCompositeMethod:
         with pytest.raises(ValueError, match="time_composite_method must be"):
             validate_user_input(**_valid_kwargs(time_composite_method="sum"))
 
-    def test_non_mean_with_s1_raises(self):
-        with pytest.raises(ValueError, match="only supported for Sentinel-2"):
-            validate_user_input(**_valid_kwargs(
-                time_composite_method="median", S1_assets=["vh_asc"]))
+    @pytest.mark.parametrize("method", ["median", "min", "max"])
+    def test_non_mean_with_s1_is_allowed(self, method):
+        # aggregation methods apply to Sentinel-1 too now
+        validate_user_input(**_valid_kwargs(
+            time_composite_method=method, S1_assets=["vh_asc", "vv_asc"]))
 
 
 class TestResamplingAndStore:
