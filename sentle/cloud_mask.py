@@ -1,9 +1,13 @@
 import multiprocessing as mp
 import os
+from multiprocessing import resource_tracker, shared_memory
 
 import numpy as np
 import pkg_resources
 import torch
+
+# number of cloudsen output classes (clear/thick/thin/shadow probabilities)
+_N_CLOUD_CLASSES = 4
 
 S2_cloud_mask_band = "S2_cloud_classification"
 S2_cloud_prob_bands = [
@@ -34,6 +38,22 @@ def init_cloud_prediction_service(device: str = "cpu"):
     return queue_manager, request_queue
 
 
+def _attach_shared_memory(name: str) -> shared_memory.SharedMemory:
+    """Attach to an existing shared-memory block created by a worker.
+
+    The worker that created the block owns its lifecycle (it unlinks it), so we
+    unregister the block from *this* process's resource_tracker to prevent it
+    from also trying to unlink it (which would double-unlink and spam
+    ``resource_tracker`` warnings on shutdown).
+    """
+    shm = shared_memory.SharedMemory(name=name)
+    try:
+        resource_tracker.unregister(shm._name, "shared_memory")
+    except Exception:
+        pass
+    return shm
+
+
 def cloud_prediction_loop(request_queue: mp.Queue, device: str):
     # TODO implement batching
 
@@ -47,9 +67,30 @@ def cloud_prediction_loop(request_queue: mp.Queue, device: str):
         if request is None:
             break
 
-        cloud_probabilities = compute_cloud_mask(request["array"], model,
-                                                 device)
-        request["response_queue"].put(cloud_probabilities)
+        # read the input tile straight out of shared memory (no 26 MB pickle
+        # through the queue). The worker owns/unlinks the block.
+        in_shm = _attach_shared_memory(request["in_name"])
+        try:
+            array = np.ndarray(request["in_shape"],
+                               dtype=request["in_dtype"],
+                               buffer=in_shm.buf).copy()
+        finally:
+            in_shm.close()
+
+        cloud_probabilities = compute_cloud_mask(array, model, device).astype(
+            np.float32)
+
+        # write the result into the worker's pre-allocated output block and
+        # only signal completion over the queue.
+        out_shm = _attach_shared_memory(request["out_name"])
+        try:
+            out = np.ndarray(request["out_shape"], dtype=np.float32,
+                             buffer=out_shm.buf)
+            out[:] = cloud_probabilities
+        finally:
+            out_shm.close()
+
+        request["response_queue"].put(True)
 
 
 def compute_cloud_mask(array: np.ndarray, model: torch.jit.ScriptModule,
@@ -85,5 +126,42 @@ def compute_cloud_mask(array: np.ndarray, model: torch.jit.ScriptModule,
 
 def worker_get_cloud_mask(array: np.ndarray, request_queue: mp.Queue,
                           response_queue: mp.Queue):
-    request_queue.put({"array": array, "response_queue": response_queue})
-    return response_queue.get()
+    """Send a tile to the cloud-prediction service and get the class
+    probabilities back.
+
+    The (large) arrays are handed over via ``multiprocessing.shared_memory``
+    rather than pickled through the (manager) queue -- only small metadata
+    (block names, shapes, dtype) crosses the queue. This worker creates and
+    owns both the input and output blocks so the service only ever attaches to
+    them, avoiding cross-process resource-tracker cleanup issues.
+    """
+    array = np.ascontiguousarray(array, dtype=np.float32)
+    out_shape = (_N_CLOUD_CLASSES, array.shape[1], array.shape[2])
+    out_nbytes = int(np.prod(out_shape)) * np.dtype(np.float32).itemsize
+
+    in_shm = shared_memory.SharedMemory(create=True, size=array.nbytes)
+    out_shm = shared_memory.SharedMemory(create=True, size=out_nbytes)
+    try:
+        # copy the tile into shared memory
+        np.ndarray(array.shape, dtype=array.dtype,
+                   buffer=in_shm.buf)[:] = array
+
+        request_queue.put({
+            "in_name": in_shm.name,
+            "in_shape": array.shape,
+            "in_dtype": str(array.dtype),
+            "out_name": out_shm.name,
+            "out_shape": out_shape,
+            "response_queue": response_queue,
+        })
+
+        # wait until the service has written the result into out_shm
+        response_queue.get()
+
+        return np.ndarray(out_shape, dtype=np.float32,
+                          buffer=out_shm.buf).copy()
+    finally:
+        in_shm.close()
+        in_shm.unlink()
+        out_shm.close()
+        out_shm.unlink()
