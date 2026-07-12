@@ -151,6 +151,7 @@ The package contains only one main function for retrieving and processing Sentin
 - The `zarr_store_chunk_size` dictionary must contain the keys 'time', 'y', and 'x'.
 - When using cloud or snow masking with temporal composites, the masks will be applied before aggregation.
 - To download from CDSE (`provider="cdse"`), first create a free [Copernicus Data Space](https://dataspace.copernicus.eu/) account and generate S3 credentials, then make them available to GDAL/boto3 (e.g. add a `[cdse]` profile to `~/.aws/credentials` and run with `AWS_PROFILE=cdse`). CDSE is Sentinel-2 only.
+- GDAL's raster block cache is tunable via the standard `GDAL_CACHEMAX` environment variable (sentle honours it and does not override it), e.g. `GDAL_CACHEMAX=512` (MB) — useful on memory-constrained hosts or when running many `num_workers` (the cache is per-process). In practice it has little effect on CDSE JP2 reads (their decoded tiles are cached inside the open dataset, not GDAL's block cache) but does govern the Planetary Computer COG path; the default (≈5% of RAM) is fine for most machines.
 
 ## Questions you may have
 
