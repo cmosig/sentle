@@ -528,6 +528,26 @@ def setup_zarr_storage(
         config=dict(write_empty_chunks=False),
         dimension_names=["time", "band", "y", "x"],
     )
+    # CF grid-mapping so downstream tools (notably rioxarray's ``ds.rio.crs``)
+    # pick up the CRS automatically. ``grid_mapping`` points at the scalar
+    # ``spatial_ref`` variable created below; ``coordinates`` makes a plain
+    # ``xr.open_zarr(...)`` (i.e. without ``decode_coords="all"``) promote
+    # ``spatial_ref`` to a coordinate so the CRS is found. See issue #58.
+    data.attrs["grid_mapping"] = "spatial_ref"
+    data.attrs["coordinates"] = "spatial_ref"
+
+    # scalar CRS-holder variable (the CF grid_mapping variable)
+    spatial_ref = zarr.create(
+        shape=(),
+        dtype="int64",
+        store=store,
+        path="/spatial_ref",
+        overwrite=overwrite,
+        dimension_names=[],
+    )
+    spatial_ref[...] = 0
+    spatial_ref.attrs["crs_wkt"] = target_crs.to_wkt()
+    spatial_ref.attrs["spatial_ref"] = target_crs.to_wkt()
 
     # ------
     # arrays for storage of dimension information
