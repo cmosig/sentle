@@ -835,10 +835,14 @@ def process(
     reuse_open_datasets: bool, default=True
        Keep each Sentinel-2 band raster open and reuse it across all subtiles
        of the same tile within a spatial chunk, instead of re-opening it per
-       subtile. This mostly matters for CDSE: the first windowed read of a JP2
-       pays a one-time tile-structure discovery (~seconds), so reusing the
-       open dataset amortizes it across subtiles and dramatically speeds up
-       larger areas. Set to ``False`` to open/close per subtile (lower memory).
+       subtile (this also keeps GDAL's decoded-tile block cache warm). This
+       mostly matters for CDSE on the older archive (processing baseline
+       < 05.12): those JP2s carry no TLM markers, so the first windowed read
+       pays a one-time tile-structure discovery (~7 s cold), and reusing the
+       open dataset amortizes it across subtiles. Newer CDSE products
+       (baseline >= 05.12, from 2026) carry native TLM markers that GDAL uses
+       automatically, so they are already fast per crop without this. Set to
+       ``False`` to open/close per subtile (lower memory).
     processing_spatial_chunk_size: int, default=4000
        Size of spatial chunks across which we perform parallization.
     S1_assets: list[str], default=["vh_asc", "vh_desc", "vv_asc", "vv_desc"]

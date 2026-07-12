@@ -115,12 +115,16 @@ class CDSEProvider:
         # configure GDAL /vsis3/ for CDSE's (path-style) S3 endpoint using
         # whatever AWS credentials the standard chain provides.
         #
-        # The JP2s carry TLM markers in a small (~3 KB) main header but GDAL
-        # otherwise discovers the tile structure with many small range requests
-        # over high-latency S3. Ingesting ~1 MB at open (one request) and
-        # merging consecutive ranges cuts that roughly in half; a precomputed
-        # TLM byte-range index (à la kerchunk/virtualizarr) would be needed to
-        # go further -- see the notes on issue #75.
+        # Small-AOI read cost depends on the processing baseline. From baseline
+        # 05.12 (PSD 15.1, rolled out Q1 2026) the JP2s carry native TLM
+        # (tile-part length) markers, so GDAL/openjpeg seeks straight to the
+        # needed 1024x1024 tiles -- a cold crop is ~0.7s. Older products (< 05.12)
+        # have NO TLM, so the first read must discover the tile structure by
+        # scanning SOT markers via many small range requests (~7s cold). For that
+        # older archive we mitigate by (a) ingesting ~1 MB at open + merging
+        # consecutive ranges, and (b) keeping the dataset open across subtiles
+        # (see ``reuse_open_datasets``), which amortizes the discovery and lets
+        # GDAL reuse its decoded-tile block cache. See issue #75.
         import boto3
         import rasterio
         from rasterio.session import AWSSession
