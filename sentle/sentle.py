@@ -113,6 +113,7 @@ def process_ptile(
     resampling_method: Resampling,
     save_as_uint16: bool,
     provider,
+    reuse_open_datasets: bool,
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
@@ -190,6 +191,7 @@ def process_ptile(
             cloud_response_queue=cloud_response_queue,
             resampling_method=resampling_method,
             provider=provider,
+            reuse_open_datasets=reuse_open_datasets,
         )
 
     else:
@@ -753,6 +755,7 @@ def process(
     datetime: DatetimeLike,
     zarr_store: str | zarr.storage.StoreLike,
     provider: str = "planetary_computer",
+    reuse_open_datasets: bool = True,
     processing_spatial_chunk_size: int = 4000,
     S1_assets: list[str] = S1_ASSETS,
     S2_bands: list[str] = S2_RAW_BANDS,
@@ -829,6 +832,13 @@ def process(
        ``AWS_PROFILE`` or ``AWS_ACCESS_KEY_ID``/``AWS_SECRET_ACCESS_KEY``). Both
        providers serve the same ESA L2A product, so the reflectances are
        identical; CDSE is currently slower per subtile (JP2-over-S3 access).
+    reuse_open_datasets: bool, default=True
+       Keep each Sentinel-2 band raster open and reuse it across all subtiles
+       of the same tile within a spatial chunk, instead of re-opening it per
+       subtile. This mostly matters for CDSE: the first windowed read of a JP2
+       pays a one-time tile-structure discovery (~seconds), so reusing the
+       open dataset amortizes it across subtiles and dramatically speeds up
+       larger areas. Set to ``False`` to open/close per subtile (lower memory).
     processing_spatial_chunk_size: int, default=4000
        Size of spatial chunks across which we perform parallization.
     S1_assets: list[str], default=["vh_asc", "vh_desc", "vv_asc", "vv_desc"]
@@ -1017,6 +1027,7 @@ def process(
         "resampling_method": resampling_method,
         "save_as_uint16": save_as_uint16,
         "provider": data_provider,
+        "reuse_open_datasets": reuse_open_datasets,
     }
 
     s2grid = gpd.read_file(

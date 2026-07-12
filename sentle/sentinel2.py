@@ -178,6 +178,7 @@ def process_S2_subtile(
     resampling_method: Resampling,
     S2_bands: list = None,
     provider=None,
+    ds_cache=None,
 ):
     """Processes a single sentinel 2 subtile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution, applying
@@ -213,14 +214,27 @@ def process_S2_subtile(
     apply_harmonization = provider.s2_processing_baseline(stac_item) >= 4.0
 
     # retrieve each band for the subtile, within the provider's GDAL
-    # environment (e.g. CDSE S3 credentials)
+    # environment (e.g. CDSE S3 credentials). When a ``ds_cache`` dict is
+    # supplied, opened datasets are kept in it and reused across subtiles of
+    # the same tile: for JP2 (CDSE) the first window read on a dataset is
+    # expensive (openjpeg discovers the tile structure) while subsequent reads
+    # are cheap, so reusing the open dataset amortizes that one-time cost.
     with provider.rasterio_env():
         for i, band in enumerate(download_bands):
             href = provider.prepare_href(
                 stac_item.assets[provider.s2_asset_key(band)].href)
             try:
-                with rasterio.open(href) as dr:
-
+                if ds_cache is not None and href in ds_cache:
+                    dr = ds_cache[href]
+                    owns_dataset = False
+                else:
+                    dr = rasterio.open(href)
+                    if ds_cache is not None:
+                        ds_cache[href] = dr
+                        owns_dataset = False
+                    else:
+                        owns_dataset = True
+                try:
                     # convert read window respective to tile resolution
                     # (lower resolution -> fewer pixels for same area)
                     factor = S2_RAW_BAND_RESOLUTION[band] // 10
@@ -259,6 +273,9 @@ def process_S2_subtile(
                     # save transform for a 10m band tile
                     if band == "B02":
                         s2_tile_transform = dr.transform
+                finally:
+                    if owns_dataset:
+                        dr.close()
             except rasterio.errors.RasterioIOError as e:
                 warnings.warn(
                     f"stac_read_failure asset={href} band={band} exception_type={type(e).__name__} message={e} note=provider_issue"
@@ -396,6 +413,7 @@ def process_ptile_S2_dispatcher(
     S2_bands: list = None,
     time_composite_method: str = "mean",
     provider=None,
+    reuse_open_datasets: bool = True,
 ):
     if provider is None:
         provider = PlanetaryComputerProvider()
@@ -456,6 +474,7 @@ def process_ptile_S2_dispatcher(
             resampling_method=resampling_method,
             S2_bands=S2_bands,
             provider=provider,
+            reuse_open_datasets=reuse_open_datasets,
         )
 
         # this happens when the href is not available in subtile -> planetary
@@ -569,9 +588,15 @@ def process_ptile_S2(
     resampling_method: Resampling,
     S2_bands: list = None,
     provider=None,
+    reuse_open_datasets: bool = True,
 ):
     if provider is None:
         provider = PlanetaryComputerProvider()
+
+    # reuse open band datasets across subtiles of the same tile so the (JP2)
+    # per-file tile-structure discovery cost is paid once per file, not per
+    # subtile. Keyed by prepared href; closed at the end of this ptile.
+    ds_cache = {} if reuse_open_datasets else None
 
     # the raw reflectance bands to download/save (subset of S2_RAW_BANDS)
     if S2_bands is None:
@@ -627,6 +652,7 @@ def process_ptile_S2(
             resampling_method=resampling_method,
             S2_bands=S2_bands,
             provider=provider,
+            ds_cache=ds_cache,
         )
 
         # this happens when the href is not available
@@ -650,6 +676,15 @@ def process_ptile_S2(
                             write_win.height,
                             write_win.col_off:write_win.col_off +
                             write_win.width] += ~(subtile_array_ret == 0)
+
+    # done reading; close any datasets kept open for reuse across subtiles
+    if ds_cache is not None:
+        for _ds in ds_cache.values():
+            try:
+                _ds.close()
+            except Exception:
+                pass
+        ds_cache.clear()
 
     if subtile_array_bands is None:
         return None, None

@@ -151,6 +151,9 @@ class TestNbarRobustness:
             def __exit__(self, *a):
                 return False
 
+            def close(self):
+                pass
+
             def read(self, indexes, window, out_shape, out_dtype, **kw):
                 return np.full(out_shape, 5000, dtype=out_dtype)
 
