@@ -1,10 +1,11 @@
 """Tests for the configurable Sentinel-2 subtile size (issue #30).
 
 The subtile size is the side length (in 10 m pixels) each Sentinel-2 tile is
-split into for download. It defaults to 732 but can be made smaller (down to
-366) so small cubes are cheaper to generate. Valid sizes are divisors of 10980
-that are multiples of 6 (so the 20 m/60 m bands read on an integer grid). These
-tests cover the two places the size matters:
+split into for download. It defaults to 732 and can be set to another divisor
+of 10980 that is a multiple of 6 (so the 20 m/60 m bands read on an integer
+grid), between 366 and 10980. (A smaller value reduces peak working-array
+memory but not download volume -- see the analysis on PR #69.) These tests
+cover the two places the size matters:
 
 * ``obtain_subtiles`` -- the geometry that enumerates download windows, and
 * ``cloud_mask.compute_cloud_mask`` -- which must pad any subtile size up to a

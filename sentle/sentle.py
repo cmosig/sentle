@@ -746,10 +746,14 @@ def process(
         split into for download. Must be a divisor of 10980, a multiple of 6
         (so the 20 m/60 m bands read on an integer pixel grid) and between 366
         and 10980 -- i.e. one of 366, 732, 1098, 1830, 2196, 3660, 5490, 10980.
-        A smaller value (366) makes small cubes cheaper to generate by
-        downloading less unused area per subtile; 732 is a good default for
-        larger areas. Note the Planetary Computer COGs are internally tiled at
-        512x512, so going below ~512 brings diminishing download savings.
+        **Leave this at 732 unless you know you need otherwise.** A smaller
+        value only reduces the peak per-subtile working-array size (memory); it
+        does *not* reduce download volume, because the Planetary Computer COGs
+        are internally tiled at 512x512 and are always read a whole block at a
+        time -- a sub-block subtile still fetches full blocks, and more
+        subtiles mean more (re-)reads, so 366 actually transfers more data and
+        runs slightly slower than 732 in practice. It also changes the cloud
+        classification slightly (the model sees a smaller spatial context).
         Works with cloud detection (the model input is padded to a multiple of
         32 automatically).
     """
