@@ -196,10 +196,6 @@ class TestS2Bands:
         with pytest.raises(ValueError, match="S2_bands"):
             validate_user_input(**_valid_kwargs(S2_bands="B02"))
 
-    def test_empty_list_raises(self):
-        with pytest.raises(ValueError, match="empty"):
-            validate_user_input(**_valid_kwargs(S2_bands=[]))
-
     def test_unknown_band_raises(self):
         with pytest.raises(ValueError, match="unknown"):
             validate_user_input(**_valid_kwargs(S2_bands=["B02", "B99"]))
@@ -224,3 +220,35 @@ class TestS2Bands:
         with pytest.raises(ValueError, match="S2_nbar"):
             validate_user_input(**_valid_kwargs(
                 S2_bands=["B02", "B03", "B04"], S2_nbar=True))
+
+
+class TestSentinel1Only:
+    """``S2_bands=[]`` disables Sentinel-2 for a Sentinel-1-only cube."""
+
+    def test_empty_bands_with_s1_is_allowed(self):
+        validate_user_input(**_valid_kwargs(
+            S2_bands=[], S1_assets=["vh_asc", "vv_asc"]))
+
+    def test_empty_bands_without_s1_raises(self):
+        with pytest.raises(ValueError, match="nothing to download"):
+            validate_user_input(**_valid_kwargs(S2_bands=[], S1_assets=None))
+
+    def test_empty_bands_with_empty_s1_raises(self):
+        with pytest.raises(ValueError, match="nothing to download"):
+            validate_user_input(**_valid_kwargs(S2_bands=[], S1_assets=[]))
+
+    @pytest.mark.parametrize("flag", [
+        "S2_mask_snow", "S2_cloud_classification",
+        "S2_return_cloud_probabilities", "S2_nbar",
+    ])
+    def test_s2_only_options_incompatible_with_disabled_s2(self, flag):
+        with pytest.raises(ValueError, match="Sentinel-1-only"):
+            validate_user_input(**_valid_kwargs(
+                S2_bands=[], S1_assets=["vh_asc"], **{flag: True}))
+
+    def test_uint16_incompatible_with_disabled_s2(self):
+        # uint16 needs S1 disabled while S1-only needs S1 enabled -- caught by
+        # the earlier uint16 guard
+        with pytest.raises(ValueError, match="save_as_uint16"):
+            validate_user_input(**_valid_kwargs(
+                S2_bands=[], S1_assets=["vh_asc"], save_as_uint16=True))

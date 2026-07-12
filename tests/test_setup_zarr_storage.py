@@ -139,3 +139,16 @@ def test_band_chunk_equals_number_of_s2_bands(tmp_path):
     root = _build(tmp_path, S2_bands_to_save=BANDS,
                   total_bands_to_save=BANDS + ["vv_asc", "vh_asc"])
     assert root["sentle"].chunks[1] == len(BANDS)
+
+
+def test_sentinel1_only_store_layout(tmp_path):
+    # Sentinel-1-only (S2_bands=[]): with Sentinel-2 disabled there are no S2
+    # bands; the store must still be well-formed with the band axis chunked
+    # over the S1 assets
+    s1_assets = ["vv_asc", "vh_asc"]
+    root = _build(tmp_path, S2_bands_to_save=[],
+                  total_bands_to_save=s1_assets)
+    assert root["sentle"].shape[1] == len(s1_assets)
+    # band chunk falls back to the full (S1) band count instead of 0
+    assert root["sentle"].chunks[1] == len(s1_assets)
+    assert list(root["band"][:]) == s1_assets
