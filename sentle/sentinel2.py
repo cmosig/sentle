@@ -9,7 +9,7 @@ import scipy.ndimage as sc
 from rasterio import transform, warp, windows
 from rasterio.crs import CRS
 from rasterio.enums import Resampling
-from shapely.geometry import Polygon, box
+from shapely.geometry import box, shape
 from shapely.ops import unary_union
 
 from .cloud_mask import S2_cloud_mask_band, S2_cloud_prob_bands, worker_get_cloud_mask
@@ -47,11 +47,16 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
         10980 %
         S2_subtile_size) == 0, "S2_subtile_size needs to be a divisor of 10980"
 
-    # convert bounds to sentinel grid crs
-    transformed_bounds = Polygon(*warp.transform_geom(
-        src_crs=target_crs,
-        dst_crs=s2grid.crs,
-        geom=box(left, bottom, right, top))["coordinates"])
+    # convert bounds to sentinel grid crs. ``shape`` (rather than
+    # ``Polygon(*coordinates)``) is used throughout obtain_subtiles because a
+    # geometry that crosses the antimeridian is returned by ``transform_geom``
+    # as a (cut) MultiPolygon, which ``Polygon(*...)`` cannot parse -- see
+    # issue #60. ``shape`` handles Polygon and MultiPolygon alike, and the
+    # downstream intersects/intersection/union/area operations work on both.
+    transformed_bounds = shape(
+        warp.transform_geom(src_crs=target_crs,
+                            dst_crs=s2grid.crs,
+                            geom=box(left, bottom, right, top)))
 
     # extract overlapping sentinel tiles
     s2grid = s2grid[s2grid["geometry"].intersects(transformed_bounds)].copy()
@@ -66,12 +71,14 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
             np.arange(0, 10980, S2_subtile_size))
     ]
 
-    # reproject s2 footprint to local utm footprint
+    # reproject s2 footprint to local utm footprint. Transform the whole tile
+    # geometry (not just its first part): a tile straddling the antimeridian is
+    # stored as a MultiPolygon split at +/-180 in lat/lon, but is contiguous in
+    # its local UTM, so using the full geometry yields the correct extent.
     s2grid["s2_footprint_utm"] = s2grid[[
         "geometry", "crs"
-    ]].apply(lambda ser: Polygon(*warp.transform_geom(
-        src_crs=s2grid.crs, dst_crs=ser["crs"], geom=ser["geometry"].geoms[0])[
-            "coordinates"]),
+    ]].apply(lambda ser: shape(warp.transform_geom(
+        src_crs=s2grid.crs, dst_crs=ser["crs"], geom=ser["geometry"])),
              axis=1)
 
     # obtain transform of each sentinel 2 tile in local utm crs
@@ -87,11 +94,10 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
     def _intersecting_window_footprints(ser):
         out = []
         for win_subtile in general_subtile_windows:
-            footprint = Polygon(*warp.transform_geom(
+            footprint = shape(warp.transform_geom(
                 src_crs=ser["crs"],
                 dst_crs=s2grid.crs,
-                geom=box(*windows.bounds(win_subtile, ser["tile_transform"])))
-                                ["coordinates"])
+                geom=box(*windows.bounds(win_subtile, ser["tile_transform"]))))
             if transformed_bounds.intersects(footprint):
                 out.append((win_subtile, footprint))
         return out
