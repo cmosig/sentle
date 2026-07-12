@@ -35,7 +35,7 @@ from .reproject_util import (
 )
 from .sentinel1 import process_ptile_S1
 from .sentinel2 import obtain_subtiles, process_ptile_S2_dispatcher
-from .stac import open_catalog
+from .stac import get_provider
 from .utils import GLOBAL_QUEUE_MANAGER, GLOBAL_QUEUES, tqdm_joblib
 
 
@@ -48,6 +48,7 @@ def catalog_search_ptile(
     bound_right,
     bound_top,
     target_crs,
+    provider,
 ) -> list:
     # timestamp
     if time_composite_freq is None:
@@ -60,7 +61,7 @@ def catalog_search_ptile(
         ]
 
     # open stac catalog
-    catalog = open_catalog()
+    catalog = provider.open_catalog()
 
     # retrieve items (possible across multiple sentinel tile) for specified
     # timestamp
@@ -111,6 +112,8 @@ def process_ptile(
     sync_file_path: str,
     resampling_method: Resampling,
     save_as_uint16: bool,
+    provider,
+    reuse_open_datasets: bool,
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
@@ -134,6 +137,7 @@ def process_ptile(
         bound_bottom=bound_bottom,
         bound_top=bound_top,
         target_crs=target_crs,
+        provider=provider,
     )
 
     if len(item_list) == 0:
@@ -186,6 +190,8 @@ def process_ptile(
             cloud_request_queue=cloud_request_queue,
             cloud_response_queue=cloud_response_queue,
             resampling_method=resampling_method,
+            provider=provider,
+            reuse_open_datasets=reuse_open_datasets,
         )
 
     else:
@@ -247,7 +253,25 @@ def validate_user_input(
     S2_apply_cloud_mask: bool = False,
     save_as_uint16: bool = False,
     S2_bands: list[str] = S2_RAW_BANDS,
+    provider: str = "planetary_computer",
 ):
+    # validate the data provider and its constraints
+    if provider not in ("planetary_computer", "cdse"):
+        raise ValueError(
+            f"provider must be 'planetary_computer' or 'cdse', got "
+            f"{provider!r}")
+    if provider == "cdse":
+        sentinel1_enabled = isinstance(S1_assets, list) and len(S1_assets) > 0
+        if sentinel1_enabled:
+            raise ValueError(
+                "provider='cdse' does not offer Sentinel-1 RTC; set "
+                "S1_assets=None (CDSE support is Sentinel-2 only)")
+        if S2_nbar:
+            raise ValueError(
+                "provider='cdse' does not support S2_nbar yet (sen2nbar reads "
+                "the granule metadata over HTTP, which CDSE serves from S3); "
+                "set S2_nbar=False")
+
     # validate type zarr store
     # ``zarr.storage.StoreLike`` is a typing union that includes a
     # parameterized generic (``dict[str, Buffer]``), which cannot be used
@@ -644,12 +668,15 @@ def retrieve_timestamps(
     bound_top: float,
     target_crs: CRS,
     collections: list[str],
+    provider=None,
 ) -> list[dict]:
     if time_composite_freq is None:
         # get all items within date range and area
 
-        # sign into planetary computer
-        catalog = open_catalog()
+        # open the provider's stac catalog
+        if provider is None:
+            provider = get_provider("planetary_computer")
+        catalog = provider.open_catalog()
 
         search = catalog.search(
             collections=collections,
@@ -727,6 +754,8 @@ def process(
     bound_top: float,
     datetime: DatetimeLike,
     zarr_store: str | zarr.storage.StoreLike,
+    provider: str = "planetary_computer",
+    reuse_open_datasets: bool = True,
     processing_spatial_chunk_size: int = 4000,
     S1_assets: list[str] = S1_ASSETS,
     S2_bands: list[str] = S2_RAW_BANDS,
@@ -795,6 +824,25 @@ def process(
         Whether to apply Nadir BRFD correction with sen2nbar package.
     zarr_store: str | zarr.storage.StoreLike
        Path of where to create the zarr storage.
+    provider: str, default="planetary_computer"
+       Which data catalog to download from: ``"planetary_computer"`` (default)
+       or ``"cdse"`` (Copernicus Data Space Ecosystem). CDSE is Sentinel-2 only
+       (no Sentinel-1 RTC and no NBAR yet) and reads JP2s from CDSE S3, so it
+       needs CDSE S3 credentials via the standard AWS chain (e.g.
+       ``AWS_PROFILE`` or ``AWS_ACCESS_KEY_ID``/``AWS_SECRET_ACCESS_KEY``). Both
+       providers serve the same ESA L2A product, so the reflectances are
+       identical; CDSE is currently slower per subtile (JP2-over-S3 access).
+    reuse_open_datasets: bool, default=True
+       Keep each Sentinel-2 band raster open and reuse it across all subtiles
+       of the same tile within a spatial chunk, instead of re-opening it per
+       subtile (this also keeps GDAL's decoded-tile block cache warm). This
+       mostly matters for CDSE on the older archive (processing baseline
+       < 05.12): those JP2s carry no TLM markers, so the first windowed read
+       pays a one-time tile-structure discovery (~7 s cold), and reusing the
+       open dataset amortizes it across subtiles. Newer CDSE products
+       (baseline >= 05.12, from 2026) carry native TLM markers that GDAL uses
+       automatically, so they are already fast per crop without this. Set to
+       ``False`` to open/close per subtile (lower memory).
     processing_spatial_chunk_size: int, default=4000
        Size of spatial chunks across which we perform parallization.
     S1_assets: list[str], default=["vh_asc", "vh_desc", "vv_asc", "vv_desc"]
@@ -859,7 +907,11 @@ def process(
         resampling_method=resampling_method,
         save_as_uint16=save_as_uint16,
         S2_bands=S2_bands,
+        provider=provider,
     )
+
+    # instantiate the data provider (Planetary Computer or CDSE)
+    data_provider = get_provider(provider)
 
     # resolve which raw Sentinel-2 reflectance bands to download/save. This
     # mirrors how S1_assets works:
@@ -901,12 +953,13 @@ def process(
     if S1_assets is not None:
         total_bands_to_save += S1_assets
 
-    # which collections to query -- either or both satellites
+    # which collections to query -- either or both satellites (collection ids
+    # come from the provider)
     collections = []
     if s2_enabled:
-        collections.append("sentinel-2-l2a")
+        collections.append(data_provider.s2_collection)
     if S1_assets is not None:
-        collections.append("sentinel-1-rtc")
+        collections.append(data_provider.s1_collection)
 
     timestamp_list = retrieve_timestamps(
         time_composite_freq=time_composite_freq,
@@ -917,6 +970,7 @@ def process(
         target_crs=target_crs,
         datetime=datetime,
         collections=collections,
+        provider=data_provider,
     )
 
     # compute bounds, with and height  for the entire dataset
@@ -976,6 +1030,8 @@ def process(
         "S2_nbar": S2_nbar,
         "resampling_method": resampling_method,
         "save_as_uint16": save_as_uint16,
+        "provider": data_provider,
+        "reuse_open_datasets": reuse_open_datasets,
     }
 
     s2grid = gpd.read_file(
