@@ -96,6 +96,7 @@ def process_ptile(
     target_resolution: float,
     S2_cloud_classification_device: str,
     time_composite_freq: str,
+    time_composite_method: str,
     S2_apply_snow_mask: bool,
     S2_apply_cloud_mask: bool,
     S2_mask_snow: bool,
@@ -153,6 +154,7 @@ def process_ptile(
             item_list=item_list,
             target_resolution=target_resolution,
             time_composite_freq=time_composite_freq,
+            time_composite_method=time_composite_method,
             S1_assets=S1_assets,
             resampling_method=resampling_method,
         )
@@ -175,6 +177,7 @@ def process_ptile(
             S2_return_cloud_probabilities=S2_return_cloud_probabilities,
             S2_nbar=S2_nbar,
             time_composite_freq=time_composite_freq,
+            time_composite_method=time_composite_method,
             S2_apply_snow_mask=S2_apply_snow_mask,
             S2_apply_cloud_mask=S2_apply_cloud_mask,
             S2_bands_to_save=S2_bands_to_save,
@@ -239,6 +242,7 @@ def validate_user_input(
     S2_return_cloud_probabilities: bool = False,
     num_workers: int = 1,
     time_composite_freq: str = None,
+    time_composite_method: str = "mean",
     S2_apply_snow_mask: bool = False,
     S2_apply_cloud_mask: bool = False,
     save_as_uint16: bool = False,
@@ -341,6 +345,13 @@ def validate_user_input(
     if time_composite_freq is not None and not isinstance(
             time_composite_freq, str):
         raise ValueError("time_composite_freq must be a string")
+
+    # check the temporal aggregation method
+    _valid_composite_methods = ("mean", "median", "min", "max")
+    if time_composite_method not in _valid_composite_methods:
+        raise ValueError(
+            f"time_composite_method must be one of {_valid_composite_methods}, "
+            f"got {time_composite_method!r}")
 
     # check if S2_apply_snow_mask is a boolean
     if not isinstance(S2_apply_snow_mask, bool):
@@ -725,6 +736,7 @@ def process(
     S2_return_cloud_probabilities: bool = False,
     num_workers: int = 1,
     time_composite_freq: str = None,
+    time_composite_method: str = "mean",
     S2_apply_snow_mask: bool = False,
     S2_apply_cloud_mask: bool = False,
     S2_nbar: bool = False,
@@ -768,7 +780,13 @@ def process(
     num_workers : int, default=1
         Number of cores to scale computation across. Plan 2GiB of RAM per worker. -1 uses all available cores.
     time_composite_freq: str, default=None
-        Rounding interval across which data is averaged.
+        Rounding interval across which data is aggregated.
+    time_composite_method: str, default="mean"
+        How to aggregate the acquisitions within each ``time_composite_freq``
+        window. One of ``"mean"`` (default), ``"median"``, ``"min"`` or
+        ``"max"``. NoData/masked pixels are ignored per band and pixel (a
+        pixel that is NoData in every acquisition of the window stays NoData).
+        Only used when ``time_composite_freq`` is set.
     S2_apply_snow_mask: bool, default=False
         Whether to replace snow with NaN.
     S2_apply_cloud_mask: bool, default=False
@@ -833,6 +851,7 @@ def process(
         num_workers=num_workers,
         zarr_store=zarr_store,
         time_composite_freq=time_composite_freq,
+        time_composite_method=time_composite_method,
         S2_apply_snow_mask=S2_apply_snow_mask,
         S2_apply_cloud_mask=S2_apply_cloud_mask,
         zarr_store_chunk_size=zarr_store_chunk_size,
@@ -942,6 +961,7 @@ def process(
         "target_resolution": target_resolution,
         "S2_cloud_classification_device": S2_cloud_classification_device,
         "time_composite_freq": time_composite_freq,
+        "time_composite_method": time_composite_method,
         "S2_apply_snow_mask": S2_apply_snow_mask,
         "S2_apply_cloud_mask": S2_apply_cloud_mask,
         "S2_cloud_classification": S2_cloud_classification,

@@ -385,6 +385,7 @@ def process_ptile_S2_dispatcher(
     cloud_response_queue: mp.Queue,
     resampling_method: Resampling,
     S2_bands: list = None,
+    time_composite_method: str = "mean",
 ):
 
     # the raw reflectance bands to download/save (subset of S2_RAW_BANDS)
@@ -407,7 +408,14 @@ def process_ptile_S2_dispatcher(
     perform_aggregation = (time_composite_freq is not None) and (len(item_list)
                                                                  > 1)
 
-    if perform_aggregation:
+    # "mean" aggregates by streaming sum/count (memory-cheap); the other
+    # methods need the individual acquisitions, so they are buffered and
+    # reduced at the end. Only a handful of acquisitions fall in one composite
+    # window, so the buffer stays small.
+    use_buffer = perform_aggregation and time_composite_method != "mean"
+    buffered_stamps = [] if use_buffer else None
+
+    if perform_aggregation and not use_buffer:
         # count how many values we add per pixel to compute mean later
         ptile_array_count = np.full(shape=(len(S2_bands_to_save), ptile_height,
                                            ptile_width),
@@ -470,11 +478,18 @@ def process_ptile_S2_dispatcher(
                                             axis=0)
 
         # save new data
-        ptile_array += ptile_timestamp
+        if use_buffer:
+            # keep this acquisition; encode nodata/masked (0) as NaN so the
+            # nan-aware reducer ignores it per band and pixel
+            stamp = ptile_timestamp.astype(np.float32, copy=True)
+            stamp[stamp == 0] = np.nan
+            buffered_stamps.append(stamp)
+        else:
+            ptile_array += ptile_timestamp
 
-        if perform_aggregation:
-            # count where we added data
-            ptile_array_count += ptile_timestamp != 0
+            if perform_aggregation:
+                # count where we added data
+                ptile_array_count += ptile_timestamp != 0
 
     if ptile_array_bands is None:
         return None
@@ -485,7 +500,21 @@ def process_ptile_S2_dispatcher(
         if S2_cloud_mask_band in ptile_array_bands:
             ptile_array_bands.remove(S2_cloud_mask_band)
 
-    if perform_aggregation:
+    if use_buffer:
+        # reduce the buffered acquisitions with the requested method, ignoring
+        # NoData (NaN); then restore the 0-based NoData sentinel
+        reducer = {
+            "median": np.nanmedian,
+            "min": np.nanmin,
+            "max": np.nanmax,
+        }[time_composite_method]
+        with warnings.catch_warnings():
+            # an all-NoData pixel reduces to NaN -> expected, handled below
+            warnings.simplefilter("ignore")
+            ptile_array = reducer(np.stack(buffered_stamps, axis=0),
+                                  axis=0).astype(np.float32)
+        ptile_array = np.nan_to_num(ptile_array, nan=0.0)
+    elif perform_aggregation:
         # compute mean based on sum and count for each pixel
         with warnings.catch_warnings():
             # filter out divide by zero warning, this is expected here

@@ -22,7 +22,7 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                      time_composite_freq: str, bound_left, bound_right,
                      bound_bottom, bound_top, ts, S1_assets, ptile_height,
                      ptile_width, ptile_transform, item_list,
-                     resampling_method):
+                     resampling_method, time_composite_method: str = "mean"):
     """Processes a single sentinel 1 ptile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution. The function
     returns the reprojected ptile.
@@ -38,7 +38,13 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
 
     user_s1_true_assets = set(map(lambda x: x.split("_")[0], S1_assets))
 
-    if perform_aggregation:
+    # "mean" aggregates by streaming sum/count; the other methods buffer each
+    # acquisition (only a handful per composite window) and reduce them at the
+    # end, NoData-aware.
+    use_buffer = perform_aggregation and time_composite_method != "mean"
+    buffered_items = [] if use_buffer else None
+
+    if perform_aggregation and not use_buffer:
         # count how many values we add per pixel to compute mean later
         tile_array_count = np.full(shape=(len(S1_assets), ptile_height,
                                           ptile_width),
@@ -46,6 +52,13 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                                    dtype=np.uint8)
 
     for item in item_list:
+
+        # one array per acquisition when buffering (NaN = NoData)
+        if use_buffer:
+            item_array = np.full(shape=(len(S1_assets), ptile_height,
+                                        ptile_width),
+                                 fill_value=np.nan,
+                                 dtype=np.float32)
 
         # iterate through S1 assets
         for s1_true_asset in S1_TRUE_ASSETS:
@@ -150,27 +163,47 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                                           local_win.col_off:local_win.col_off +
                                           local_win.width]
 
-                    # save it
-                    ptile_array[band_save_index,
-                                write_win.row_off:write_win.row_off +
-                                write_win.height,
-                                write_win.col_off:write_win.col_off +
-                                write_win.width] += data_repr
+                    rs = slice(write_win.row_off,
+                               write_win.row_off + write_win.height)
+                    cs = slice(write_win.col_off,
+                               write_win.col_off + write_win.width)
+                    if use_buffer:
+                        # this acquisition writes exactly one band; NoData (0)
+                        # -> NaN so the reducer ignores it
+                        block = data_repr.copy()
+                        block[block == 0] = np.nan
+                        item_array[band_save_index, rs, cs] = block
+                    else:
+                        # save it
+                        ptile_array[band_save_index, rs, cs] += data_repr
 
-                    if perform_aggregation:
-                        # save where we have NaNs
-                        tile_array_count[band_save_index,
-                                         write_win.row_off:write_win.row_off +
-                                         write_win.height,
-                                         write_win.col_off:write_win.col_off +
-                                         write_win.width] += ~(data_repr == 0)
+                        if perform_aggregation:
+                            # save where we have NaNs
+                            tile_array_count[band_save_index, rs,
+                                             cs] += ~(data_repr == 0)
 
             except rasterio.errors.RasterioIOError as e:
                 warnings.warn(
                     f"stac_read_failure asset={href} exception_type={type(e).__name__} message={e} note=planetary_computer_issue"
                 )
 
-    if perform_aggregation:
+        if use_buffer:
+            buffered_items.append(item_array)
+
+    if use_buffer:
+        # reduce the buffered acquisitions with the requested method, ignoring
+        # NoData (NaN); an all-NoData pixel reduces to NaN
+        if buffered_items:
+            reducer = {
+                "median": np.nanmedian,
+                "min": np.nanmin,
+                "max": np.nanmax,
+            }[time_composite_method]
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                ptile_array = reducer(np.stack(buffered_items, axis=0),
+                                      axis=0).astype(np.float32)
+    elif perform_aggregation:
         with warnings.catch_warnings():
             # filter out divide by zero warning, this is expected here
             warnings.simplefilter("ignore")

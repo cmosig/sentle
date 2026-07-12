@@ -175,6 +175,25 @@ class TestUint16:
             **_valid_kwargs(save_as_uint16=True, S1_assets=[]))
 
 
+class TestCompositeMethod:
+    @pytest.mark.parametrize("method", ["mean", "median", "min", "max"])
+    def test_valid_methods_allowed(self, method):
+        validate_user_input(**_valid_kwargs(time_composite_method=method))
+
+    def test_default_mean_with_s1_allowed(self):
+        validate_user_input(**_valid_kwargs(time_composite_method="mean"))
+
+    def test_invalid_method_raises(self):
+        with pytest.raises(ValueError, match="time_composite_method must be"):
+            validate_user_input(**_valid_kwargs(time_composite_method="sum"))
+
+    @pytest.mark.parametrize("method", ["median", "min", "max"])
+    def test_non_mean_with_s1_is_allowed(self, method):
+        # aggregation methods apply to Sentinel-1 too now
+        validate_user_input(**_valid_kwargs(
+            time_composite_method=method, S1_assets=["vh_asc", "vv_asc"]))
+
+
 class TestResamplingAndStore:
     def test_resampling_method_must_be_enum(self):
         with pytest.raises(ValueError, match="resampling_method"):
