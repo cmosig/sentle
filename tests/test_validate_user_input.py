@@ -186,8 +186,13 @@ class TestResamplingAndStore:
 
 
 class TestS2Bands:
-    def test_none_is_allowed(self):
-        validate_user_input(**_valid_kwargs(S2_bands=None))
+    def test_default_all_bands_is_allowed(self):
+        # the default (no S2_bands passed) is all bands
+        validate_user_input(**_valid_kwargs())
+
+    def test_explicit_all_bands_is_allowed(self):
+        from sentle.const import S2_RAW_BANDS
+        validate_user_input(**_valid_kwargs(S2_bands=list(S2_RAW_BANDS)))
 
     def test_valid_subset_is_allowed(self):
         validate_user_input(**_valid_kwargs(S2_bands=["B04", "B03", "B02"]))
@@ -223,28 +228,37 @@ class TestS2Bands:
 
 
 class TestSentinel1Only:
-    """``S2_bands=[]`` disables Sentinel-2 for a Sentinel-1-only cube."""
+    """``S2_bands=None`` and ``S2_bands=[]`` are equivalent and disable
+    Sentinel-2 for a Sentinel-1-only cube (mirroring how ``S1_assets``
+    None/[] disables Sentinel-1)."""
 
-    def test_empty_bands_with_s1_is_allowed(self):
+    @pytest.mark.parametrize("disabled", [None, []])
+    def test_disabled_bands_with_s1_is_allowed(self, disabled):
         validate_user_input(**_valid_kwargs(
-            S2_bands=[], S1_assets=["vh_asc", "vv_asc"]))
+            S2_bands=disabled, S1_assets=["vh_asc", "vv_asc"]))
 
-    def test_empty_bands_without_s1_raises(self):
+    @pytest.mark.parametrize("disabled", [None, []])
+    def test_disabled_bands_without_s1_raises(self, disabled):
         with pytest.raises(ValueError, match="nothing to download"):
-            validate_user_input(**_valid_kwargs(S2_bands=[], S1_assets=None))
+            validate_user_input(**_valid_kwargs(
+                S2_bands=disabled, S1_assets=None))
 
-    def test_empty_bands_with_empty_s1_raises(self):
+    @pytest.mark.parametrize("disabled", [None, []])
+    def test_disabled_bands_with_empty_s1_raises(self, disabled):
         with pytest.raises(ValueError, match="nothing to download"):
-            validate_user_input(**_valid_kwargs(S2_bands=[], S1_assets=[]))
+            validate_user_input(**_valid_kwargs(
+                S2_bands=disabled, S1_assets=[]))
 
+    @pytest.mark.parametrize("disabled", [None, []])
     @pytest.mark.parametrize("flag", [
         "S2_mask_snow", "S2_cloud_classification",
         "S2_return_cloud_probabilities", "S2_nbar",
     ])
-    def test_s2_only_options_incompatible_with_disabled_s2(self, flag):
+    def test_s2_only_options_incompatible_with_disabled_s2(self, flag,
+                                                           disabled):
         with pytest.raises(ValueError, match="Sentinel-1-only"):
             validate_user_input(**_valid_kwargs(
-                S2_bands=[], S1_assets=["vh_asc"], **{flag: True}))
+                S2_bands=disabled, S1_assets=["vh_asc"], **{flag: True}))
 
     def test_uint16_incompatible_with_disabled_s2(self):
         # uint16 needs S1 disabled while S1-only needs S1 enabled -- caught by
