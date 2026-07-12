@@ -93,6 +93,40 @@ def test_cube_contains_plausible_reflectance(cube):
     assert finite.max() < 20000
 
 
+def test_nbar_runs_and_changes_reflectance(tmp_path_factory):
+    """Issues #53/#59: NBAR (sen2nbar) must actually run against the current
+    Planetary Computer catalog (it used to crash with KeyError: 'proj:epsg')
+    and produce a plausibly BRDF-corrected cube."""
+    from sentle.const import S2_NBAR_BANDS
+
+    def _run(store, nbar):
+        process(
+            target_crs=TARGET_CRS, target_resolution=RES,
+            bound_left=LEFT, bound_bottom=BOTTOM,
+            bound_right=RIGHT, bound_top=TOP,
+            datetime=DATETIME, zarr_store=store,
+            S1_assets=None, S2_cloud_classification=False, S2_mask_snow=False,
+            S2_nbar=nbar, num_workers=1,
+            resampling_method=Resampling.nearest)
+        return xr.open_zarr(store)
+
+    base = _run(str(tmp_path_factory.mktemp("e2e_plain") / "p.zarr"), False)
+    nbar = _run(str(tmp_path_factory.mktemp("e2e_nbar") / "n.zarr"), True)
+
+    # same shape/bands; NBAR does not add or drop bands
+    assert list(nbar["band"].values) == list(base["band"].values)
+
+    # the NBAR-corrected bands differ from the raw ones (c-factor applied),
+    # but only modestly (BRDF correction is a small multiplicative factor)
+    b = base.sel(band=list(S2_NBAR_BANDS))["sentle"].values
+    n = nbar.sel(band=list(S2_NBAR_BANDS))["sentle"].values
+    both = np.isfinite(b) & np.isfinite(n) & (b > 0)
+    assert both.sum() > 0
+    ratio = n[both] / b[both]
+    assert not np.allclose(ratio, 1.0)          # NBAR actually did something
+    assert 0.8 < np.nanmedian(ratio) < 1.2      # ... but stayed sane
+
+
 def test_wgs84_fractional_degree_resolution(tmp_path_factory):
     """Issue #4: EPSG:4326 with a fractional-degree resolution."""
     store = str(tmp_path_factory.mktemp("e2e_wgs84") / "wgs84.zarr")

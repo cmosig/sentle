@@ -9,10 +9,15 @@ scenarios:
   the tile-overlap de-duplication and multi-tile stitching are exercised.
 * **reprojection** -- the same kind of area requested in EPSG:3857, so the
   reprojection from the native UTM data to a different CRS is exercised.
+* **nbar** -- a small area with NBAR (sen2nbar) enabled. Its reference is a
+  *current-code* golden rather than a previous-release one: NBAR crashed in the
+  release (``KeyError: 'proj:epsg'``, see #53/#59) so the release could not
+  produce a baseline. This scenario therefore pins NBAR output going forward.
 
 Each reference cube (``tests/data/regression/<scenario>.npz``) holds the
-Sentinel-2 reflectance array the *previous release* produced. The test runs the
-*current* code for the identical request and asserts the reflectances match.
+Sentinel-2 reflectance array (the *previous release* produced it, except for
+``nbar`` -- see above). The test runs the *current* code for the identical
+request and asserts the reflectances match.
 Because the resampling is nearest-neighbour and the Planetary Computer L2A data
 is static per scene, the two are expected to agree to within float tolerance --
 so this catches any accidental change in the download / tiling / reprojection /
@@ -66,6 +71,12 @@ SCENARIOS = {
         bound_left=1224500, bound_bottom=5780300,
         bound_right=1225000, bound_top=5780800,
         datetime="2023-06-05/2023-06-15"),
+    # NBAR reference is a current-code golden (release crashed on NBAR)
+    "nbar": dict(
+        target_crs="EPSG:32632", target_resolution=10,
+        bound_left=654000, bound_bottom=5095000,
+        bound_right=654500, bound_top=5095500,
+        datetime="2023-06-05/2023-06-15", S2_nbar=True),
 }
 
 
