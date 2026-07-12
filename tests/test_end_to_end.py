@@ -93,6 +93,37 @@ def test_cube_contains_plausible_reflectance(cube):
     assert finite.max() < 20000
 
 
+def test_wgs84_fractional_degree_resolution(tmp_path_factory):
+    """Issue #4: EPSG:4326 with a fractional-degree resolution."""
+    store = str(tmp_path_factory.mktemp("e2e_wgs84") / "wgs84.zarr")
+    res = 0.001  # ~111 m
+    left, bottom, right, top = 11.00, 46.00, 11.05, 46.05
+    process(
+        target_crs="EPSG:4326",
+        target_resolution=res,
+        bound_left=left,
+        bound_bottom=bottom,
+        bound_right=right,
+        bound_top=top,
+        datetime=DATETIME,
+        zarr_store=store,
+        S1_assets=None,
+        S2_cloud_classification=False,
+        S2_mask_snow=False,
+        num_workers=1,
+        resampling_method=Resampling.nearest,
+    )
+    ds = xr.open_zarr(store)
+    assert ds.sizes["x"] == 50
+    assert ds.sizes["y"] == 50
+    # coordinates are in degrees, aligned to the requested bounds
+    assert float(ds["x"][0]) == pytest.approx(left, abs=1e-4)
+    assert float(ds["y"][0]) == pytest.approx(top, abs=1e-4)
+    assert float(ds["x"].max()) < right
+    finite = ds["sentle"].values[np.isfinite(ds["sentle"].values)]
+    assert finite.size > 0 and finite.min() >= 0
+
+
 def test_band_subset_downloads_only_requested_bands(tmp_path_factory):
     """Issue #7: with cloud detection off, request only an RGB band subset."""
     store = str(tmp_path_factory.mktemp("e2e_rgb") / "rgb.zarr")

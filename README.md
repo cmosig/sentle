@@ -107,8 +107,8 @@ The package contains only one main function for retrieving and processing Sentin
 
 | Parameter           | Type                          | Description                                                                                                                                           |
 | ------------------- | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `target_crs`        | `rasterio.crs.CRS` or `str`   | Specifies the target CRS that all data will be reprojected to. You can provide either a `rasterio.crs.CRS` object or a string (e.g., `"EPSG:32633"`). |
-| `target_resolution` | `float`                       | Determines the resolution that all data is reprojected to in the `target_crs`.                                                                        |
+| `target_crs`        | `rasterio.crs.CRS` or `str`   | Specifies the target CRS that all data will be reprojected to. You can provide either a `rasterio.crs.CRS` object or a string (e.g., `"EPSG:32633"`). Both projected (e.g. UTM) and geographic (e.g. `"EPSG:4326"`) CRSs are supported. |
+| `target_resolution` | `float`                       | Determines the resolution that all data is reprojected to, in the units of `target_crs`. May be fractional — e.g. `0.001` degrees for a lat/lon `EPSG:4326` cube, or `10` metres for a UTM cube.                                       |
 | `bound_left`        | `float`                       | Left bound of area that is supposed to be covered. Unit is in `target_crs`.                                                                           |
 | `bound_bottom`      | `float`                       | Bottom bound of area that is supposed to be covered. Unit is in `target_crs`.                                                                         |
 | `bound_right`       | `float`                       | Right bound of area that is supposed to be covered. Unit is in `target_crs`.                                                                          |

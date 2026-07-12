@@ -44,20 +44,47 @@ def reproject_nodata_zero(*, source, destination, src_transform, src_crs,
     return destination
 
 
+# relative tolerance used when checking whether a span is a whole number of
+# pixels. Needed because fractional resolutions (e.g. 0.1 degrees for EPSG:4326)
+# cannot be represented exactly in floating point, so ``span % res`` is almost
+# never exactly 0 even when the user intended a whole number of pixels.
+_PIXEL_TOL = 1e-6
+
+
+def pixel_count(span, res):
+    """Number of whole pixels spanning ``span`` at resolution ``res``.
+
+    Rounds to the nearest integer when ``span`` is within ``_PIXEL_TOL`` (in
+    pixel units) of a whole number of pixels; otherwise raises so callers that
+    require exact divisibility still fail loudly.
+    """
+    n = abs(span) / res
+    n_round = round(n)
+    if abs(n - n_round) > _PIXEL_TOL:
+        raise AssertionError(
+            f"span {span} is not an integer multiple of resolution {res} "
+            f"({n} pixels)")
+    return int(n_round)
+
+
+def _is_whole_pixels(span, res):
+    n = abs(span) / res
+    return abs(n - round(n)) <= _PIXEL_TOL
+
+
 def check_and_round_bounds(left, bottom, right, top, res):
-    h_rem = abs(top - bottom) % res
-    if h_rem != 0:
+    if not _is_whole_pixels(top - bottom, res):
         warnings.warn(
             "Specified top/bottom bounds are not perfectly divisable by specified target_resolution. The resulting coverage will be rounded up to the next pixel value."
         )
-        top -= h_rem
+        # trim the top down to a whole number of pixels above the bottom
+        top = bottom + (abs(top - bottom) // res) * res
 
-    w_rem = abs(right - left) % res
-    if w_rem != 0:
+    if not _is_whole_pixels(right - left, res):
         warnings.warn(
             "Specified left/right bounds are not perfectly divisable by specified target_resolution. The resulting coverage will be rounded up to the next pixel value."
         )
-        right -= w_rem
+        right = left + (abs(right - left) // res) * res
 
     return left, bottom, right, top
 
@@ -100,12 +127,39 @@ def calculate_aligned_transform(src_crs, dst_crs, height, width, left, bottom,
 
 
 def height_width_from_bounds_res(left, bottom, right, top, res):
-    # determine width and height based on bounds and resolution
-    width, w_rem = divmod(abs(right - left), res)
-    assert w_rem == 0
-    height, h_rem = divmod(abs(top - bottom), res)
-    assert h_rem == 0
+    # determine width and height based on bounds and resolution. Uses
+    # tolerant rounding so fractional resolutions (e.g. 0.1 degrees) work
+    # despite floating-point representation error, and always returns ints.
+    width = pixel_count(right - left, res)
+    height = pixel_count(top - bottom, res)
     return height, width
+
+
+def spatial_chunk_grid(bound_left, bound_top, width, height, resolution,
+                       chunk_size):
+    """Yield the spatial processing chunks that tile a ``width`` x ``height``
+    pixel grid in ``chunk_size`` steps.
+
+    Iteration is in integer *pixel* space, deriving each chunk's CRS bounds
+    from the pixel offsets (``bound + offset * resolution``). This avoids
+    stepping ``range`` with a float stride -- which is invalid for fractional
+    resolutions / geographic CRSs -- while producing exactly the same chunks as
+    a coordinate-space loop for the integer case.
+
+    Yields tuples ``(xi, yi, x_off, x_end, y_off, y_end, (left, bottom, right,
+    top))`` where the ``*_off``/``*_end`` are pixel indices (the zarr write
+    window) and the bounds are in CRS units. ``y_off`` counts pixels **down
+    from the top**, so ``top`` is ``bound_top - y_off * resolution``.
+    """
+    for xi, x_off in enumerate(range(0, width, chunk_size)):
+        x_end = min(x_off + chunk_size, width)
+        left = bound_left + x_off * resolution
+        right = bound_left + x_end * resolution
+        for yi, y_off in enumerate(range(0, height, chunk_size)):
+            y_end = min(y_off + chunk_size, height)
+            top = bound_top - y_off * resolution
+            bottom = bound_top - y_end * resolution
+            yield xi, yi, x_off, x_end, y_off, y_end, (left, bottom, right, top)
 
 
 def recrop_write_window(win, overall_height, overall_width):
@@ -189,12 +243,9 @@ def bounds_from_transform_height_width_res(tf, height, width, resolution):
 
 
 def transform_height_width_from_bounds_res(left, bottom, right, top, res):
-    width, rem = divmod(right - left, res)
-    assert rem == 0
-    width = int(width)
-    height, rem = divmod(top - bottom, res)
-    assert rem == 0
-    height = int(height)
+    # tolerant rounding so fractional resolutions work despite float error
+    width = pixel_count(right - left, res)
+    height = pixel_count(top - bottom, res)
     tf = transform.from_bounds(west=left,
                                south=bottom,
                                east=right,
