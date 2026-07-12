@@ -186,8 +186,9 @@ class TestResamplingAndStore:
 
 
 class TestS2SubtileSize:
-    @pytest.mark.parametrize("size", [244, 305, 366, 610, 732, 10980])
-    def test_valid_divisors_are_allowed(self, size):
+    # divisors of 10980 that are multiples of 6 and >= 366
+    @pytest.mark.parametrize("size", [366, 732, 1098, 1830, 2196, 10980])
+    def test_valid_sizes_are_allowed(self, size):
         validate_user_input(**_valid_kwargs(S2_subtile_size=size))
 
     def test_default_is_valid(self):
@@ -202,10 +203,17 @@ class TestS2SubtileSize:
         with pytest.raises(ValueError, match="divisor of 10980"):
             validate_user_input(**_valid_kwargs(S2_subtile_size=500))
 
+    @pytest.mark.parametrize("size", [244, 305, 610])
+    def test_non_multiple_of_six_raises(self, size):
+        # 244 (=4*61) divides 10980 but is not a multiple of 6, so the 60 m
+        # bands would read on a fractional grid -> rejected
+        with pytest.raises(ValueError, match="multiple of 6"):
+            validate_user_input(**_valid_kwargs(S2_subtile_size=size))
+
     def test_too_small_raises(self):
-        # 183 divides 10980 but is below the 244 floor
-        with pytest.raises(ValueError, match="between 244 and 10980"):
-            validate_user_input(**_valid_kwargs(S2_subtile_size=183))
+        # 180 divides 10980 and is a multiple of 6 but is below the 366 floor
+        with pytest.raises(ValueError, match="between 366 and 10980"):
+            validate_user_input(**_valid_kwargs(S2_subtile_size=180))
 
     def test_too_large_raises(self):
         with pytest.raises(ValueError, match="divisor of 10980"):

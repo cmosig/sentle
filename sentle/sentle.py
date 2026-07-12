@@ -401,11 +401,20 @@ def validate_user_input(
         raise ValueError(
             f"S2_subtile_size must be a divisor of 10980, got {S2_subtile_size}"
         )
-    # smaller than 244 leaves too little context for cloud detection (and its
-    # divisible-by-32 padding); larger than a full tile is meaningless
-    if not (244 <= S2_subtile_size <= 10980):
+    # must be a multiple of 6: the 60 m bands (B01/B09) are read at
+    # subtile_size // 6 pixels, so a non-multiple-of-6 size misaligns them
+    # (e.g. 244 // 6 = 40 px != 244/6). This also covers the 20 m factor of 2.
+    if S2_subtile_size % 6 != 0:
         raise ValueError(
-            "S2_subtile_size must be between 244 and 10980 (inclusive)")
+            f"S2_subtile_size must be a multiple of 6 (so the 20 m/60 m bands "
+            f"read on an integer pixel grid), got {S2_subtile_size}")
+    # Floor of 366 (= 6 x 61, the next divisor below the 732 default): the
+    # Planetary Computer COGs are internally tiled at 512x512, so subtiles
+    # smaller than a block bring diminishing download savings while multiplying
+    # the number of (block-granular) reads.
+    if not (366 <= S2_subtile_size <= 10980):
+        raise ValueError(
+            "S2_subtile_size must be between 366 and 10980 (inclusive)")
 
 
 def setup_zarr_storage(
@@ -734,11 +743,15 @@ def process(
         When True and Sentinel-1 is disabled, persist Sentinel-2 data using unsigned 16-bit integers with zero fill.
     S2_subtile_size : int, default=732
         Side length (in 10 m pixels) of the subtiles each Sentinel-2 tile is
-        split into for download. Must be a divisor of 10980 and between 244 and
-        10980. Smaller values (e.g. 244) make small cubes cheaper to generate
-        by downloading less unused area per subtile; 732 is a good default for
-        larger areas. Works with cloud detection (the model input is padded to
-        a multiple of 32 automatically).
+        split into for download. Must be a divisor of 10980, a multiple of 6
+        (so the 20 m/60 m bands read on an integer pixel grid) and between 366
+        and 10980 -- i.e. one of 366, 732, 1098, 1830, 2196, 3660, 5490, 10980.
+        A smaller value (366) makes small cubes cheaper to generate by
+        downloading less unused area per subtile; 732 is a good default for
+        larger areas. Note the Planetary Computer COGs are internally tiled at
+        512x512, so going below ~512 brings diminishing download savings.
+        Works with cloud detection (the model input is padded to a multiple of
+        32 automatically).
     """
 
     # Accept either a CRS or a string for target_crs

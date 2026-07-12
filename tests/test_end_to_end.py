@@ -94,7 +94,7 @@ def test_cube_contains_plausible_reflectance(cube):
 
 
 def test_small_subtile_size_with_cloud_classification(tmp_path_factory):
-    """Issue #30: a smaller subtile size (244) must work end-to-end, including
+    """Issue #30: a smaller subtile size (366) must work end-to-end, including
     the cloud model whose input is padded to a multiple of 32."""
     store = str(tmp_path_factory.mktemp("e2e_sub") / "sub.zarr")
     process(
@@ -107,7 +107,7 @@ def test_small_subtile_size_with_cloud_classification(tmp_path_factory):
         datetime=DATETIME,
         zarr_store=store,
         S1_assets=None,
-        S2_subtile_size=244,
+        S2_subtile_size=366,
         S2_cloud_classification=True,
         S2_cloud_classification_device="cpu",
         num_workers=1,

@@ -2,8 +2,9 @@
 
 The subtile size is the side length (in 10 m pixels) each Sentinel-2 tile is
 split into for download. It defaults to 732 but can be made smaller (down to
-244) so small cubes are cheaper to generate. These tests cover the two places
-the size matters:
+366) so small cubes are cheaper to generate. Valid sizes are divisors of 10980
+that are multiples of 6 (so the 20 m/60 m bands read on an integer grid). These
+tests cover the two places the size matters:
 
 * ``obtain_subtiles`` -- the geometry that enumerates download windows, and
 * ``cloud_mask.compute_cloud_mask`` -- which must pad any subtile size up to a
@@ -21,7 +22,7 @@ CRS_STR = "EPSG:32633"
 BOUNDS = (300000, 5000000, 360000, 5060000)
 
 
-@pytest.mark.parametrize("size", [244, 366, 732])
+@pytest.mark.parametrize("size", [366, 732, 1098])
 def test_obtain_subtiles_windows_have_requested_size(s2grid, size):
     kept = obtain_subtiles(CRS.from_user_input(CRS_STR), *BOUNDS, s2grid.copy(),
                            subtile_size=size)
@@ -38,7 +39,7 @@ def test_smaller_subtiles_produce_more_windows(s2grid):
     big = obtain_subtiles(CRS.from_user_input(CRS_STR), *BOUNDS, s2grid.copy(),
                           subtile_size=732)
     small = obtain_subtiles(CRS.from_user_input(CRS_STR), *BOUNDS,
-                            s2grid.copy(), subtile_size=244)
+                            s2grid.copy(), subtile_size=366)
     # finer tiling covers the same area with more (smaller) windows
     assert len(small) > len(big)
 
@@ -68,7 +69,7 @@ def cloud_model():
     return load_cloudsen_model("cpu")
 
 
-@pytest.mark.parametrize("size", [244, 305, 366, 732])
+@pytest.mark.parametrize("size", [366, 732, 1098])
 def test_compute_cloud_mask_handles_subtile_size(cloud_model, size):
     from sentle.cloud_mask import compute_cloud_mask
     rng = np.random.default_rng(0)
