@@ -46,11 +46,14 @@ jobs:
       - name: Install (${{ matrix.resolution }} dependency versions)
         run: |
           python -m pip install --upgrade pip
-          if [ "${{ matrix.resolution }}" = "minimum" ]; then
-            pip install -c requirements-min.txt . pytest pytest-timeout
-          else
-            pip install -c requirements-ci.txt . pytest pytest-timeout
-          fi
+          CONSTRAINTS=requirements-ci.txt
+          [ "${{ matrix.resolution }}" = "minimum" ] && CONSTRAINTS=requirements-min.txt
+          # CPU-only torch: the default PyPI wheel bundles CUDA, which (a) is a
+          # ~2 GB download and (b) deadlocks the cloud-mask service -- it forks
+          # a worker process, and CUDA-initialised torch does not support fork.
+          # CI has no GPU, so this also mirrors a typical CPU install.
+          pip install -c "$CONSTRAINTS" torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -c "$CONSTRAINTS" . pytest pytest-timeout
       - name: Run tests
         # Per-test timeout so a hanging test (e.g. a deadlocked multiprocessing
         # worker) is killed and its stack printed, instead of blocking the whole
