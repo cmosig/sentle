@@ -5,6 +5,14 @@ name: tests
 # breaking upstream release surfaces here as a red check on that PR -- before a
 # user hits it. The end-to-end tests (network + slow) stay skipped unless
 # SENTLE_RUN_E2E is set.
+#
+# Two resolutions are tested so both ends of our declared version ranges are
+# verified:
+#   - "latest"  : newest releases (requirements-ci.txt)  -> catches upstream
+#                 breakage; Dependabot bumps that file.
+#   - "minimum" : the floors from setup.py (requirements-min.txt) -> proves the
+#                 lower bounds we promise users actually work. Only on Python
+#                 3.12, since the oldest pinned deps have no 3.13 wheels.
 
 on:
   push:
@@ -19,14 +27,41 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.12", "3.13"]
+        resolution: ["latest"]
+        include:
+          - python-version: "3.12"
+            resolution: "minimum"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "${{ matrix.python-version }}"
-      - name: Install (CI-pinned dependency versions)
+      - name: Install (${{ matrix.resolution }} dependency versions)
         run: |
           python -m pip install --upgrade pip
-          pip install -c requirements-ci.txt . pytest
+          if [ "${{ matrix.resolution }}" = "minimum" ]; then
+            pip install -c requirements-min.txt . pytest
+          else
+            pip install -c requirements-ci.txt . pytest
+          fi
       - name: Run tests
         run: pytest -q
+
+  # Auto-merge Dependabot PRs once the whole test matrix above is green. Since
+  # this job `needs: test`, it only runs after every leg (latest + minimum)
+  # passes -- a breaking dependency release leaves the PR open and red instead.
+  # These PRs only touch CI-internal files (requirements-*.txt, workflow action
+  # versions), never setup.py, so they never change what users install.
+  dependabot-automerge:
+    needs: test
+    if: ${{ github.event_name == 'pull_request' && github.actor == 'dependabot[bot]' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Merge the green Dependabot PR
+        run: gh pr merge --squash --delete-branch "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
