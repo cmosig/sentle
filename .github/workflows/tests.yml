@@ -20,9 +20,16 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Cancel an in-progress run when the same ref is pushed again, so superseded
+# runs don't keep burning runner time.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -40,12 +47,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ "${{ matrix.resolution }}" = "minimum" ]; then
-            pip install -c requirements-min.txt . pytest
+            pip install -c requirements-min.txt . pytest pytest-timeout
           else
-            pip install -c requirements-ci.txt . pytest
+            pip install -c requirements-ci.txt . pytest pytest-timeout
           fi
       - name: Run tests
-        run: pytest -q
+        # Per-test timeout so a hanging test (e.g. a deadlocked multiprocessing
+        # worker) is killed and its stack printed, instead of blocking the whole
+        # job. The thread method dumps the stuck traceback on expiry.
+        run: pytest -q --timeout=180 --timeout-method=thread
 
   # Auto-merge Dependabot PRs once the whole test matrix above is green. Since
   # this job `needs: test`, it only runs after every leg (latest + minimum)
