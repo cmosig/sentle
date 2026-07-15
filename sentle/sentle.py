@@ -2,14 +2,15 @@ import gc
 import multiprocessing as mp
 import shutil
 import tempfile
+import typing
 import warnings
+from importlib.resources import files
 from os import path
 from time import time as currenttime
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-import pkg_resources
 import zarr
 import zarr.storage
 from joblib import Parallel, delayed, parallel_backend
@@ -278,8 +279,15 @@ def validate_user_input(
     # directly in ``isinstance`` (it raises ``TypeError``). Restrict the check
     # to the union members that are concrete classes so an invalid store type
     # yields a clean ``ValueError`` instead.
+    #
+    # Depending on the zarr version ``StoreLike`` is either a plain union
+    # (``types.UnionType`` / ``typing.Union``) or a PEP 695 ``type`` alias
+    # (``typing.TypeAliasType``, which has no ``__args__``); unwrap the latter
+    # via ``__value__`` and use ``typing.get_args`` to handle both uniformly.
+    store_like = zarr.storage.StoreLike
+    store_like = getattr(store_like, "__value__", store_like)
     zarr_store_types = tuple(
-        t for t in zarr.storage.StoreLike.__args__ if isinstance(t, type))
+        t for t in typing.get_args(store_like) if isinstance(t, type))
     if not isinstance(zarr_store, zarr_store_types):
         raise ValueError(
             "zarr_store must be a string or zarr.storage.StoreLike")
@@ -1035,8 +1043,8 @@ def process(
     }
 
     s2grid = gpd.read_file(
-        pkg_resources.resource_filename(
-            __name__, "data/sentinel2_grid_stripped_with_epsg.gpkg"))
+        str(files("sentle") / "data" /
+            "sentinel2_grid_stripped_with_epsg.gpkg"))
 
     def job_generator():
         global GLOBAL_QUEUE_MANAGER

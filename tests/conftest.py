@@ -6,8 +6,9 @@ either a pure-geometry computation on the bundled MGRS grid or is driven with
 monkeypatched stand-ins for the downloaded rasters / STAC items.
 """
 
+from importlib.resources import files
+
 import geopandas as gpd
-import pkg_resources
 import pytest
 
 
@@ -15,5 +16,5 @@ import pytest
 def s2grid():
     """The bundled Sentinel-2 MGRS tiling grid (packaged with sentle)."""
     return gpd.read_file(
-        pkg_resources.resource_filename(
-            "sentle", "data/sentinel2_grid_stripped_with_epsg.gpkg"))
+        str(files("sentle") / "data" /
+            "sentinel2_grid_stripped_with_epsg.gpkg"))

@@ -225,6 +225,16 @@ class TestResamplingAndStore:
         with pytest.raises(ValueError, match="zarr_store"):
             validate_user_input(**_valid_kwargs(zarr_store=12345))
 
+    def test_zarr_store_accepts_store_instance(self):
+        # Regression: zarr >=3.2 defines ``zarr.storage.StoreLike`` as a PEP 695
+        # ``type`` alias (``typing.TypeAliasType``), which has no ``__args__``.
+        # The old introspection crashed with AttributeError before it could
+        # validate anything; a real (non-string) store instance must still be
+        # accepted, proving the union members were resolved correctly.
+        import zarr.storage
+        validate_user_input(
+            **_valid_kwargs(zarr_store=zarr.storage.MemoryStore()))
+
 
 class TestS2Bands:
     def test_default_all_bands_is_allowed(self):

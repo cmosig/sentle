@@ -20,10 +20,10 @@ All tests are pure geometry (no network / no downloads).
 """
 
 import itertools
+from importlib.resources import files
 
 import geopandas as gpd
 import numpy as np
-import pkg_resources
 import pytest
 from rasterio import transform, warp, windows
 from rasterio.crs import CRS
@@ -37,8 +37,8 @@ from sentle.sentinel2 import obtain_subtiles
 @pytest.fixture(scope="module")
 def s2grid():
     return gpd.read_file(
-        pkg_resources.resource_filename(
-            "sentle", "data/sentinel2_grid_stripped_with_epsg.gpkg"))
+        str(files("sentle") / "data" /
+            "sentinel2_grid_stripped_with_epsg.gpkg"))
 
 
 def _window_footprint(tile_crs, tile_transform, win, dst_crs):

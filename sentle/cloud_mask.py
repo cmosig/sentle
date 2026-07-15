@@ -1,9 +1,8 @@
 import multiprocessing as mp
-import os
+from importlib.resources import files
 from multiprocessing import resource_tracker, shared_memory
 
 import numpy as np
-import pkg_resources
 import torch
 
 # number of cloudsen output classes (clear/thick/thin/shadow probabilities)
@@ -17,9 +16,7 @@ S2_cloud_prob_bands = [
 
 
 def load_cloudsen_model(device: str):
-    pkg_path = os.path.dirname(
-        pkg_resources.resource_filename("sentle", "sentle.py"))
-    model_path = os.path.join(pkg_path, "data", "cloudmodel.pt")
+    model_path = str(files("sentle") / "data" / "cloudmodel.pt")
     cloudsen_model = torch.jit.load(model_path)
     cloudsen_model.eval()
     cloudsen_model.to(device)
