@@ -1,0 +1,32 @@
+name: tests
+
+# Runs the offline test suite on every push/PR. Because Dependabot opens a PR
+# whenever a dependency releases a new version (see .github/dependabot.yml), a
+# breaking upstream release surfaces here as a red check on that PR -- before a
+# user hits it. The end-to-end tests (network + slow) stay skipped unless
+# SENTLE_RUN_E2E is set.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "${{ matrix.python-version }}"
+      - name: Install (CI-pinned dependency versions)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c requirements-ci.txt . pytest
+      - name: Run tests
+        run: pytest -q

@@ -26,7 +26,8 @@ detection, snow masking, harmonization, merging, and temporal composites.</em>
 
 ## Installing
 
-This package is tested with Python 3.12.\*. It may or may not work with other versions.
+This package is tested against Python 3.11, 3.12, and 3.13 (see the `tests`
+workflow). It may or may not work with other versions.
 
 ```
 pip install sentle
