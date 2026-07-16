@@ -1,0 +1,83 @@
+name: tests
+
+# Runs the offline test suite on every push/PR. Because Dependabot opens a PR
+# whenever a dependency releases a new version (see .github/dependabot.yml), a
+# breaking upstream release surfaces here as a red check on that PR -- before a
+# user hits it. The end-to-end tests (network + slow) stay skipped unless
+# SENTLE_RUN_E2E is set.
+#
+# Two resolutions are tested so both ends of our declared version ranges are
+# verified:
+#   - "latest"  : newest releases (requirements-ci.txt)  -> catches upstream
+#                 breakage; Dependabot bumps that file.
+#   - "minimum" : the floors from setup.py (requirements-min.txt) -> proves the
+#                 lower bounds we promise users actually work. Only on Python
+#                 3.12, since the oldest pinned deps have no 3.13 wheels.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel an in-progress run when the same ref is pushed again, so superseded
+# runs don't keep burning runner time.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+        resolution: ["latest"]
+        include:
+          - python-version: "3.12"
+            resolution: "minimum"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "${{ matrix.python-version }}"
+      - name: Install (${{ matrix.resolution }} dependency versions)
+        run: |
+          python -m pip install --upgrade pip
+          CONSTRAINTS=requirements-ci.txt
+          [ "${{ matrix.resolution }}" = "minimum" ] && CONSTRAINTS=requirements-min.txt
+          # Pull CPU-only torch from the PyTorch index. The default PyPI wheel
+          # bundles CUDA, which (a) is a ~2 GB download and (b) deadlocks the
+          # cloud-mask service -- it forks a worker, and CUDA-initialised torch
+          # does not support fork. --extra-index-url exposes the "+cpu" build,
+          # which outranks the plain PyPI wheel for the same pinned version, so
+          # pip selects it. CI has no GPU, so this also mirrors a CPU install.
+          pip install -c "$CONSTRAINTS" \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+            . pytest pytest-timeout
+      - name: Run tests
+        # Per-test timeout so a hanging test (e.g. a deadlocked multiprocessing
+        # worker) is killed and its stack printed, instead of blocking the whole
+        # job. The thread method dumps the stuck traceback on expiry.
+        run: pytest -q --timeout=180 --timeout-method=thread
+
+  # Auto-merge Dependabot PRs once the whole test matrix above is green. Since
+  # this job `needs: test`, it only runs after every leg (latest + minimum)
+  # passes -- a breaking dependency release leaves the PR open and red instead.
+  # These PRs only touch CI-internal files (requirements-*.txt, workflow action
+  # versions), never setup.py, so they never change what users install.
+  dependabot-automerge:
+    needs: test
+    if: ${{ github.event_name == 'pull_request' && github.actor == 'dependabot[bot]' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Merge the green Dependabot PR
+        run: gh pr merge --squash --delete-branch "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

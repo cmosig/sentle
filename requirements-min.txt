@@ -1,0 +1,25 @@
+# Minimum supported dependency versions -- the *floors* declared in setup.py's
+# install_requires, pinned exactly. CI installs with these constraints (see the
+# "minimum" leg in .github/workflows/tests.yml) so we actually verify the lower
+# bounds we promise users, not just the latest releases (requirements-ci.txt).
+#
+# If a job using this file goes red, the corresponding floor in setup.py is too
+# low (sentle uses an API newer than that version) -- raise the floor here and
+# in setup.py to match.
+affine==2.4.0
+filelock==3.0.0
+geopandas==0.14.4
+joblib==1.4.2
+numpy==1.26.4
+pandas==2.2.2
+planetary-computer==1.0.0
+pystac==1.10.1
+pystac-client==0.7.7
+rasterio==1.4.0
+scipy==1.13.0
+sen2nbar==2024.6.0
+shapely==2.0.4
+torch==2.3.0
+tqdm==4.66.4
+xarray==2025.3.1
+zarr==3.1.0

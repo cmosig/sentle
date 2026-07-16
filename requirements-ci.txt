@@ -1,0 +1,27 @@
+# Pinned dependency versions used ONLY by CI (see .github/workflows/tests.yml).
+#
+# The shipped package keeps its open ``>=`` ranges in setup.py -- users always
+# get the latest compatible releases. This file exists so Dependabot has
+# concrete versions to bump: when an upstream release lands, Dependabot opens a
+# PR editing this file, which runs the test suite against the new version. A
+# breaking release (e.g. setuptools >=81 dropping pkg_resources, or zarr >=3.2
+# changing StoreLike) therefore shows up as a red PR check instead of a user
+# report. Keep this list in sync with setup.py's install_requires.
+affine==2.4.0
+filelock==3.29.7
+geopandas==1.1.4
+joblib==1.5.3
+numpy==2.5.1
+pandas==2.3.3
+planetary-computer==1.0.0
+pystac==1.15.1
+pystac-client==0.9.0
+rasterio==1.5.0
+scipy==1.18.0
+sen2nbar==2024.6.0
+setuptools==83.0.0
+shapely==2.1.2
+torch==2.13.0
+tqdm==4.68.4
+xarray==2026.7.0
+zarr==3.2.1

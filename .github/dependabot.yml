@@ -1,0 +1,21 @@
+version: 2
+
+# Dependabot opens a PR whenever a dependency (or a GitHub Action) releases a
+# new version. The tests.yml workflow runs on that PR, so a breaking upstream
+# release becomes a failing check to review -- no cron, no manual polling.
+updates:
+  # Python dependencies, pinned in requirements-ci.txt (setup.py keeps open
+  # ranges for users). Grouped so one PR bumps everything, not one PR per dep.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      dependencies:
+        patterns: ["*"]
+
+  # Keep the Actions in the workflows themselves current.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
