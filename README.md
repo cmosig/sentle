@@ -51,9 +51,9 @@ sentle.process(
     target_crs="EPSG:32633",
     bound_left=176000,
     bound_bottom=5660000,
-    bound_right=216000,
-    bound_top=5700000,
-    datetime="2022-06-17/2023-06-17",
+    bound_right=186000,
+    bound_top=5670000,
+    datetime="2022-06-01/2022-09-01",
     target_resolution=10,
     S2_mask_snow=True,
     S2_cloud_classification=True,
@@ -67,7 +67,7 @@ sentle.process(
 )
 ```
 
-This code downloads data for a 40km by 40km area with one year of both Sentinel-1 and Sentinel-2. Clouds and snow are detected and replaced with NaNs. Data is also averaged every 7 days.
+This code downloads data for a 10km by 10km area with three months of both Sentinel-1 and Sentinel-2. Clouds and snow are detected and replaced with NaNs. Data is also averaged every 7 days.
 
 Everything is parallelized across 10 workers and each worker immediately saves its results to the specified path to a `zarr_store`. This ensures you can download larger-than-memory cubes.
 
@@ -82,7 +82,7 @@ da
 ```
 
 <p align="center">
-<img src="https://github.com/cmosig/sentle/assets/32590522/f487bba1-3c10-42a2-9b10-356ab2b44825" width="600">
+<img src="https://github.com/cmosig/sentle/raw/main/docs/xarray_repr.png" width="700">
 </p>
 
 And visualize using the awesome [lexcube](https://github.com/msoechting/lexcube) package. Here, band B02 is visualized from the above example. One is able to spot the cloud gaps and the spotty coverage during winter.
