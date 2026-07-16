@@ -21,7 +21,15 @@ def model():
     return cloud_mask.load_cloudsen_model("cpu")
 
 
-@pytest.fixture
+# Module-scoped so the worker process is forked exactly once, up front, before
+# the ``model`` fixture initialises torch in this (the parent) process. A
+# function-scoped fixture re-forks the worker for the second test -- i.e. after
+# torch's thread pools are already running here -- and forking a process that
+# has touched torch deadlocks the child (an OpenMP/fork-safety issue, not
+# CUDA-specific). It only bites on few-core machines like CI runners, where the
+# race resolves the wrong way every time. Real ``process()`` runs are unaffected
+# because they fork the service before any torch call.
+@pytest.fixture(scope="module")
 def service():
     mgr, request_queue = cloud_mask.init_cloud_prediction_service(device="cpu")
     try:
