@@ -63,14 +63,19 @@ jobs:
         # job. The thread method dumps the stuck traceback on expiry.
         run: pytest -q --timeout=180 --timeout-method=thread
 
-  # Auto-merge Dependabot PRs once the whole test matrix above is green. Since
-  # this job `needs: test`, it only runs after every leg (latest + minimum)
+  # Auto-merge Dependabot *pip* PRs once the whole test matrix above is green.
+  # Since this job `needs: test`, it only runs after every leg (latest + minimum)
   # passes -- a breaking dependency release leaves the PR open and red instead.
-  # These PRs only touch CI-internal files (requirements-*.txt, workflow action
-  # versions), never setup.py, so they never change what users install.
+  # These PRs only touch requirements-ci.txt, never setup.py, so they never
+  # change what users install.
+  #
+  # Restricted to the pip ecosystem on purpose: github-actions PRs modify
+  # workflow files, and the default GITHUB_TOKEN is not allowed to merge those
+  # (needs the `workflows` scope, which only a PAT or a human has). Merge those
+  # manually.
   dependabot-automerge:
     needs: test
-    if: ${{ github.event_name == 'pull_request' && github.actor == 'dependabot[bot]' }}
+    if: ${{ github.event_name == 'pull_request' && github.actor == 'dependabot[bot]' && startsWith(github.head_ref, 'dependabot/pip/') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
