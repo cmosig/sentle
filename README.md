@@ -9,7 +9,7 @@
 <a href="https://peps.python.org/pep-0008/" target="_blank">
     <img src="https://img.shields.io/badge/code_style-pep8-blue" alt="Black">
 </a>
-<a href="https://doi.org/10.5281/zenodo.13997085"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.13997085.svg" alt="DOI"></a>
+<a href="https://github.com/sacridini/Awesome-Geospatial" target="_blank"><img src="https://awesome.re/mentioned-badge.svg" alt="Mentioned in Awesome Geospatial"></a>
 
 </p>
 <p align="center">
@@ -18,11 +18,6 @@ detection, snow masking, harmonization, merging, and temporal composites.</em>
 </p>
 
 ---
-
-## Important Notes
-
-1. **This package is in early alpha stage. There will be bugs!** If you encounter any error, warning, memory issue, etc. please open a GitHub issue with the code to reproduce.
-2. This package is meant for large-scale processing and any area that is smaller than 8km in width and height will not run faster because of the underlying processing scheme.
 
 ## Installing
 
@@ -175,3 +170,7 @@ This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md
 - Thank you to [Cesar Aybar](https://csaybar.github.io/) for his cloud detection model. All cloud detection in this package is performed using his model. The paper: [link](https://www.nature.com/articles/s41597-022-01878-2)
 - Thank you to [David Montero](https://github.com/davemlz) for all the
   discussions and his awesome packages which inspired this.
+
+## Note
+
+This package is meant for large-scale processing and any area that is smaller than 8km in width and height will not run faster because of the underlying processing scheme.
