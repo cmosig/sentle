@@ -7,19 +7,19 @@
 # low (sentle uses an API newer than that version) -- raise the floor here and
 # in setup.py to match.
 affine==2.4.0
-filelock==3.0.0
-geopandas==0.14.4
-joblib==1.4.2
-numpy==1.26.4
-pandas==2.2.2
+filelock==3.30.0
+geopandas==1.1.4
+joblib==1.5.3
+numpy==2.5.1
+pandas==3.0.3
 planetary-computer==1.0.0
-pystac==1.10.1
-pystac-client==0.7.7
-rasterio==1.4.0
-scipy==1.13.0
+pystac==1.15.1
+pystac-client==0.9.0
+rasterio==1.5.0
+scipy==1.18.0
 sen2nbar==2024.6.0
-shapely==2.0.4
-torch==2.3.0
-tqdm==4.66.4
-xarray==2025.3.1
-zarr==3.1.0
+shapely==2.1.2
+torch==2.13.0
+tqdm==4.68.4
+xarray==2026.7.0
+zarr==3.2.1
