@@ -10,7 +10,7 @@ name: tests
 # verified:
 #   - "latest"  : newest releases (requirements-ci.txt)  -> catches upstream
 #                 breakage; Dependabot bumps that file.
-#   - "minimum" : the floors from setup.py (requirements-min.txt) -> proves the
+#   - "minimum" : the floors from setup.py (constraints-min.txt) -> proves the
 #                 lower bounds we promise users actually work. Only on Python
 #                 3.12, since the oldest pinned deps have no 3.13 wheels.
 
@@ -47,7 +47,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           CONSTRAINTS=requirements-ci.txt
-          [ "${{ matrix.resolution }}" = "minimum" ] && CONSTRAINTS=requirements-min.txt
+          [ "${{ matrix.resolution }}" = "minimum" ] && CONSTRAINTS=constraints-min.txt
           # Pull CPU-only torch from the PyTorch index. The default PyPI wheel
           # bundles CUDA, which (a) is a ~2 GB download and (b) deadlocks the
           # cloud-mask service -- it forks a worker, and CUDA-initialised torch

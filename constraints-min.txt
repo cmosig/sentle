@@ -3,6 +3,11 @@
 # "minimum" leg in .github/workflows/tests.yml) so we actually verify the lower
 # bounds we promise users, not just the latest releases (requirements-ci.txt).
 #
+# These must stay at the floors and only move when we deliberately raise a
+# bound. The file is deliberately NOT named "*requirements*.txt" so Dependabot
+# does not treat it as a manifest and bump it to latest (which would erase the
+# floor test); Dependabot only bumps requirements-ci.txt, the ceiling.
+#
 # If a job using this file goes red, the corresponding floor in setup.py is too
 # low (sentle uses an API newer than that version) -- raise the floor here and
 # in setup.py to match.

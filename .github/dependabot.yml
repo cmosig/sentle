@@ -6,6 +6,9 @@ version: 2
 updates:
   # Python dependencies, pinned in requirements-ci.txt (setup.py keeps open
   # ranges for users). Grouped so one PR bumps everything, not one PR per dep.
+  # Dependabot only bumps requirements-ci.txt (the ceiling). The floor pins live
+  # in constraints-min.txt, which is intentionally NOT named "*requirements*.txt"
+  # so Dependabot does not discover and bump it -- those must stay at the floors.
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
