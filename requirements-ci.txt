@@ -8,11 +8,11 @@
 # changing StoreLike) therefore shows up as a red PR check instead of a user
 # report. Keep this list in sync with setup.py's install_requires.
 affine==2.4.0
-filelock==3.29.7
+filelock==3.30.2
 geopandas==1.1.4
 joblib==1.5.3
 numpy==2.5.1
-pandas==2.3.3
+pandas==3.0.3
 planetary-computer==1.0.0
 pystac==1.15.1
 pystac-client==0.9.0
