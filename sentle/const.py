@@ -35,6 +35,12 @@ STAC_ENDPOINT = "https://planetarycomputer.microsoft.com/api/stac/v1"
 CDSE_STAC_ENDPOINT = "https://stac.dataspace.copernicus.eu/v1"
 CDSE_S3_ENDPOINT = "eodata.dataspace.copernicus.eu"
 
+# (connect, read) timeout in seconds for every STAC HTTP request. Without it
+# requests passes timeout=None down to the socket and a peer that accepts the
+# connection but never answers blocks the worker forever -- urllib3's Retry only
+# fires on an exception, and a stalled recv() never raises one. See issue #87.
+STAC_TIMEOUT = (10, 60)
+
 S1_ASSETS = ["vh_asc", "vh_desc", "vv_asc", "vv_desc"]
 S1_TRUE_ASSETS = ["vv", "vh"]
 

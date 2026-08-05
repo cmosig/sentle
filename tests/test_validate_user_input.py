@@ -136,6 +136,23 @@ class TestBooleanFlags:
             validate_user_input(**_valid_kwargs(num_workers=1.5))
 
 
+class TestWorkerTimeout:
+    @pytest.mark.parametrize("value", [60, 60.0, None])
+    def test_positive_number_or_none_passes(self, value):
+        validate_user_input(**_valid_kwargs(worker_timeout=value))
+
+    @pytest.mark.parametrize("value", ["60", True, [60]])
+    def test_non_numeric_raises(self, value):
+        with pytest.raises(ValueError, match="worker_timeout"):
+            validate_user_input(**_valid_kwargs(worker_timeout=value))
+
+    @pytest.mark.parametrize("value", [0, -1])
+    def test_non_positive_raises(self, value):
+        # 0 would be an instant timeout; None is the documented way to disable
+        with pytest.raises(ValueError, match="worker_timeout"):
+            validate_user_input(**_valid_kwargs(worker_timeout=value))
+
+
 class TestDependentFlagCombinations:
     def test_apply_snow_mask_requires_mask_snow(self):
         with pytest.raises(ValueError, match="S2_apply_snow_mask"):

@@ -15,7 +15,7 @@ from .reproject_util import (
     reproject_nodata_zero,
     window_overlaps_bounds,
 )
-from .stac import refresh_sas_token
+from .stac import gdal_http_timeout_options, refresh_sas_token
 
 
 def process_ptile_S1(target_crs: CRS, target_resolution: float,
@@ -86,7 +86,12 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
             href = refresh_sas_token(item.assets[s1_true_asset].href)
 
             try:
-                with rasterio.open(href) as dr:
+                # Sentinel-1 does not go through the provider abstraction (only
+                # Planetary Computer serves RTC), but the reads still need the
+                # GDAL HTTP timeouts or a stalled socket hangs forever (#87).
+                # The Env wraps the whole block so ``dr.read`` is covered too.
+                with rasterio.Env(**gdal_http_timeout_options()), \
+                        rasterio.open(href) as dr:
 
                     # reproject ptile bounds to S1 tile CRS
                     ptile_bounds_local_crs = warp.transform_bounds(

@@ -1,8 +1,10 @@
-import contextlib
+import inspect
+import os
 import re
 
 import planetary_computer as pc
 import pystac_client
+import rasterio
 from pystac_client.stac_api_io import StacApiIO
 from urllib3 import Retry
 from urllib.parse import urlparse, urlunparse
@@ -12,26 +14,100 @@ from .const import (
     CDSE_STAC_ENDPOINT,
     S2_RAW_BAND_RESOLUTION,
     STAC_ENDPOINT,
+    STAC_TIMEOUT,
 )
 
 
 def get_stac_api_io():
     """
     Returns a StacApiIO object with a retry policy that retries on 502, 503, 504
-    with exponential backoff to handle server overload
+    with exponential backoff to handle server overload, and a timeout so a
+    request can never wait forever (issue #87).
+
+    ``read=3`` caps how often a *read timeout* is retried while leaving all 15
+    attempts available for 502/503/504 responses: without it a stalled endpoint
+    costs 16 x 60 s plus backoff (~34 min) per STAC request.
     """
-    retry = Retry(total=15,
-                  backoff_factor=1.0,
-                  backoff_jitter=0.2,
-                  backoff_max=120,
-                  status_forcelist=[502, 503, 504],
-                  allowed_methods=None)
-    return StacApiIO(max_retries=retry)
+    retry_kwargs = dict(total=15,
+                        read=3,
+                        backoff_factor=1.0,
+                        backoff_jitter=0.2,
+                        backoff_max=120,
+                        status_forcelist=[502, 503, 504],
+                        allowed_methods=None)
+    # A server-sent Retry-After is honoured verbatim and, before urllib3 2.6.3,
+    # without any cap -- 15 retries of a large Retry-After is another unbounded
+    # wait. Cap it where urllib3 supports it; passing the argument on older
+    # urllib3 would raise TypeError, and sentle does not constrain urllib3.
+    if "retry_after_max" in inspect.signature(Retry.__init__).parameters:
+        retry_kwargs["retry_after_max"] = 120
+    retry = Retry(**retry_kwargs)
+    api_io = StacApiIO(max_retries=retry, timeout=STAC_TIMEOUT)
+    # pystac-client 0.7.7 (the floor declared in setup.py) stores the timeout
+    # and then calls update() without forwarding it, resetting it to None
+    api_io.timeout = STAC_TIMEOUT
+    return api_io
 
 
 def open_catalog():
-    return pystac_client.Client.open(STAC_ENDPOINT,
-                                     stac_io=get_stac_api_io())
+    return _open_stac_client(STAC_ENDPOINT)
+
+
+def _open_stac_client(endpoint):
+    """Open a STAC catalog with sentle's retry policy and request timeout.
+
+    ``timeout`` has to be passed to ``Client.open`` as well as to the
+    ``StacApiIO``: ``Client.from_file`` calls ``stac_io.update(...,
+    timeout=timeout)`` unconditionally, so an unset ``timeout`` here would reset
+    the one the ``StacApiIO`` was constructed with back to ``None``.
+    """
+    return pystac_client.Client.open(endpoint,
+                                     stac_io=get_stac_api_io(),
+                                     timeout=STAC_TIMEOUT)
+
+
+# --------------------------------------------------------------------------- #
+# GDAL/libcurl HTTP timeouts
+#
+# GDAL ships without any read timeout: every GDAL_HTTP_* knob below reads back
+# as None on a stock install, so libcurl uses its own defaults --
+# CURLOPT_TIMEOUT 0 (infinite) and CURLOPT_LOW_SPEED_LIMIT 0 (disabled). A peer
+# that accepts the connection and then goes silent -- before or in the middle of
+# a range response -- blocks rasterio.open()/read() forever, which wedges a
+# worker and, since nothing else in the pipeline has a timeout either, the whole
+# run. See issue #87.
+#
+# The bound is deliberately expressed with the *low-speed* knobs rather than
+# GDAL_HTTP_TIMEOUT. GDAL_HTTP_TIMEOUT caps the total transfer time, so it
+# aborts reads that are slow but healthy (a big cold JP2 range read over a thin
+# link fails under GDAL_HTTP_TIMEOUT=5 even though it is progressing the whole
+# time). LOW_SPEED_LIMIT/LOW_SPEED_TIME fire only when throughput actually
+# collapses, which covers both stall shapes. 1000 B/s sustained for 30 s is
+# orders of magnitude below any healthy Planetary Computer / CDSE read. GDAL
+# retries a failed range download internally, so the wall-clock ceiling per dead
+# asset is roughly 6 x GDAL_HTTP_LOW_SPEED_TIME.
+_GDAL_HTTP_TIMEOUT_OPTIONS = {
+    "GDAL_HTTP_CONNECTTIMEOUT": "30",
+    "GDAL_HTTP_LOW_SPEED_LIMIT": "1000",  # bytes per second
+    "GDAL_HTTP_LOW_SPEED_TIME": "30",  # seconds below the limit -> abort
+    "GDAL_HTTP_TCP_KEEPALIVE": "YES",
+}
+
+
+def gdal_http_timeout_options():
+    """HTTP timeout options for GDAL, minus any the user set themselves.
+
+    ``rasterio.Env(**options)`` overrides GDAL's fallback to the process
+    environment, so passing a key unconditionally would silently defeat a user
+    who tuned it through the standard ``GDAL_HTTP_*`` environment variables.
+    Keys already present in ``os.environ`` are therefore dropped and the user's
+    value wins.
+    """
+    return {
+        key: value
+        for key, value in _GDAL_HTTP_TIMEOUT_OPTIONS.items()
+        if key not in os.environ
+    }
 
 
 def refresh_sas_token(url):
@@ -66,15 +142,15 @@ class PlanetaryComputerProvider:
     s1_collection = "sentinel-1-rtc"
 
     def open_catalog(self):
-        return pystac_client.Client.open(STAC_ENDPOINT,
-                                         stac_io=get_stac_api_io())
+        return _open_stac_client(STAC_ENDPOINT)
 
     def prepare_href(self, href):
         return refresh_sas_token(href)
 
     def rasterio_env(self):
-        # PC hrefs are plain (signed) HTTPS -> no special GDAL config needed
-        return contextlib.nullcontext()
+        # PC hrefs are plain (signed) HTTPS -> no S3 config needed, but the
+        # reads still need a timeout (see gdal_http_timeout_options)
+        return rasterio.Env(**gdal_http_timeout_options())
 
     def s2_asset_key(self, band):
         return band
@@ -103,7 +179,9 @@ class CDSEProvider:
     s1_collection = None
 
     def open_catalog(self):
-        return pystac_client.Client.open(CDSE_STAC_ENDPOINT)
+        # pystac-client's default StacApiIO has no timeout and retries GET only,
+        # so give CDSE the same policy as Planetary Computer
+        return _open_stac_client(CDSE_STAC_ENDPOINT)
 
     def prepare_href(self, href):
         # s3://eodata/...  ->  /vsis3/eodata/...
@@ -126,7 +204,6 @@ class CDSEProvider:
         # (see ``reuse_open_datasets``), which amortizes the discovery and lets
         # GDAL reuse its decoded-tile block cache. See issue #75.
         import boto3
-        import rasterio
         from rasterio.session import AWSSession
         return rasterio.Env(
             AWSSession(boto3.Session(), endpoint_url=CDSE_S3_ENDPOINT),
@@ -136,6 +213,7 @@ class CDSEProvider:
             GDAL_HTTP_MULTIRANGE="YES",
             GDAL_HTTP_MERGE_CONSECUTIVE_RANGES="YES",
             VSI_CACHE="TRUE",
+            **gdal_http_timeout_options(),
         )
 
     def s2_asset_key(self, band):

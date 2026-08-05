@@ -200,11 +200,17 @@ def process_S2_subtile(
         S2_bands = S2_RAW_BANDS
     download_bands = list(S2_bands)
 
-    # init array that needs to be filled
-    subtile_array = np.empty(
+    # init array that needs to be filled. Zero-filled rather than np.empty: 0 is
+    # sentle's NoData sentinel everywhere downstream, so a band whose download
+    # fails below stays NoData instead of carrying uninitialised heap memory
+    # into the cloud classifier and the zarr store (issue #87).
+    subtile_array = np.zeros(
         (len(download_bands), S2_subtile_size, S2_subtile_size),
         dtype=np.float32)
     band_names = download_bands.copy()
+
+    # bands whose download failed -> this subtile is unusable, see guard below
+    failed_bands = []
 
     # save CRS of downloaded sentinel tiles
     s2_crs = None
@@ -277,12 +283,25 @@ def process_S2_subtile(
                     if owns_dataset:
                         dr.close()
             except rasterio.errors.RasterioIOError as e:
+                failed_bands.append(band)
                 warnings.warn(
                     f"stac_read_failure asset={href} band={band} exception_type={type(e).__name__} message={e} note=provider_issue"
                 )
 
     # in this case we have no data for this subtile, or the tile has no CRS
     if s2_tile_transform is None or not s2_crs:
+        return None, None, None
+
+    # A partially downloaded subtile cannot be used: the missing band is NoData
+    # (0), and a single NoData raw band already marks the whole pixel NoData
+    # downstream -- so nothing would be written for this footprint anyway. Worse,
+    # the cloud classifier consumes all bands, so a blank band would silently
+    # corrupt the cloud mask of the bands that did load. Drop the subtile, the
+    # same way a missing B02 is already dropped above.
+    if failed_bands:
+        warnings.warn(f"subtile_dropped item={stac_item.id} "
+                      f"failed_bands={','.join(failed_bands)} "
+                      f"note=incomplete_band_set")
         return None, None, None
 
     # determine bounds based on subtile window and tile transform
