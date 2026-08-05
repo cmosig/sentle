@@ -853,8 +853,11 @@ def process(
         instead of hanging forever behind a dead or wedged worker. This is a
         budget for a *single* ptile, not for the whole call: it is measured from
         the moment a ptile reaches the head of the retrieval queue, so it is
-        unaffected by the total number of ptiles, by workers being busy, or by
-        the time spent generating jobs. Raise it for very wide
+        unaffected by the total number of ptiles and by ptiles waiting their turn
+        in the pool. (Time joblib spends pulling the next batch out of the job
+        generator does count against whichever ptile is at the head, because
+        both run on the same thread -- a fraction of a second per batch here.)
+        Raise it for very wide
         ``time_composite_freq`` windows (one ptile then aggregates every
         acquisition in the window) and set it to ``None`` to disable. Only
         effective with more than one worker -- ``num_workers=1`` runs the ptiles

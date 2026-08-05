@@ -292,12 +292,15 @@ def process_S2_subtile(
     if s2_tile_transform is None or not s2_crs:
         return None, None, None
 
-    # A partially downloaded subtile cannot be used: the missing band is NoData
-    # (0), and a single NoData raw band already marks the whole pixel NoData
-    # downstream -- so nothing would be written for this footprint anyway. Worse,
-    # the cloud classifier consumes all bands, so a blank band would silently
-    # corrupt the cloud mask of the bands that did load. Drop the subtile, the
-    # same way a missing B02 is already dropped above.
+    # A partially downloaded subtile is dropped rather than returned with a
+    # blank band. The cloud classifier consumes every raw band, so handing it a
+    # zeroed one would silently corrupt the cloud mask of the bands that *did*
+    # load -- and that mask is then multiplied into them. Without compositing
+    # this also costs nothing: a single NoData (0) raw band already marks the
+    # whole pixel NoData downstream, so that footprint would not be written
+    # either way. With ``time_composite_freq`` it is the conservative choice --
+    # the acquisition contributes no band at all instead of 11 of 12 -- which
+    # keeps every band of a composite derived from the same set of acquisitions.
     if failed_bands:
         warnings.warn(f"subtile_dropped item={stac_item.id} "
                       f"failed_bands={','.join(failed_bands)} "

@@ -41,6 +41,15 @@ CDSE_S3_ENDPOINT = "eodata.dataspace.copernicus.eu"
 # fires on an exception, and a stalled recv() never raises one. See issue #87.
 STAC_TIMEOUT = (10, 60)
 
+# Upper bound in seconds on a server-sent Retry-After. urllib3 honours the
+# header verbatim, so without a cap a single search can legally sleep for hours.
+STAC_RETRY_AFTER_MAX = 120
+
+# How long to wait for a Planetary Computer SAS token before giving up.
+# ``planetary_computer.sign`` passes no timeout to requests, so a silent token
+# endpoint would block a worker forever -- see ``stac.refresh_sas_token``.
+SAS_SIGN_TIMEOUT = 120
+
 S1_ASSETS = ["vh_asc", "vh_desc", "vv_asc", "vv_desc"]
 S1_TRUE_ASSETS = ["vv", "vh"]
 

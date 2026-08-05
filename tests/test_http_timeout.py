@@ -55,6 +55,15 @@ class TestTimeoutOptions:
         assert "GDAL_HTTP_LOW_SPEED_TIME" not in options
         assert options["GDAL_HTTP_LOW_SPEED_LIMIT"] == "1000"
 
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_empty_environment_variable_does_not_disable_the_abort(
+            self, monkeypatch, value):
+        # GDAL reads "" as 0, which switches the low-speed abort off entirely --
+        # deferring to an empty variable would silently restore the unbounded
+        # read this whole change exists to prevent
+        monkeypatch.setenv("GDAL_HTTP_LOW_SPEED_LIMIT", value)
+        assert gdal_http_timeout_options()["GDAL_HTTP_LOW_SPEED_LIMIT"] == "1000"
+
     def test_planetary_computer_env_applies_the_options(self):
         with PlanetaryComputerProvider().rasterio_env():
             # get_gdal_config normalizes the strings above to ints
@@ -63,6 +72,9 @@ class TestTimeoutOptions:
             assert rasterio.env.get_gdal_config("GDAL_HTTP_LOW_SPEED_TIME") == 30
 
     def test_cdse_env_keeps_s3_options_and_adds_timeouts(self, monkeypatch):
+        # CDSEProvider.rasterio_env imports boto3, which sentle does not declare
+        # (it is only needed for provider="cdse") and CI does not install
+        pytest.importorskip("boto3")
         # keep boto3 credential resolution local (no EC2 metadata endpoint)
         monkeypatch.setenv("AWS_ACCESS_KEY_ID", "dummy")
         monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "dummy")
@@ -74,16 +86,19 @@ class TestTimeoutOptions:
         assert options["GDAL_HTTP_LOW_SPEED_LIMIT"] == "1000"
 
 
-def _stall_server():
+@pytest.fixture
+def stall_server():
     """A server that accepts connections and then never sends a single byte."""
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", 0))
     server.listen(8)
+    port = server.getsockname()[1]
     held = []
+    stopping = threading.Event()
 
     def accept_forever():
-        while True:
+        while not stopping.is_set():
             try:
                 conn, _ = server.accept()
             except OSError:
@@ -91,25 +106,88 @@ def _stall_server():
             # keep the connection open without ever answering
             held.append(conn)
 
-    threading.Thread(target=accept_forever, daemon=True).start()
-    return server, server.getsockname()[1]
+    thread = threading.Thread(target=accept_forever, daemon=True)
+    thread.start()
+    try:
+        yield port
+    finally:
+        # closing the listening socket does not wake a thread already blocked
+        # in accept(), so knock on the door once to let it see the flag
+        stopping.set()
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=1).close()
+        except OSError:
+            pass
+        thread.join(timeout=5)
+        for conn in held:
+            conn.close()
+        server.close()
 
 
-def test_read_from_a_stalled_server_fails_in_bounded_time(monkeypatch):
+def test_read_from_a_stalled_server_fails_in_bounded_time(
+        monkeypatch, stall_server):
     # shorten the abort window so the test is quick; without the Env this call
     # never returns at all
     monkeypatch.setitem(stac._GDAL_HTTP_TIMEOUT_OPTIONS,
                         "GDAL_HTTP_LOW_SPEED_TIME", "1")
 
-    server, port = _stall_server()
+    started = time.monotonic()
+    with pytest.raises(rasterio.errors.RasterioIOError):
+        with PlanetaryComputerProvider().rasterio_env():
+            rasterio.open(f"http://127.0.0.1:{stall_server}/stalled.tif")
+    assert time.monotonic() - started < 30
+
+
+def test_sas_signing_does_not_wait_forever(monkeypatch, stall_server):
+    # planetary_computer.sign() passes no timeout to requests, so a silent token
+    # endpoint blocked the worker forever -- and this runs once per asset read
+    from planetary_computer.settings import Settings
+
+    monkeypatch.setenv("PC_SDK_SAS_URL", f"http://127.0.0.1:{stall_server}")
+    Settings.get.cache_clear()  # the endpoint is read once and then cached
+
     try:
         started = time.monotonic()
-        with pytest.raises(rasterio.errors.RasterioIOError):
-            with PlanetaryComputerProvider().rasterio_env():
-                rasterio.open(f"http://127.0.0.1:{port}/stalled.tif")
-        assert time.monotonic() - started < 30
+        # only *.blob.core.windows.net hrefs are signed at all
+        with pytest.raises(stac.SasSigningTimeout):
+            stac.refresh_sas_token(
+                "https://sentinel2.blob.core.windows.net/tile/B02.tif",
+                timeout=2)
+        elapsed = time.monotonic() - started
+        assert 1.5 <= elapsed < 30
     finally:
-        server.close()
+        Settings.get.cache_clear()
+
+
+def test_a_timed_out_sign_does_not_slow_down_later_signs(monkeypatch,
+                                                         stall_server):
+    # the signing thread is reused across calls, so the one left stuck on the
+    # dead endpoint must be discarded -- otherwise every later sign in this
+    # worker queues behind it and waits out the full timeout too
+    from planetary_computer.settings import Settings
+
+    monkeypatch.setenv("PC_SDK_SAS_URL", f"http://127.0.0.1:{stall_server}")
+    Settings.get.cache_clear()
+    try:
+        with pytest.raises(stac.SasSigningTimeout):
+            stac.refresh_sas_token(
+                "https://sentinel2.blob.core.windows.net/tile/B02.tif",
+                timeout=2)
+    finally:
+        Settings.get.cache_clear()
+
+    monkeypatch.setattr(stac.pc, "sign", lambda url: url + "?sig=X")
+    started = time.monotonic()
+    assert stac.refresh_sas_token("https://host.example/a.tif",
+                                  timeout=30).endswith("?sig=X")
+    assert time.monotonic() - started < 5
+
+
+def test_sas_signing_timeout_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(stac.pc, "sign", lambda url: url + "?sig=X")
+    assert stac.refresh_sas_token("https://host.example/a.tif",
+                                  timeout=None) == ("https://host.example/"
+                                                    "a.tif?sig=X")
 
 
 class _Asset:

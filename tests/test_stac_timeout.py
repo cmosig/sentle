@@ -12,12 +12,10 @@ it back to ``None``. These tests therefore drive the real ``Client.open`` path,
 with ``StacApiIO.request`` stubbed out so nothing touches the network.
 """
 
-import inspect
 import json
 
 import pytest
 from pystac_client.stac_api_io import StacApiIO
-from urllib3 import Retry
 
 from sentle import stac
 
@@ -129,13 +127,37 @@ def test_read_timeouts_are_retried_only_a_few_times():
     assert (retries.read + 1) * stac.STAC_TIMEOUT[1] <= 600
 
 
-def test_retry_after_is_capped_where_urllib3_supports_it():
-    # urllib3 only gained retry_after_max in 2.6.3 and sentle does not constrain
-    # urllib3, so passing it unconditionally would be a TypeError
+class _RetryAfterResponse:
+
+    def __init__(self, seconds):
+        self.headers = {"Retry-After": str(seconds)}
+
+    def getheader(self, name, default=None):
+        return self.headers.get(name, default)
+
+
+def test_retry_after_is_capped_on_every_urllib3():
+    # urllib3 honours Retry-After verbatim and only grew a retry_after_max
+    # argument in 2.6.3; sentle declares no urllib3 floor, so the cap is applied
+    # by CappedRetry instead and must hold regardless of the installed version
     retries = stac.get_stac_api_io().session.get_adapter(
         "https://example.invalid/").max_retries
-    if "retry_after_max" in inspect.signature(Retry.__init__).parameters:
-        assert retries.retry_after_max <= 300
-        assert retries.parse_retry_after("86400") <= 300
-    else:
-        assert not hasattr(retries, "retry_after_max")
+
+    assert isinstance(retries, stac.CappedRetry)
+    assert retries.get_retry_after(_RetryAfterResponse(86400)) == (
+        stac.STAC_RETRY_AFTER_MAX)
+    # a short, legitimate backoff is still honoured as sent
+    assert retries.get_retry_after(_RetryAfterResponse(5)) == 5
+
+
+def test_capped_retry_survives_being_cloned():
+    # urllib3 rebuilds the policy on every attempt via Retry.new(), which uses
+    # type(self) -- a subclass that broke that contract would silently revert to
+    # the uncapped behaviour after the first retry
+    retries = stac.get_stac_api_io().session.get_adapter(
+        "https://example.invalid/").max_retries.increment(
+            method="POST", url="https://example.invalid/search")
+
+    assert isinstance(retries, stac.CappedRetry)
+    assert retries.get_retry_after(_RetryAfterResponse(86400)) == (
+        stac.STAC_RETRY_AFTER_MAX)

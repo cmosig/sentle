@@ -32,18 +32,6 @@ def _sleep(seconds, value=None):
     return value
 
 
-def test_stalled_worker_raises_instead_of_hanging():
-    # note: multiprocessing.TimeoutError is NOT a subclass of the builtin
-    # TimeoutError, so `except TimeoutError` would not catch this
-    started = time.monotonic()
-    with pytest.raises(multiprocessing.TimeoutError):
-        with parallel_backend("cleanupqueue"):
-            Parallel(n_jobs=2, batch_size=1,
-                     timeout=2)(delayed(_sleep)(600 if i == 1 else 0.01)
-                                for i in range(4))
-    assert time.monotonic() - started < 30
-
-
 def test_timeout_is_per_ptile_not_wall_clock():
     # the budget is measured from the moment a task reaches the head of the
     # retrieval queue, so a run far longer than the timeout -- and tasks that
@@ -185,3 +173,25 @@ def test_cleanup_runs_when_a_worker_times_out(monkeypatch, tmp_path):
     assert manager.shutdown_calls == 1
     assert sentle_mod.GLOBAL_QUEUES == {}
     assert not Path(_RecordingParallel.sync_file_path).exists()
+
+
+def _stalled_ptile(**kwargs):
+    # stands in for process_ptile: a worker that never comes back, which is
+    # what a half-open TCP connection or an OOM-killed worker looks like
+    time.sleep(600)
+
+
+def test_process_aborts_a_stalled_worker_end_to_end(monkeypatch, tmp_path):
+    # the whole point of the fix: with a real fork pool and a real wedged
+    # worker, process() must return control instead of polling forever. Note
+    # multiprocessing.TimeoutError is NOT a subclass of the builtin TimeoutError
+    monkeypatch.setattr(sentle_mod, "process_ptile", _stalled_ptile)
+
+    started = time.monotonic()
+    with pytest.raises(multiprocessing.TimeoutError):
+        _offline_process(monkeypatch,
+                         tmp_path,
+                         Parallel,
+                         num_workers=2,
+                         worker_timeout=3)
+    assert time.monotonic() - started < 120
