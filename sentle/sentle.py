@@ -108,10 +108,17 @@ def catalog_search_ptile(
             ),
         ).item_collection())
 
-    # the catalog does not promise an order, and the order decides which of two
-    # reprocessed items wins (sentinel2.py picks the first for a tile) and in
-    # which order a mean composite accumulates float32. Sort so two runs agree.
-    item_list.sort(key=lambda item: (item.datetime, item.id))
+    # The catalog does not promise an order, and the order decides which of two
+    # reprocessed products wins (sentinel2.py takes the first item for a tile)
+    # as well as the order a mean composite accumulates float32 in. Sort so two
+    # runs agree.
+    #
+    # Descending, deliberately. The last field of a Sentinel product id is its
+    # processing timestamp, so descending id puts the most recent reprocessing
+    # of an acquisition first -- the newer baseline is the one to prefer, and it
+    # is also what Planetary Computer happens to return today, so this pins the
+    # current selection rather than silently switching to superseded products.
+    item_list.sort(key=lambda item: (item.datetime, item.id), reverse=True)
 
     return item_list
 
