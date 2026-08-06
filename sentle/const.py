@@ -45,6 +45,13 @@ STAC_TIMEOUT = (10, 60)
 # header verbatim, so without a cap a single search can legally sleep for hours.
 STAC_RETRY_AFTER_MAX = 120
 
+# Extra attempts made after a raster read fails, before the run is aborted.
+DEFAULT_READ_RETRIES = 2
+
+# Seconds to wait before the first retry of a failed raster read; doubled for
+# each further attempt.
+READ_RETRY_BACKOFF = 1.0
+
 # How long to wait for a Planetary Computer SAS token before giving up.
 # ``planetary_computer.sign`` passes no timeout to requests, so a silent token
 # endpoint would block a worker forever -- see ``stac.refresh_sas_token``.

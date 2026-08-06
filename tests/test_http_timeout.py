@@ -218,7 +218,8 @@ def test_sentinel1_reads_are_inside_the_timeout_env(monkeypatch):
     monkeypatch.setattr(sentinel1, "refresh_sas_token", lambda href: href)
 
     target_crs = CRS.from_epsg(32632)
-    with pytest.warns(UserWarning, match="stac_read_failure"):
+    # the read now aborts the run instead of being warned about and skipped
+    with pytest.raises(stac.SentleReadError):
         sentinel1.process_ptile_S1(
             target_crs=target_crs,
             target_resolution=10,
@@ -234,6 +235,7 @@ def test_sentinel1_reads_are_inside_the_timeout_env(monkeypatch):
             ptile_transform=transform.from_origin(600000, 5100000, 10, 10),
             item_list=[_Item()],
             resampling_method=Resampling.nearest,
+            read_retries=0,
         )
 
     assert seen["limit"] == 1000

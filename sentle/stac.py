@@ -2,6 +2,8 @@ import os
 import queue
 import re
 import threading
+import time
+import warnings
 
 import planetary_computer as pc
 import pystac_client
@@ -13,6 +15,7 @@ from urllib.parse import urlparse, urlunparse
 from .const import (
     CDSE_S3_ENDPOINT,
     CDSE_STAC_ENDPOINT,
+    READ_RETRY_BACKOFF,
     S2_RAW_BAND_RESOLUTION,
     SAS_SIGN_TIMEOUT,
     STAC_ENDPOINT,
@@ -130,6 +133,45 @@ def gdal_http_timeout_options():
 
 class SasSigningTimeout(RuntimeError):
     """Signing an asset href with a Planetary Computer SAS token timed out."""
+
+
+class SentleReadError(RuntimeError):
+    """A raster read failed on every attempt, so the run is aborted.
+
+    Read failures used to be warned about and skipped, which meant a finished
+    cube could quietly hold less data than the next run over the same area.
+    Failing the whole run instead keeps the contract that a cube which finishes
+    is complete. Deliberately has no custom ``__init__``: joblib re-raises a
+    worker exception by replaying ``cls(*args)``, and an incompatible signature
+    kills the pool's result handler instead of surfacing the error.
+    """
+
+
+def retry_read(operation, description, retries, on_failure=None):
+    """Run ``operation``, retrying transient read failures, then fail loudly.
+
+    ``retries`` extra attempts are made after the first, with exponential
+    backoff. ``on_failure`` runs after every failed attempt and is where the
+    caller drops any state the failure may have poisoned (a cached dataset
+    handle, say). ``RasterioIOError`` is the only thing retried: every network
+    failure shape -- 403/404/503, connection refused, DNS failure, a silent peer
+    and a stalled body -- surfaces as one, at both ``open`` and ``read``.
+    """
+    for attempt in range(retries + 1):
+        try:
+            return operation()
+        except rasterio.errors.RasterioIOError as exc:
+            if on_failure is not None:
+                on_failure()
+            if attempt >= retries:
+                raise SentleReadError(
+                    f"{description} failed after {attempt + 1} attempt(s): "
+                    f"{type(exc).__name__}: {exc}") from exc
+            warnings.warn(f"stac_read_retry {description} "
+                          f"attempt={attempt + 1}/{retries + 1} "
+                          f"exception_type={type(exc).__name__} "
+                          f"message={exc}")
+            time.sleep(READ_RETRY_BACKOFF * (2**attempt))
 
 
 class _SignWorker:

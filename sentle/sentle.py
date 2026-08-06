@@ -26,7 +26,14 @@ from .cloud_mask import (
     init_cloud_prediction_service,
 )
 from .snow_mask import S2_snow_mask_band
-from .const import S1_ASSETS, S2_NBAR_BANDS, S2_RAW_BANDS, ZARR_TIME_ATTRS
+from .const import (
+    DEFAULT_READ_RETRIES,
+    S1_ASSETS,
+    S2_NBAR_BANDS,
+    S2_RAW_BAND_RESOLUTION,
+    S2_RAW_BANDS,
+    ZARR_TIME_ATTRS,
+)
 from .reproject_util import (
     check_and_round_bounds,
     height_width_from_bounds_res,
@@ -37,6 +44,28 @@ from .sentinel1 import process_ptile_S1
 from .sentinel2 import obtain_subtiles, process_ptile_S2_dispatcher
 from .stac import get_provider
 from .utils import GLOBAL_QUEUE_MANAGER, GLOBAL_QUEUES, tqdm_joblib
+
+
+def _s2_bands_to_save(S2_bands, S2_mask_snow, S2_cloud_classification,
+                      S2_return_cloud_probabilities, time_composite_freq):
+    """Band labels for the saved Sentinel-2 array, in the order it is produced.
+
+    ``process_ptile`` writes the array into the zarr band axis positionally, so
+    this order has to match what ``process_ptile_S2`` actually returns: the raw
+    bands, then the cloud probabilities (appended in ``process_S2_subtile``),
+    then the cloud classification, then the snow mask. Labelling them in a
+    different order silently stored the snow and cloud layers under each other's
+    names whenever both were requested.
+    """
+    bands = list(S2_bands)
+    if S2_return_cloud_probabilities:
+        bands += S2_cloud_prob_bands
+    # the mask layers are dropped again when compositing over time
+    if S2_cloud_classification and time_composite_freq is None:
+        bands.append(S2_cloud_mask_band)
+    if S2_mask_snow and time_composite_freq is None:
+        bands.append(S2_snow_mask_band)
+    return bands
 
 
 def catalog_search_ptile(
@@ -79,6 +108,11 @@ def catalog_search_ptile(
             ),
         ).item_collection())
 
+    # the catalog does not promise an order, and the order decides which of two
+    # reprocessed items wins (sentinel2.py picks the first for a tile) and in
+    # which order a mean composite accumulates float32. Sort so two runs agree.
+    item_list.sort(key=lambda item: (item.datetime, item.id))
+
     return item_list
 
 
@@ -114,6 +148,7 @@ def process_ptile(
     save_as_uint16: bool,
     provider,
     reuse_open_datasets: bool,
+    read_retries: int,
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
@@ -161,6 +196,7 @@ def process_ptile(
             time_composite_method=time_composite_method,
             S1_assets=S1_assets,
             resampling_method=resampling_method,
+            read_retries=read_retries,
         )
     elif collection == "sentinel-2-l2a":
         ptile_array = process_ptile_S2_dispatcher(
@@ -192,6 +228,7 @@ def process_ptile(
             resampling_method=resampling_method,
             provider=provider,
             reuse_open_datasets=reuse_open_datasets,
+            read_retries=read_retries,
         )
 
     else:
@@ -255,6 +292,7 @@ def validate_user_input(
     S2_bands: list[str] = S2_RAW_BANDS,
     provider: str = "planetary_computer",
     worker_timeout: float | None = 3600,
+    read_retries: int = DEFAULT_READ_RETRIES,
 ):
     # validate the data provider and its constraints
     if provider not in ("planetary_computer", "cdse"):
@@ -382,6 +420,12 @@ def validate_user_input(
             raise ValueError(
                 "worker_timeout must be positive; pass None to disable it")
 
+    # check the per-read retry count
+    if isinstance(read_retries, bool) or not isinstance(read_retries, int):
+        raise ValueError("read_retries must be an integer")
+    if read_retries < 0:
+        raise ValueError("read_retries must be zero or more")
+
     # check if time_composite_freq is a string
     if time_composite_freq is not None and not isinstance(
             time_composite_freq, str):
@@ -488,6 +532,14 @@ def validate_user_input(
             raise ValueError(
                 "S2_bands cannot be a subset when S2_cloud_classification "
                 "is True (the cloud model requires all bands)")
+
+        # the 10 m grid transform of the Sentinel-2 tile is taken from a
+        # 10 m band; without one, every subtile would be dropped and the cube
+        # would come out empty with no error at all
+        if not any(S2_RAW_BAND_RESOLUTION[b] == 10 for b in S2_bands):
+            raise ValueError(
+                f"S2_bands must include at least one 10m band "
+                f"({[b for b, r in S2_RAW_BAND_RESOLUTION.items() if r == 10]})")
 
         # snow mask is computed from B03/B08/B11
         if S2_mask_snow:
@@ -734,8 +786,10 @@ def retrieve_timestamps(
         df = pd.DataFrame()
         items = list(search.item_collection())
         if len(items) == 0:
-            print("No items found for specified time range and area.")
-            exit()
+            # used to be exit(), which raises SystemExit(None) -> status 0, so
+            # a batch job reported success while producing no cube at all
+            raise ValueError(
+                "No items found for the specified time range and area.")
 
         df["ts_raw"] = [i.datetime for i in items]
         df["collection"] = [i.collection_id for i in items]
@@ -803,6 +857,7 @@ def process(
     S2_return_cloud_probabilities: bool = False,
     num_workers: int = 1,
     worker_timeout: float | None = 3600,
+    read_retries: int = DEFAULT_READ_RETRIES,
     time_composite_freq: str = None,
     time_composite_method: str = "mean",
     S2_apply_snow_mask: bool = False,
@@ -863,6 +918,14 @@ def process(
         effective with more than one worker -- ``num_workers=1`` runs the ptiles
         in the main process, which joblib cannot interrupt; the HTTP and
         cloud-service timeouts still apply there.
+    read_retries : int, default=2
+        How many extra attempts to make when reading a raster asset fails
+        (403/404/503, a dropped connection, a stalled transfer). Once they are
+        used up the whole run is aborted with a ``SentleReadError`` rather than
+        skipping the band: a cube that finishes therefore always holds the same
+        data as any other run over the same area. Set to 0 to fail on the first
+        failure; there is no setting that restores the old skip-and-warn
+        behaviour.
     time_composite_freq: str, default=None
         Rounding interval across which data is aggregated.
     time_composite_method: str, default="mean"
@@ -964,6 +1027,7 @@ def process(
         S2_bands=S2_bands,
         provider=provider,
         worker_timeout=worker_timeout,
+        read_retries=read_retries,
     )
 
     # instantiate the data provider (Planetary Computer or CDSE)
@@ -979,14 +1043,12 @@ def process(
     if s2_enabled:
         S2_bands = [b for b in S2_RAW_BANDS if b in S2_bands]
 
-        # derive bands to save from arguments
-        S2_bands_to_save = S2_bands.copy()
-        if S2_mask_snow and time_composite_freq is None:
-            S2_bands_to_save.append(S2_snow_mask_band)
-        if S2_cloud_classification and time_composite_freq is None:
-            S2_bands_to_save.append(S2_cloud_mask_band)
-        if S2_return_cloud_probabilities:
-            S2_bands_to_save += S2_cloud_prob_bands
+        S2_bands_to_save = _s2_bands_to_save(
+            S2_bands=S2_bands,
+            S2_mask_snow=S2_mask_snow,
+            S2_cloud_classification=S2_cloud_classification,
+            S2_return_cloud_probabilities=S2_return_cloud_probabilities,
+            time_composite_freq=time_composite_freq)
     else:
         # Sentinel-2 disabled -> no S2 bands at all
         S2_bands = []
@@ -1056,6 +1118,7 @@ def process(
         coord_save_mode=coord_save_mode,
         consolidate_metadata=consolidate_metadata,
         save_as_uint16=save_as_uint16,
+        overwrite=overwrite,
     )
 
     try:
@@ -1089,6 +1152,7 @@ def process(
             "save_as_uint16": save_as_uint16,
             "provider": data_provider,
             "reuse_open_datasets": reuse_open_datasets,
+            "read_retries": read_retries,
         }
 
         s2grid = gpd.read_file(
