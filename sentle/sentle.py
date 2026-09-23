@@ -727,6 +727,7 @@ def setup_zarr_storage(
         fill_value=data_fill_value,
         store=store,
         path="/sentle",
+        overwrite=overwrite,
         config=dict(write_empty_chunks=False),
         dimension_names=["time", "band", "y", "x"],
     )
