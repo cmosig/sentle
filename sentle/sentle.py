@@ -657,6 +657,7 @@ def setup_zarr_storage(
         fill_value=data_fill_value,
         store=store,
         path="/sentle",
+        overwrite=overwrite,
         config=dict(write_empty_chunks=False),
         dimension_names=["time", "band", "y", "x"],
     )
@@ -1317,6 +1318,7 @@ def process(
             coord_save_mode=coord_save_mode,
             consolidate_metadata=consolidate_metadata,
             save_as_uint16=save_as_uint16,
+            overwrite=overwrite,
             store_config=store_config,
         )
         # which time index each timestamp is written to

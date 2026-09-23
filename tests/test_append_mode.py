@@ -284,6 +284,12 @@ def test_default_behaviour_is_unchanged(cube, fake_pipeline):
         _run(cube)
 
 
+def test_overwrite_still_replaces_the_cube(cube, fake_pipeline):
+    fake_pipeline.timestamps = [T3]
+    _run(cube, overwrite=True)
+    assert _open(cube)["sentle"].shape[0] == 1
+
+
 def test_append_and_overwrite_are_mutually_exclusive(cube, fake_pipeline):
     with pytest.raises(ValueError, match="mutually exclusive"):
         _run(cube, append=True, overwrite=True)
