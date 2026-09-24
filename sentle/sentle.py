@@ -26,12 +26,13 @@ from .append import (
     build_store_config,
     check_append_compatible,
     check_composite_grid_alignment,
+    apply_extension,
     clear_timesteps,
     commit_append,
-    insert_time_slots,
     open_cube_for_append,
     read_store_config,
     recover_interrupted_append,
+    plan_extension,
     rollback_append,
     time_axis_order,
     timestamps_to_stored_seconds,
@@ -891,7 +892,8 @@ def open_and_validate_append(
 ):
     """Open the cube to append to and refuse the call if it does not fit.
 
-    Returns ``(store, root, reconsolidate, time_order)``. Raises before
+    Returns ``(store, root, reconsolidate, time_order, reserved_slots)``.
+    Raises before
     touching the cube if the requested configuration disagrees with what is
     stored; only once the call is known to be compatible is a previously
     interrupted append rolled back.
@@ -924,7 +926,8 @@ def open_and_validate_append(
 
         # an append that was killed outright left the cube longer than what it
         # actually wrote; put it back before anything is measured against it
-        recover_interrupted_append(root, store, reconsolidate)
+        recover_interrupted_append(root, store, zarr_store,
+                                   reconsolidate)
 
         # new timesteps are merged into their sorted position, which is only
         # safe if what is already there is sorted
@@ -942,18 +945,23 @@ def open_and_validate_append(
                 "sentle.append.repair_time_order(<zarr_store>), then append "
                 "again.")
         time_order = stored_config.get("time_order", time_order)
+        reserved_slots = {
+            int(k): int(v)
+            for k, v in (stored_config.get("reserved_slots") or {}).items()
+        }
     except BaseException:
         store.close()
         raise
 
-    return store, root, reconsolidate, time_order
+    return store, root, reconsolidate, time_order, reserved_slots
 
 
 def drop_stored_timestamps(
         root,
         timestamp_list: list[dict],
         time_composite_freq,
-        recompute_trailing: int = 0) -> tuple[list[dict], int, dict]:
+        recompute_trailing: int = 0,
+        reserved: dict | None = None) -> tuple[list[dict], int, dict]:
     """Keep the timesteps the cube does not hold yet, plus any to recompute.
 
     Comparison happens in the cube's own representation (int64 epoch seconds),
@@ -981,6 +989,10 @@ def drop_stored_timestamps(
         # a duplicate stored timestamp can only come from a corrupted cube;
         # keep the first index so the mapping stays deterministic
         stored.setdefault(int(seconds), index)
+    # a reserved slot carries its timestamp but no data yet, so it is a
+    # timestep still to be downloaded rather than one already stored
+    for seconds in (reserved or {}).values():
+        stored.pop(int(seconds), None)
 
     to_recompute = {}
     if recompute_trailing > 0:
@@ -1155,12 +1167,18 @@ def process(
        Requires an existing cube (run once with ``append=False`` to create
        it) and is mutually exclusive with ``overwrite``.
 
-       New timesteps are merged into their sorted position, so the time
-       coordinate stays ordered (most recent first) and stays usable with
-       ``.sel(time=slice(...))``. Making room shifts the stored timesteps down
-       the axis, so an append rewrites the cube's data rather than only its
-       metadata; backfilling older data needs no shift. A cube whose axis is
-       already unsorted is refused -- sort it once with
+       The time coordinate stays sorted, most recent first, exactly as a
+       freshly created cube is, and the stored data is never read or
+       rewritten: newer timesteps are prepended by renaming whole time-chunk
+       keys, so only the time coordinate changes. Renaming works in whole
+       chunks, so a prepend frees a multiple of
+       ``zarr_store_chunk_size["time"]`` slots and any surplus becomes a
+       reserved slot -- a real timestamp on the same grid with no data yet,
+       which a later append fills in place instead of skipping. A timestamp
+       falling *between* stored ones is refused, since making room for it
+       would mean moving stored data. Prepending needs a local zarr store
+       (renaming keys on an object store would copy the cube). A cube whose
+       axis is already unsorted is refused -- sort it once with
        ``sentle.append.repair_time_order``.
     append_allow_missing_config: bool, default=False
        Allow ``append=True`` against a cube created before sentle recorded its
@@ -1330,8 +1348,8 @@ def process(
         # opens the cube, rolls back a previously interrupted append and
         # raises if this call disagrees with what is stored -- all before a
         # single byte is written
-        (append_store, append_root, reconsolidate,
-         append_time_order) = open_and_validate_append(
+        (append_store, append_root, reconsolidate, append_time_order,
+         append_reserved_slots) = open_and_validate_append(
             zarr_store=zarr_store,
             store_config=store_config,
             consolidate_metadata=consolidate_metadata,
@@ -1367,7 +1385,8 @@ def process(
         timestamp_list, committed_length, reuse_index_map = (
             drop_stored_timestamps(append_root, timestamp_list,
                                    time_composite_freq,
-                                   append_recompute_trailing))
+                                   append_recompute_trailing,
+                                   append_reserved_slots))
         if not timestamp_list:
             warnings.warn(
                 "Nothing to append: every timestep in the requested range is "
@@ -1375,34 +1394,44 @@ def process(
             append_store.close()
             return
 
-        # New timesteps are inserted at their sorted position rather than
-        # tacked onto the end, so the cube's time coordinate stays ordered and
-        # xr.open_zarr(...).sel(time=slice(...)) keeps working.
+        # The cube is newest-first, so newer timesteps are prepended by
+        # renaming time-chunk keys: the stored data is never read or rewritten,
+        # only the (tiny) time coordinate is. Prepending works in whole chunks,
+        # so any surplus slots become reserved -- real lattice timestamps with
+        # no data yet, which a later append fills instead of skipping.
         new_timestamps = [
             ts for ts in sorted({item["ts"]
                                  for item in timestamp_list}, reverse=True)
             if ts not in reuse_index_map
         ]
-        slots, destinations = insert_time_slots(
-            append_root, append_store,
-            timestamps_to_stored_seconds(new_timestamps), append_time_order,
-            reconsolidate)
+        plan = plan_extension(
+            np.asarray(append_root["time"][:], dtype="int64"),
+            timestamps_to_stored_seconds(new_timestamps),
+            int(append_root["sentle"].chunks[0]),
+            reserved=append_reserved_slots)
+        apply_extension(append_root, append_store, zarr_store, plan,
+                        append_time_order, reconsolidate)
 
+        seconds_for = dict(
+            zip(new_timestamps, timestamps_to_stored_seconds(new_timestamps)))
+        placed = {**plan["fill"], **plan["prepend"], **plan["tail"]}
         ts_index_map = {
-            ts: int(slot)
-            for ts, slot in zip(new_timestamps, slots)
+            ts: int(placed[int(seconds_for[ts])])
+            for ts in new_timestamps
         }
-        # the shift moved the stored timesteps, so a timestep being recomputed
-        # is no longer at the index it occupied before
+        # the prepend slid the stored timesteps up, so a timestep being
+        # recomputed is no longer at the index it occupied before
         ts_index_map.update({
-            ts: int(destinations[index])
+            ts: int(index) + int(plan["shift"])
             for ts, index in reuse_index_map.items()
         })
 
-        # recomputed timesteps are overwritten in place, so wipe them first --
-        # otherwise the old run's pixels survive wherever the new one has a gap
+        # recomputed timesteps are overwritten in place, and reserved slots
+        # being filled may hold nothing yet -- wipe both, or the old run's
+        # pixels survive wherever the new one has a gap
         recomputed_indices = sorted(
-            int(destinations[index]) for index in reuse_index_map.values())
+            int(index) + int(plan["shift"])
+            for index in reuse_index_map.values())
         if recomputed_indices:
             clear_timesteps(append_root, recomputed_indices)
 
@@ -1548,14 +1577,15 @@ def process(
         if append:
             # the cube must never end up claiming timesteps that were not
             # fully processed, so drop the ones this run added
-            rollback_append(append_root, append_store, committed_length,
-                            reconsolidate, recomputed_indices)
+            rollback_append(append_root, append_store, zarr_store,
+                            committed_length, reconsolidate,
+                            recomputed_indices)
             append_store.close()
         raise
 
     if append:
-        commit_append(append_root, append_store,
-                      committed_length + len(new_timestamps), reconsolidate)
+        commit_append(append_root, append_store, plan["length"],
+                      reconsolidate)
         append_store.close()
 
     # close cloud queue

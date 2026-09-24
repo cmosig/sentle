@@ -31,6 +31,7 @@ of the next append if the process was killed outright.
 """
 
 import os
+import shutil
 import warnings
 
 import numpy as np
@@ -473,34 +474,8 @@ def _truncate_time_axis(root, length: int) -> None:
     root["time"].resize((length, ))
 
 
-def _undo_insertion(root, committed: int, in_progress: dict | None) -> None:
-    """Put the cube back the way it was before an interrupted insertion.
-
-    The stored timesteps were shifted up to make room; move them back down and
-    restore the time coordinate before the axis is truncated. Both the shift
-    and this undo are idempotent, so it does not matter how far the interrupted
-    run got.
-    """
-    destinations = (in_progress or {}).get("destinations")
-    if not destinations:
-        return
-    destinations = np.asarray(destinations, dtype="int64")
-    if len(destinations) != committed:
-        raise ValueError(
-            f"The cube is inconsistent: an interrupted append recorded "
-            f"{len(destinations)} shifted timesteps but {committed} were "
-            f"committed. Refusing to touch it.")
-
-    time = root["time"]
-    seconds = np.asarray(time[:], dtype="int64")
-    _unshift_existing_timesteps(root, destinations, committed)
-    if (in_progress or {}).get("time_merged"):
-        # the coordinate was rewritten in merged order, so move it back too;
-        # if the run died before that, the original values never moved
-        time[:committed] = seconds[destinations]
-
-
-def recover_interrupted_append(root, store, reconsolidate: bool) -> int:
+def recover_interrupted_append(root, store, zarr_store,
+                               reconsolidate: bool) -> int:
     """Roll a cube back to its last committed length, if it was interrupted.
 
     Returns the number of timesteps the cube holds afterwards. A cube that was
@@ -525,7 +500,8 @@ def recover_interrupted_append(root, store, reconsolidate: bool) -> int:
         f"{stored_length} timesteps but only {committed} were committed. "
         f"Rolling the cube back to {committed} timesteps and discarding the "
         f"{stored_length - committed} partial ones.")
-    _undo_insertion(root, committed, config.get("append_in_progress"))
+    _undo_extension(root, zarr_store, committed,
+                    config.get("append_in_progress"))
     _truncate_time_axis(root, committed)
     _update_store_config(root, time_committed=committed,
                          append_in_progress=None)
@@ -547,103 +523,222 @@ def time_axis_order(seconds: np.ndarray) -> str | None:
     return None
 
 
-def plan_sorted_insertion(existing_seconds: np.ndarray,
-                          new_seconds: np.ndarray, order: str):
-    """Where every timestep ends up once the new ones are merged in.
+def local_store_path(zarr_store) -> str | None:
+    """Filesystem root of ``zarr_store``, or None if it is not a local store."""
+    if isinstance(zarr_store, str):
+        return zarr_store
+    root = getattr(zarr_store, "root", None)
+    return str(root) if root is not None else None
 
-    Returns ``(destinations, slots)``: ``destinations[i]`` is the final index
-    of the existing timestep currently at ``i``, and ``slots[j]`` the final
-    index of ``new_seconds[j]``.
 
-    Merging into an already-sorted axis only ever moves existing timesteps to
-    *higher* indices -- inserting can push data back but never pull it
-    forward. That is what makes the shift safe to perform in place: walking the
-    existing timesteps from the last one down, every write lands on an index at
-    or above the one being read, so a source is never clobbered before it is
-    moved.
+def plan_extension(existing_seconds: np.ndarray, new_seconds: np.ndarray,
+                   chunk_time: int, reserved: dict | None = None) -> dict:
+    """Work out where new timesteps go without disturbing the stored ones.
+
+    The cube is newest-first and zarr only grows an array at its end, so newer
+    timesteps have to be *prepended*. That is done by renaming whole time-chunk
+    keys (see :func:`prepend_time_chunks`), which requires the number of freed
+    slots to be a multiple of ``chunk_time``; the surplus becomes reserved
+    slots -- real lattice timestamps, newer than everything else, carrying no
+    data until a later append fills them.
+
+    Returns a plan with:
+      ``fill``            {timestamp: index} -- reserved slots being filled now
+      ``prepend``         {timestamp: index} -- new bins newer than the cube
+      ``tail``            {timestamp: index} -- new bins older than the cube
+      ``prepend_chunks``  time-chunks to free at the front
+      ``length``          final length of the time axis
+      ``reserved``        {index: seconds} left reserved afterwards
+      ``surplus``         {index: seconds} newly reserved by this call
+
+    Raises if a new timestamp falls *between* stored ones, which cannot be done
+    without moving stored data.
     """
-    reverse = order == "descending"
-    merged = sorted(
-        [(int(s), 0, i) for i, s in enumerate(existing_seconds)] +
-        [(int(s), 1, j) for j, s in enumerate(new_seconds)],
-        key=lambda item: item[0],
-        reverse=reverse)
+    reserved = {int(k): int(v) for k, v in (reserved or {}).items()}
+    existing = np.asarray(existing_seconds, dtype="int64")
+    new = sorted({int(v) for v in np.asarray(new_seconds, dtype="int64")},
+                 reverse=True)
+    count = len(existing)
 
-    destinations = np.empty(len(existing_seconds), dtype="int64")
-    slots = np.empty(len(new_seconds), dtype="int64")
-    for final_index, (_, is_new, origin) in enumerate(merged):
-        if is_new:
-            slots[origin] = final_index
-        else:
-            destinations[origin] = final_index
+    # reserved slots already carry their timestamp, so a new bin landing on one
+    # is a fill, not an insertion
+    by_seconds = {seconds: index for index, seconds in reserved.items()}
+    fill = {seconds: by_seconds[seconds] for seconds in new
+            if seconds in by_seconds}
 
-    if len(destinations) and (destinations < np.arange(len(destinations))).any():
-        # only possible if the stored axis was not sorted to begin with
-        raise ValueError(
-            "Cannot insert into this cube in place: its time axis is not "
-            "sorted, so merging would have to move stored timesteps to lower "
-            "indices. Repair it first with sentle.append.repair_time_order().")
-    return destinations, slots
+    outstanding = [seconds for seconds in new if seconds not in by_seconds]
+    if count:
+        newest, oldest = int(existing.max()), int(existing.min())
+        newer = [v for v in outstanding if v > newest]
+        older = [v for v in outstanding if v < oldest]
+        between = [v for v in outstanding if oldest < v < newest]
+        if between:
+            raise ValueError(
+                f"Cannot append {len(between)} timestep(s) that fall between "
+                f"timesteps the cube already holds (e.g. "
+                f"{pd.Timestamp(between[0], unit='s')}). Making room for them "
+                f"would mean moving stored data, which append does not do. "
+                f"Extend the cube at either end instead, or rebuild it with "
+                f"overwrite=True.")
+    else:
+        newer, older = outstanding, []
+
+    chunk_time = int(chunk_time)
+    prepend_chunks = -(-len(newer) // chunk_time) if newer else 0
+    freed = prepend_chunks * chunk_time
+    shift = freed
+
+    # everything that already exists slides up by the freed slots
+    plan_reserved = {index + shift: seconds
+                     for index, seconds in reserved.items()}
+    for seconds, index in list(fill.items()):
+        fill[seconds] = index + shift
+
+    # the freed block is filled newest-first: surplus future bins, then the new
+    # ones. The surplus sits in front because it is newer still.
+    surplus_count = freed - len(newer)
+    step = 0
+    if surplus_count:
+        if len(newer) >= 2:
+            step = newer[0] - newer[1]
+        elif count >= 2:
+            ordered = np.sort(existing)[::-1]
+            step = int(ordered[0] - ordered[1])
+        if step <= 0:
+            raise ValueError(
+                "Cannot work out the timestep spacing needed to reserve "
+                f"{surplus_count} slot(s) while prepending; the cube has too "
+                "few timesteps to infer it.")
+    surplus = {
+        index: newer[0] + (surplus_count - index) * step
+        for index in range(surplus_count)
+    }
+    prepend = {seconds: surplus_count + offset
+               for offset, seconds in enumerate(newer)}
+
+    length = freed + count + len(older)
+    tail = {seconds: freed + count + offset
+            for offset, seconds in enumerate(older)}
+
+    plan_reserved.update(surplus)
+    for seconds in fill:
+        plan_reserved.pop(fill[seconds], None)
+
+    return {
+        "fill": fill,
+        "prepend": prepend,
+        "tail": tail,
+        "prepend_chunks": prepend_chunks,
+        "length": length,
+        "reserved": plan_reserved,
+        "surplus": surplus,
+        "shift": shift,
+    }
 
 
-def insert_time_slots(root, store, new_seconds: np.ndarray, order: str,
-                      reconsolidate: bool) -> np.ndarray:
-    """Make room for ``new_seconds`` at their sorted positions.
+def prepend_time_chunks(store_path: str, chunks: int, chunk_count: int) -> None:
+    """Free ``chunks`` time-chunks at the front by renaming chunk keys.
 
-    Returns ``(slots, destinations)``: the indices the new timesteps must be
-    written to, and where each previously stored timestep ended up. Existing
-    data is
-    shifted up to keep the time coordinate sorted, so the cube is never left
-    with an out-of-order axis for ``xr.open_zarr`` users to trip over.
+    A zarr chunk is addressed by its key, so shifting every time-chunk index up
+    by ``chunks`` moves the whole cube along the time axis without reading or
+    rewriting a single byte of it. Renames go from the highest index down so a
+    destination is never an index still waiting to be moved.
+    """
+    if chunks <= 0:
+        return
+    chunk_root = os.path.join(store_path, "sentle", "c")
+    if not os.path.isdir(chunk_root):
+        return
+    for index in range(chunk_count - 1, -1, -1):
+        source = os.path.join(chunk_root, str(index))
+        if not os.path.exists(source):
+            continue
+        os.rename(source, os.path.join(chunk_root, str(index + chunks)))
 
-    The manifest is marked as having an append in progress *before* anything
-    moves, so a hard kill leaves a cube the next append repairs rather than one
-    silently claiming timesteps nobody wrote.
+
+def _unprepend_time_chunks(store_path: str, chunks: int,
+                           chunk_count: int) -> None:
+    """Undo :func:`prepend_time_chunks`, lowest index first."""
+    if chunks <= 0:
+        return
+    chunk_root = os.path.join(store_path, "sentle", "c")
+    if not os.path.isdir(chunk_root):
+        return
+    for index in range(chunk_count):
+        source = os.path.join(chunk_root, str(index + chunks))
+        if not os.path.exists(source):
+            # already moved back by an earlier, interrupted undo
+            continue
+        destination = os.path.join(chunk_root, str(index))
+        if os.path.exists(destination):
+            # the freed block only ever holds output from the run being undone,
+            # so whatever is sitting in the way is discardable by definition
+            shutil.rmtree(destination)
+        os.rename(source, destination)
+
+
+def apply_extension(root, store, zarr_store, plan: dict, order: str,
+                    reconsolidate: bool) -> None:
+    """Make room for the planned timesteps and write the time coordinate.
+
+    Existing data is never read or rewritten: the front block is freed by
+    renaming time-chunk keys, and only the (metadata-sized) time coordinate is
+    rewritten. The manifest is marked before anything moves so a hard kill
+    leaves a cube the next append repairs.
     """
     data = root["sentle"]
     time = root["time"]
-    start = int(time.shape[0])
-    new_length = start + len(new_seconds)
-
+    count = int(time.shape[0])
     existing_seconds = np.asarray(time[:], dtype="int64")
-    destinations, slots = plan_sorted_insertion(existing_seconds, new_seconds,
-                                                order)
+    chunk_time = int(data.chunks[0])
+    chunk_count = -(-count // chunk_time)
+
+    store_path = local_store_path(zarr_store)
+    if plan["prepend_chunks"] and store_path is None:
+        raise ValueError(
+            "Prepending timesteps renames chunk keys, which sentle only does "
+            "on a local zarr store. Append to a local copy and upload it, or "
+            "pass a filesystem path as zarr_store.")
 
     _update_store_config(root,
-                         time_committed=start,
+                         time_committed=count,
+                         time_order=order,
                          append_in_progress={
-                             "committed": start,
-                             "pending": new_length,
+                             "committed": count,
+                             "pending": plan["length"],
                              "order": order,
-                             "destinations": [int(d) for d in destinations],
-                             "slots": [int(v) for v in slots],
+                             "prepend_chunks": plan["prepend_chunks"],
+                             "chunk_count": chunk_count,
+                             "shift": plan["shift"],
                          })
 
-    data.resize((new_length, ) + tuple(data.shape[1:]))
-    time.resize((new_length, ))
+    data.resize((plan["length"], ) + tuple(data.shape[1:]))
+    time.resize((plan["length"], ))
 
-    _shift_existing_timesteps(root, destinations, start)
+    prepend_time_chunks(store_path, plan["prepend_chunks"], chunk_count)
 
-    # the shift copies rather than moves, so every gap still holds a stale copy
-    # of whatever used to sit there. Clear them, or a timestep the download
-    # finds no data for would read back as another timestep's pixels.
-    clear_timesteps(root, [int(v) for v in slots])
+    merged = np.zeros(plan["length"], dtype="int64")
+    merged[plan["shift"]:plan["shift"] + count] = existing_seconds
+    for seconds, index in plan["prepend"].items():
+        merged[index] = seconds
+    for index, seconds in plan["surplus"].items():
+        merged[index] = seconds
+    for seconds, index in plan["tail"].items():
+        merged[index] = seconds
+    time[:] = merged
 
-    # the coordinate goes last: until every slice has moved, the old values are
-    # what describes the data still sitting at the old indices
-    merged_seconds = np.empty(new_length, dtype="int64")
-    merged_seconds[destinations] = existing_seconds
-    merged_seconds[slots] = np.asarray(new_seconds, dtype="int64")
-    time[:] = merged_seconds
-    # from here on the coordinate describes the *merged* layout, so an undo has
-    # to permute it back; before this point the old values are still in place
     _update_store_config(root,
+                         reserved_slots={
+                             str(index): int(seconds)
+                             for index, seconds in plan["reserved"].items()
+                         },
                          append_in_progress={
-                             "committed": start,
-                             "pending": new_length,
+                             "committed": count,
+                             "pending": plan["length"],
                              "order": order,
-                             "destinations": [int(d) for d in destinations],
-                             "slots": [int(v) for v in slots],
+                             "prepend_chunks": plan["prepend_chunks"],
+                             "chunk_count": chunk_count,
+                             "shift": plan["shift"],
                              "time_merged": True,
                          })
 
@@ -651,36 +746,27 @@ def insert_time_slots(root, store, new_seconds: np.ndarray, order: str,
         # the workers re-open the store per tile and would otherwise read the
         # pre-resize shape from the consolidated metadata and fail out of bounds
         consolidate(store)
-    return slots, destinations
 
 
-def _shift_existing_timesteps(root, destinations, count) -> None:
-    """Move stored timesteps up to their merged positions, last one first.
+def _undo_extension(root, zarr_store, committed: int,
+                    in_progress: dict | None) -> None:
+    """Put the cube back the way it was before an interrupted extension."""
+    in_progress = in_progress or {}
+    chunks = int(in_progress.get("prepend_chunks") or 0)
+    chunk_count = int(in_progress.get("chunk_count") or 0)
+    shift = int(in_progress.get("shift") or 0)
+    if not chunks:
+        return
+    store_path = local_store_path(zarr_store)
+    if store_path is None:
+        raise ValueError(
+            "Cannot undo an interrupted prepend on a non-local zarr store.")
 
-    Copying downwards-to-upwards in descending index order never clobbers a
-    source: ``destinations[i] >= i`` always, and nothing below ``i`` has been
-    written yet. The copies are left behind rather than erased, which makes the
-    whole pass idempotent -- an interrupted shift is simply run again from the
-    start, and :func:`_unshift_existing_timesteps` can undo it the same way.
-    """
-    data = root["sentle"]
-    for i in range(int(count) - 1, -1, -1):
-        destination = int(destinations[i])
-        if destination != i:
-            data[destination] = data[i]
-
-
-def _unshift_existing_timesteps(root, destinations, count) -> None:
-    """Move stored timesteps back down, undoing :func:`_shift_existing_timesteps`.
-
-    Ascending order this time, for the mirror-image reason: every source still
-    to be read sits above the index just written. Also idempotent.
-    """
-    data = root["sentle"]
-    for i in range(int(count)):
-        destination = int(destinations[i])
-        if destination != i:
-            data[i] = data[destination]
+    time = root["time"]
+    seconds = np.asarray(time[:], dtype="int64")
+    _unprepend_time_chunks(store_path, chunks, chunk_count)
+    if in_progress.get("time_merged"):
+        time[:committed] = seconds[shift:shift + committed]
 
 
 def repair_time_order(zarr_store, consolidate_metadata: bool = True) -> bool:
@@ -725,16 +811,24 @@ def repair_time_order(zarr_store, consolidate_metadata: bool = True) -> bool:
         for new_index, old_index in enumerate(permutation):
             staging[new_index] = data[int(old_index)]
 
-        root["time"][:] = seconds[permutation]
         for key, value in dict(data.attrs).items():
             staging.attrs[key] = value
-        del root["sentle"]
+
         store_root = str(zarr_store) if isinstance(zarr_store, str) else None
         if store_root is None:
             raise ValueError(
                 "repair_time_order currently supports local zarr stores only")
-        os.rename(os.path.join(store_root, staging_path),
-                  os.path.join(store_root, "sentle"))
+
+        # swap by renaming, never by deleting first: two atomic renames leave
+        # at most a microsecond window, whereas removing the array up front
+        # would lose the cube outright if the process died right there
+        live = os.path.join(store_root, "sentle")
+        staged = os.path.join(store_root, staging_path)
+        superseded = os.path.join(store_root, "sentle__superseded")
+        root["time"][:] = seconds[permutation]
+        os.rename(live, superseded)
+        os.rename(staged, live)
+        shutil.rmtree(superseded, ignore_errors=True)
         _update_store_config(root, time_order=order)
         if reconsolidate:
             consolidate(store)
@@ -751,8 +845,8 @@ def commit_append(root, store, length: int, reconsolidate: bool) -> None:
         consolidate(store)
 
 
-def rollback_append(root, store, committed: int, reconsolidate: bool,
-                    recomputed_indices=None) -> None:
+def rollback_append(root, store, zarr_store, committed: int,
+                    reconsolidate: bool, recomputed_indices=None) -> None:
     """Undo an append that failed, returning the cube to ``committed``.
 
     Timesteps that were being *recomputed* sit below ``committed`` and are not
@@ -760,10 +854,13 @@ def rollback_append(root, store, committed: int, reconsolidate: bool,
     restored here -- say so loudly rather than leave the caller to discover
     empty timesteps later.
     """
-    _undo_insertion(root, int(committed),
-                    (read_store_config(root) or {}).get("append_in_progress"))
+    config = read_store_config(root) or {}
+    _undo_extension(root, zarr_store, int(committed),
+                    config.get("append_in_progress"))
     _truncate_time_axis(root, committed)
     _update_store_config(root, time_committed=int(committed),
+                         reserved_slots=config.get("reserved_slots_before",
+                                                   {}) or {},
                          append_in_progress=None)
     if reconsolidate:
         consolidate(store)

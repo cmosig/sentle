@@ -9,6 +9,8 @@ checks, the time-axis resize, the timestamp-to-index mapping and the
 commit/rollback bookkeeping -- without downloading anything.
 """
 
+import hashlib
+import os
 import types
 
 import numpy as np
@@ -102,6 +104,10 @@ def _run(store, **overrides):
         S2_bands=list(BANDS),
         num_workers=1,
         resampling_method=Resampling.nearest,
+        # one timestep per chunk, so a prepend frees exactly the slots needed
+        # and there is no surplus to reason about. The surplus behaviour of
+        # larger time chunks has its own tests below.
+        zarr_store_chunk_size={"time": 1, "x": 250, "y": 250},
     )
     kwargs.update(overrides)
     return process(**kwargs)
@@ -170,7 +176,7 @@ def test_append_adds_the_new_timesteps(cube, fake_pipeline):
 
 def test_append_keeps_the_time_axis_sorted(cube, fake_pipeline):
     # the whole point: a cube stays readable with .sel(time=slice(...))
-    for batch in ([T3], [T_OLD], [T4], [pd.Timestamp("2023-06-03", tz="UTC")]):
+    for batch in ([T3], [T_OLD], [T4]):
         fake_pipeline.timestamps = batch
         _run(cube, append=True)
         times = _times(cube)
@@ -181,7 +187,7 @@ def test_append_keeps_the_time_axis_sorted(cube, fake_pipeline):
         pd.to_datetime(ds.time.values), reverse=True)
     # ascending slice selection works without the caller sorting first
     window = ds.sortby("time").sel(time=slice("2023-06-01", "2023-07-01"))
-    assert window.sizes["time"] == 4
+    assert window.sizes["time"] == 3
 
 
 def test_append_preserves_the_data_already_stored(cube, fake_pipeline):
@@ -244,19 +250,15 @@ def test_append_of_newer_data_keeps_the_axis_sorted(cube, fake_pipeline):
     assert np.all(_open(cube)["sentle"][0] == _value_for(T3))
 
 
-def test_append_can_fill_a_gap_between_stored_timesteps(cube, fake_pipeline):
-    middle = pd.Timestamp("2023-06-03", tz="UTC")
-    fake_pipeline.timestamps = [middle]
-    _run(cube, append=True)
+def test_timestep_between_stored_ones_is_refused(cube, fake_pipeline):
+    # making room in the middle would mean moving stored data, which append
+    # does not do -- say so rather than silently reordering the cube
+    fake_pipeline.timestamps = [pd.Timestamp("2023-06-03", tz="UTC")]
+    with pytest.raises(ValueError, match="fall between"):
+        _run(cube, append=True)
 
-    cube_ds = xr.open_zarr(str(cube))
-    # inserted between T1 and T2 without the caller having to sort
-    assert list(cube_ds.time.values) == [
-        np.datetime64(ts.tz_localize(None)) for ts in (T2, middle, T1)
-    ]
-    # the gap-filled timestep carries its own data, at its own place
-    assert np.all(
-        cube_ds["sentle"].isel(time=1).values == _value_for(middle))
+    assert fake_pipeline.written == []
+    assert _open(cube)["sentle"].shape[0] == 2
 
 
 def test_appended_cube_is_readable_by_xarray(cube, fake_pipeline):
@@ -615,60 +617,41 @@ def test_a_cube_can_be_appended_to_after_a_failed_append(cube, fake_pipeline):
     assert sorted(fake_pipeline.written) == [T3, T4]
 
 
-def _simulate_hard_kill(store, pending_seconds):
-    """Grow the arrays past ``time_committed``, as a killed append leaves them."""
-    root = zarr.open_group(str(store), mode="a", use_consolidated=False)
-    data, time = root["sentle"], root["time"]
-    start = time.shape[0]
-    data.resize((start + len(pending_seconds), ) + tuple(data.shape[1:]))
-    time.resize((start + len(pending_seconds), ))
-    time[start:] = pending_seconds
+def _simulate_hard_kill(store, pending):
+    """Leave the cube exactly as a killed prepend would: room made, no commit."""
+    from sentle.append import apply_extension, plan_extension
+    from sentle.sentle import timestamps_to_stored_seconds
+    zstore = zarr.storage.LocalStore(str(store))
+    root = zarr.open_group(store=zstore, mode="a", use_consolidated=False)
+    start = int(root["time"].shape[0])
+    plan = plan_extension(np.asarray(root["time"][:], dtype="int64"),
+                          timestamps_to_stored_seconds(pending),
+                          int(root["sentle"].chunks[0]))
+    apply_extension(root, zstore, str(store), plan, "descending", True)
     # partial output from the killed run
-    data[start:] = 999.0
+    for index in plan["prepend"].values():
+        root["sentle"][int(index)] = 999.0
     zarr.consolidate_metadata(zarr.storage.LocalStore(str(store)))
     return start
 
 
 def test_killed_append_is_rolled_back_on_the_next_append(cube, fake_pipeline):
-    pending = [
-        int(T3.tz_localize(None).timestamp()),
-        int(T4.tz_localize(None).timestamp())
-    ]
-    _simulate_hard_kill(cube, pending)
+    before = _open(cube)["sentle"][:]
+    _simulate_hard_kill(cube, [T3, T4])
     assert _open(cube)["sentle"].shape[0] == 4  # the cube over-claims
 
     fake_pipeline.timestamps = [T3]
     with pytest.warns(UserWarning, match="did not finish"):
         _run(cube, append=True)
 
-    # rolled back to 2, then extended by the one requested timestep
+    # rolled back to 2 (chunk renames undone), then extended by T3 alone
     assert _open(cube)["sentle"].shape[0] == 3
     assert _manifest(cube)["time_committed"] == 3
     assert fake_pipeline.written == [T3]
-
-
-def test_rollback_clears_partial_data_from_the_shared_time_chunk(
-        cube, fake_pipeline):
-    # time chunk is 10 and the cube holds 2 timesteps, so a rolled-back append
-    # leaves its bytes inside a chunk that resize keeps. A later timestep must
-    # not inherit them.
-    assert _open(cube)["sentle"].chunks[0] == 10
-    _simulate_hard_kill(cube, [
-        int(T3.tz_localize(None).timestamp()),
-        int(T4.tz_localize(None).timestamp())
-    ])
-
-    # the next append finds no data for T_OLD, so nothing is written there
-    fake_pipeline.timestamps = [T_OLD]
-    fake_pipeline.silent = True
-    with pytest.warns(UserWarning, match="did not finish"):
-        _run(cube, append=True)
-
-    data = _open(cube)["sentle"][:]
-    assert data.shape[0] == 3
-    # index 2 was never written by this run, so it must read as NoData rather
-    # than as the killed run's leftovers
-    assert np.isnan(data[2]).all()
+    assert _times(cube) == [T3.tz_localize(None), T2.tz_localize(None),
+                            T1.tz_localize(None)]
+    # the rollback must not have damaged the stored bins
+    assert np.array_equal(_open(cube)["sentle"][1:], before)
 
 
 def test_inconsistent_committed_length_is_refused(cube, fake_pipeline):
@@ -797,19 +780,6 @@ def test_recompute_trailing_of_several_timesteps(cube, fake_pipeline):
 # ------------------------------------------- the sorted-axis invariant
 
 
-def test_stored_data_moves_down_to_make_room(cube, fake_pipeline):
-    before = _open(cube)["sentle"][:]
-    before_times = _times(cube)
-    fake_pipeline.timestamps = [T3, T4]
-    _run(cube, append=True)
-
-    after = _open(cube)["sentle"][:]
-    after_times = _times(cube)
-    # the two stored bins are now at the bottom of the axis, values intact
-    assert after_times[2:] == before_times
-    assert np.array_equal(after[2:], before)
-
-
 def test_backfill_leaves_stored_bins_where_they_were(cube, fake_pipeline):
     before = _open(cube)["sentle"][:]
     fake_pipeline.timestamps = [T_OLD]
@@ -849,37 +819,6 @@ def test_failed_append_restores_the_original_layout(cube, fake_pipeline):
     assert np.array_equal(_open(cube)["sentle"][:], before)
 
 
-def test_killed_append_mid_shift_is_repaired(cube, fake_pipeline):
-    before = _open(cube)["sentle"][:]
-    before_times = _times(cube)
-
-    # stop the run right after the shift, before any data is written
-    # (insert_time_slots clears the new slots, so that is the seam)
-    import sentle.append as append_mod
-    real_clear = append_mod.clear_timesteps
-
-    def boom(*a, **k):
-        real_clear(*a, **k)
-        raise KeyboardInterrupt("killed mid-append")
-
-    fake_pipeline.timestamps = [T3, T4]
-    with pytest.raises(KeyboardInterrupt):
-        append_mod.clear_timesteps = boom
-        try:
-            _run(cube, append=True)
-        finally:
-            append_mod.clear_timesteps = real_clear
-
-    # the cube is left claiming 4 timesteps; the next append must repair it
-    fake_pipeline.timestamps = [T3]
-    with pytest.warns(UserWarning, match="did not finish"):
-        _run(cube, append=True)
-
-    assert _times(cube) == [T3.tz_localize(None)] + before_times
-    assert np.array_equal(_open(cube)["sentle"][1:], before)
-    assert np.all(_at(cube, T3) == _value_for(T3))
-
-
 def test_unsorted_cube_is_refused_and_can_be_repaired(cube, fake_pipeline):
     from sentle.append import repair_time_order
 
@@ -917,3 +856,104 @@ def test_repair_is_a_no_op_on_a_sorted_cube(cube):
     before = _times(cube)
     assert repair_time_order(str(cube)) is False
     assert _times(cube) == before
+
+
+def test_append_records_the_axis_order_on_a_legacy_cube(cube, fake_pipeline):
+    # a cube with no manifest still ends up with time_order recorded, so a
+    # freshly appended cube and a repaired one describe themselves the same way
+    _strip_manifest(cube)
+    fake_pipeline.timestamps = [T3]
+    with pytest.warns(UserWarning, match="could not be verified"):
+        _run(cube, append=True, append_allow_missing_config=True)
+
+    assert _manifest(cube)["time_order"] == "descending"
+    assert _times(cube) == sorted(_times(cube), reverse=True)
+
+
+# ------------------------------- prepending in whole time chunks
+
+
+CHUNKED = {"time": 10, "x": 250, "y": 250}
+
+
+@pytest.fixture
+def chunked_cube(tmp_path, fake_pipeline):
+    """A cube with time chunk 10, where a prepend frees a whole chunk."""
+    store = tmp_path / "chunked.zarr"
+    fake_pipeline.timestamps = [T1, T2]
+    _run(store, zarr_store_chunk_size=CHUNKED)
+    fake_pipeline.written.clear()
+    return store
+
+
+def test_prepend_rounds_up_and_reserves_the_surplus(chunked_cube,
+                                                    fake_pipeline):
+    fake_pipeline.timestamps = [T3, T4]
+    _run(chunked_cube, append=True, zarr_store_chunk_size=CHUNKED)
+
+    # 2 new bins round up to one whole chunk of 10 -> 8 reserved slots
+    assert _open(chunked_cube)["sentle"].shape[0] == 12
+    reserved = _manifest(chunked_cube)["reserved_slots"]
+    assert len(reserved) == 8
+    times = _times(chunked_cube)
+    assert times == sorted(times, reverse=True), "axis must stay sorted"
+    # the reserved slots are the newest, on the same lattice, and empty
+    for index in (int(k) for k in reserved):
+        assert np.isnan(_open(chunked_cube)["sentle"][index]).all()
+    assert np.all(_at(chunked_cube, T4) == _value_for(T4))
+    assert np.all(_at(chunked_cube, T3) == _value_for(T3))
+
+
+def test_reserved_slots_are_filled_not_skipped(chunked_cube, fake_pipeline):
+    fake_pipeline.timestamps = [T3, T4]
+    _run(chunked_cube, append=True, zarr_store_chunk_size=CHUNKED)
+    reserved = _manifest(chunked_cube)["reserved_slots"]
+    length = _open(chunked_cube)["sentle"].shape[0]
+    # the newest reserved timestamp -- a future bin the cube already claims
+    target = pd.Timestamp(max(int(v) for v in reserved.values()), unit="s")
+
+    fake_pipeline.written.clear()
+    fake_pipeline.timestamps = [target.tz_localize("UTC")]
+    _run(chunked_cube, append=True, zarr_store_chunk_size=CHUNKED)
+
+    # it was downloaded into its existing slot: no growth, no new chunk
+    assert _open(chunked_cube)["sentle"].shape[0] == length
+    assert fake_pipeline.written == [target.tz_localize("UTC")]
+    assert np.all(_at(chunked_cube, target) == _value_for(target))
+    assert len(_manifest(chunked_cube)["reserved_slots"]) == len(reserved) - 1
+
+
+def test_prepend_does_not_read_or_rewrite_stored_chunks(chunked_cube,
+                                                        fake_pipeline):
+    """The requirement: an append touches no stored data, only metadata."""
+    root = str(chunked_cube)
+    before = {}
+    for dirpath, _, filenames in os.walk(os.path.join(root, "sentle", "c")):
+        for name in filenames:
+            path = os.path.join(dirpath, name)
+            before[os.path.relpath(path, root)] = (
+                os.path.getsize(path), os.stat(path).st_mtime_ns,
+                hashlib.md5(open(path, "rb").read()).hexdigest())
+    assert before, "no chunks to compare"
+
+    fake_pipeline.timestamps = [T3, T4]
+    _run(chunked_cube, append=True, zarr_store_chunk_size=CHUNKED)
+
+    # the stored chunks moved to new keys, but their bytes and mtimes are
+    # untouched -- nothing was read, decoded, re-encoded or rewritten
+    after = {}
+    for dirpath, _, filenames in os.walk(os.path.join(root, "sentle", "c")):
+        for name in filenames:
+            path = os.path.join(dirpath, name)
+            after[os.path.relpath(path, root)] = (
+                os.path.getsize(path), os.stat(path).st_mtime_ns,
+                hashlib.md5(open(path, "rb").read()).hexdigest())
+
+    moved = {}
+    for rel, fingerprint in before.items():
+        parts = rel.split(os.sep)
+        parts[2] = str(int(parts[2]) + 1)      # one chunk was prepended
+        moved[os.sep.join(parts)] = fingerprint
+    for rel, fingerprint in moved.items():
+        assert rel in after, f"stored chunk vanished: {rel}"
+        assert after[rel] == fingerprint, f"stored chunk was rewritten: {rel}"
