@@ -123,13 +123,28 @@ does not match the cube on disk.
 
 Notes:
 
-- **Time order.** The time coordinate stays sorted (most recent first, as it
-  always is). New timesteps are merged into their sorted position rather than
-  tacked onto the end, so `.sel(time=slice(...))` and friends keep working
-  without the reader having to sort anything. Appending newer data does mean
-  the stored timesteps shift down the axis to make room, so an append rewrites
-  the cube's data — it is not a cheap metadata-only operation. Backfilling
-  older data needs no shift at all.
+- **Time order.** The time coordinate stays sorted, most recent first, exactly
+  as a freshly created cube is — so `.sel(time=slice(...))` and friends keep
+  working without the reader having to sort anything.
+- **Stored data is never touched.** Because the cube is newest-first and zarr
+  only grows an array at its end, newer timesteps are *prepended* by renaming
+  whole time-chunk keys. The stored chunks keep their exact bytes; only the
+  (metadata-sized) time coordinate is rewritten. An append is therefore cheap
+  no matter how big the cube is.
+- **Reserved slots.** Renaming works in whole chunks, so a prepend frees a
+  multiple of `zarr_store_chunk_size["time"]` slots. Any surplus becomes
+  *reserved*: real timestamps on the same grid, newer than everything else,
+  carrying no data yet. They are recorded in the cube's manifest, and a later
+  append fills them in place instead of skipping them — so with a `time` chunk
+  of 10, nine out of ten weekly appends need no renaming at all. Until they are
+  filled they read as NoData, like any bin with no valid observations.
+- **Extension only.** New timesteps can be added at either end of the axis, but
+  a timestamp falling *between* ones the cube already holds is refused: making
+  room for it would mean moving stored data. Rebuild with `overwrite=True` if
+  you need that.
+- **Local stores only for prepending.** Renaming chunk keys is a cheap metadata
+  operation on a filesystem; on an object store it would be a server-side copy
+  of the whole cube. Append to a local copy and upload it.
 - **Composites.** With `time_composite_freq` set, the bin boundaries are
   anchored to the epoch, so a second run lands on the same bins as the first no
   matter where its date range starts. A bin is either already stored (skipped
@@ -150,7 +165,7 @@ Notes:
   the previous run's pixels in the new one's gaps. An interrupted run therefore
   leaves them NoData, and sentle says so when it rolls back.
 - **Interruptions.** An append that fails rolls the cube back to its previous
-  state — undoing the shift as well as the resize — so it never claims
+  state — undoing the chunk renames as well as the resize — so it never claims
   timesteps that were not written. If the process is killed outright, the next
   append detects the partial state, warns, and rolls it back before continuing.
 - **Cubes left unsorted by an earlier sentle.** An append refuses to touch a
