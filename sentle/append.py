@@ -446,6 +446,24 @@ def _clear_shared_time_chunk(data, committed: int) -> None:
                  x0:x0 + chunk_x] = fill
 
 
+def clear_timesteps(root, indices) -> None:
+    """Reset stored timesteps to NoData, ready to be recomputed.
+
+    A composite writes only where it found data, so recomputing a bin straight
+    on top of its old contents would leave the previous run's pixels wherever
+    the new one has a gap -- one timestep holding two different runs. Clearing
+    first makes the bin unambiguously the product of the new run.
+    """
+    data = root["sentle"]
+    fill = data.fill_value
+    _, _, chunk_y, chunk_x = (int(c) for c in data.chunks)
+    for index in indices:
+        # walk the spatial chunk grid so the write stays chunk-sized in memory
+        for y0 in range(0, int(data.shape[2]), chunk_y):
+            for x0 in range(0, int(data.shape[3]), chunk_x):
+                data[int(index), :, y0:y0 + chunk_y, x0:x0 + chunk_x] = fill
+
+
 def _truncate_time_axis(root, length: int) -> None:
     """Shrink ``sentle`` and ``time`` back to ``length`` timesteps."""
     data = root["sentle"]
@@ -527,10 +545,28 @@ def commit_append(root, store, length: int, reconsolidate: bool) -> None:
         consolidate(store)
 
 
-def rollback_append(root, store, committed: int, reconsolidate: bool) -> None:
-    """Undo an append that failed, returning the cube to ``committed``."""
+def rollback_append(root, store, committed: int, reconsolidate: bool,
+                    recomputed_indices=None) -> None:
+    """Undo an append that failed, returning the cube to ``committed``.
+
+    Timesteps that were being *recomputed* sit below ``committed`` and are not
+    truncated. They were cleared before the run started, so they cannot be
+    restored here -- say so loudly rather than leave the caller to discover
+    empty timesteps later.
+    """
     _truncate_time_axis(root, committed)
     _update_store_config(root, time_committed=int(committed),
                          append_in_progress=None)
     if reconsolidate:
         consolidate(store)
+
+    if recomputed_indices:
+        times = np.asarray(root["time"][:], dtype="int64")
+        dates = ", ".join(
+            str(pd.Timestamp(int(times[i]), unit="s").date())
+            for i in sorted(recomputed_indices))
+        warnings.warn(
+            f"The append failed after clearing {len(recomputed_indices)} "
+            f"timestep(s) for recomputation ({dates}); those timesteps are now "
+            f"NoData and their previous contents are gone. Re-run the append "
+            f"with append_recompute_trailing set to restore them.")

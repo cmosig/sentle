@@ -132,9 +132,22 @@ Notes:
 - **Composites.** With `time_composite_freq` set, the bin boundaries are
   anchored to the epoch, so a second run lands on the same bins as the first no
   matter where its date range starts. A bin is either already stored (skipped
-  whole) or entirely new — it is never half-recomputed. A bin at the end of the
-  first run's range was aggregated over the whole bin, including days that had
-  no data yet at the time; appending later does **not** recompute it.
+  whole) or entirely new — it is never half-recomputed.
+- **Stale trailing bins.** A bin at the end of the first run's range was
+  aggregated over the whole bin, including days whose acquisitions had not been
+  published yet, so it can stay permanently thin. An append skips stored bins,
+  so pass `append_recompute_trailing=1` (or more) to recompute the newest
+  stored bins in place:
+
+  ```
+  sentle.process(datetime="2022-09-01/2022-12-01", append=True,
+                 append_recompute_trailing=1, **common)
+  ```
+
+  Those bins are cleared before being recomputed — a composite only writes
+  where it found data, so recomputing on top of the old contents would leave
+  the previous run's pixels in the new one's gaps. An interrupted run therefore
+  leaves them NoData, and sentle says so when it rolls back.
 - **Interruptions.** An append that fails rolls the cube back to its previous
   length, so it never claims timesteps that were not written. If the process is
   killed outright, the next append detects the partial state, warns, and rolls
@@ -206,6 +219,7 @@ The package contains only one main function for retrieving and processing Sentin
 | `overwrite`                      | `bool`                      | `False`                                      | Whether to replace an existing zarr storage at `zarr_store`. Mutually exclusive with `append`. |
 | `append`                         | `bool`                      | `False`                                      | Extend the cube that already exists at `zarr_store` along the **time axis** instead of creating a new one: only the timesteps that are not stored yet are downloaded, and the ones already present are skipped rather than recomputed. Every parameter that shapes the pixels must match the cube on disk (see *Appending to an existing cube* in the Guide above); a mismatch raises before anything is written. Requires an existing cube and is mutually exclusive with `overwrite`. |
 | `append_allow_missing_config`    | `bool`                      | `False`                                      | Allow `append=True` against a cube created before sentle started recording its configuration in the store. Such a cube is still checked against everything derivable from it (CRS, x/y grid, band list, dtype, chunk sizes, composite bin spacing), but the rest (masking, NBAR, provider, resampling, composite method) cannot be verified, so appending is refused unless this is set. |
+| `append_recompute_trailing`      | `int`                       | `0`                                          | Recompute the `N` newest timesteps the cube already holds instead of skipping them, overwriting them in place. Use it when the previous run's last `time_composite_freq` bin was aggregated before all of its acquisitions were published. Only stored timesteps still covered by the requested `datetime` range qualify. The timesteps are cleared before being recomputed, so an interrupted run leaves them NoData. Requires `append=True`. |
 | `zarr_store_chunk_size`          | `dict`                      | `{"time": 10, "x": 250, "y": 250}`           | Chunk sizes for zarr storage. Must contain the keys 'time', 'y', and 'x'. Controls the size of data chunks for efficient storage and retrieval.                                                                                                                                                                                                           |
 | `resampling_method`              | `rasterio.enums.Resampling` | `Resampling.nearest`                         | Specifies the resampling method that is used to reproject the raw data into the target CRS. It is recommended to use nearest neighbor to prevent potential issues near cloud edges and dynamic range changes.                                                                                                                                             |
 | `save_as_uint16` | `bool` | `False` | When `True` and `S1_assets` is `None`, store Sentinel-2 bands as unsigned 16-bit integers with zeros for nodata. NaNs are rounded and clipped into `[0, 65535]` before saving. |

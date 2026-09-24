@@ -26,6 +26,7 @@ from .append import (
     build_store_config,
     check_append_compatible,
     check_composite_grid_alignment,
+    clear_timesteps,
     commit_append,
     extend_time_axis,
     open_cube_for_append,
@@ -272,6 +273,7 @@ def validate_user_input(
     overwrite: bool = False,
     append: bool = False,
     append_allow_missing_config: bool = False,
+    append_recompute_trailing: int = 0,
 ):
     # validate the data provider and its constraints
     if provider not in ("planetary_computer", "cdse"):
@@ -453,6 +455,15 @@ def validate_user_input(
         raise ValueError(
             "append_allow_missing_config=True only has an effect together "
             "with append=True")
+    if not isinstance(append_recompute_trailing,
+                      int) or isinstance(append_recompute_trailing, bool):
+        raise ValueError("append_recompute_trailing must be an integer")
+    if append_recompute_trailing < 0:
+        raise ValueError("append_recompute_trailing must not be negative")
+    if append_recompute_trailing and not append:
+        raise ValueError(
+            "append_recompute_trailing only has an effect together with "
+            "append=True")
 
     if save_as_uint16:
         sentinel1_disabled = (S1_assets
@@ -577,16 +588,28 @@ def band_chunk_size(S2_bands_to_save: list[str],
 
 
 def timestamp_index_map(timestamp_list: list[dict],
-                        start_index: int = 0) -> dict:
+                        start_index: int = 0,
+                        reuse: dict | None = None) -> dict:
     """Map each distinct timestamp to the time index it is written at.
 
     Timestamps are ordered most recent first, matching the order the ``time``
     coordinate is written in. ``start_index`` offsets the mapping for an
-    append, where the new timesteps go after the ones already stored.
+    append, where new timesteps go after the ones already stored. ``reuse``
+    maps timestamps that are being recomputed onto the index they already
+    occupy, so they are overwritten in place instead of appended.
     """
+    reuse = reuse or {}
     unique_timestamps = sorted(set(item["ts"] for item in timestamp_list),
                                reverse=True)
-    return {ts: start_index + i for i, ts in enumerate(unique_timestamps)}
+    mapping = {}
+    appended = 0
+    for ts in unique_timestamps:
+        if ts in reuse:
+            mapping[ts] = reuse[ts]
+        else:
+            mapping[ts] = start_index + appended
+            appended += 1
+    return mapping
 
 
 def setup_zarr_storage(
@@ -908,13 +931,23 @@ def open_and_validate_append(
     return store, root, reconsolidate
 
 
-def drop_stored_timestamps(root, timestamp_list: list[dict],
-                           time_composite_freq) -> tuple[list[dict], int]:
-    """Keep only the timesteps the cube does not hold yet.
+def drop_stored_timestamps(
+        root,
+        timestamp_list: list[dict],
+        time_composite_freq,
+        recompute_trailing: int = 0) -> tuple[list[dict], int, dict]:
+    """Keep the timesteps the cube does not hold yet, plus any to recompute.
 
     Comparison happens in the cube's own representation (int64 epoch seconds),
     which is the only thing a stored timestamp can be compared against.
-    Returns the filtered job list and the number of timesteps already stored.
+
+    ``recompute_trailing`` keeps the N newest *stored* timesteps in the job
+    list instead of skipping them, so they are computed again and overwritten
+    in place. "Newest" is by timestamp value, not by position, because the time
+    axis is not necessarily sorted after an earlier append.
+
+    Returns the filtered job list, the number of timesteps already stored, and
+    the map from recomputed timestamp to the index it already occupies.
     """
     existing_seconds = np.asarray(root["time"][:], dtype="int64")
     candidates = sorted({item["ts"] for item in timestamp_list}, reverse=True)
@@ -925,17 +958,42 @@ def drop_stored_timestamps(root, timestamp_list: list[dict],
     check_composite_grid_alignment(existing_seconds, candidate_seconds,
                                    time_composite_freq)
 
-    stored = {int(s) for s in existing_seconds}
-    new_timestamps = {
-        ts
-        for ts, seconds in zip(candidates, candidate_seconds)
-        if int(seconds) not in stored
-    }
+    stored = {}
+    for index, seconds in enumerate(existing_seconds):
+        # a duplicate stored timestamp can only come from a corrupted cube;
+        # keep the first index so the mapping stays deterministic
+        stored.setdefault(int(seconds), index)
 
-    skipped = len(candidates) - len(new_timestamps)
+    to_recompute = {}
+    if recompute_trailing > 0:
+        newest = sorted(stored, reverse=True)[:recompute_trailing]
+        to_recompute = {seconds: stored[seconds] for seconds in newest}
+
+    new_timestamps = set()
+    reuse_index_map = {}
+    for ts, seconds in zip(candidates, candidate_seconds):
+        seconds = int(seconds)
+        if seconds not in stored:
+            new_timestamps.add(ts)
+        elif seconds in to_recompute:
+            reuse_index_map[ts] = to_recompute[seconds]
+
+    skipped = len(candidates) - len(new_timestamps) - len(reuse_index_map)
     if skipped:
         print(f"Skipping {skipped} of {len(candidates)} timesteps that are "
               f"already stored in the cube.")
+    if reuse_index_map:
+        print(f"Recomputing {len(reuse_index_map)} already-stored timestep(s) "
+              f"in place (append_recompute_trailing="
+              f"{recompute_trailing}).")
+    if recompute_trailing > len(reuse_index_map):
+        # the newest stored timesteps are only recomputable if the requested
+        # range still covers them
+        warnings.warn(
+            f"append_recompute_trailing={recompute_trailing} but only "
+            f"{len(reuse_index_map)} of the newest stored timesteps fall "
+            f"inside the requested datetime range; the rest are left as they "
+            f"are.")
 
     if new_timestamps and len(existing_seconds) > 0:
         new_seconds = timestamps_to_stored_seconds(new_timestamps)
@@ -950,8 +1008,9 @@ def drop_stored_timestamps(root, timestamp_list: list[dict],
                 "xr.open_zarr(...).sortby(\"time\") if you rely on ordered "
                 "time selection (e.g. .sel(time=slice(...))).")
 
-    return [item for item in timestamp_list
-            if item["ts"] in new_timestamps], len(existing_seconds)
+    keep = new_timestamps | set(reuse_index_map)
+    return ([item for item in timestamp_list if item["ts"] in keep],
+            len(existing_seconds), reuse_index_map)
 
 
 def process(
@@ -981,6 +1040,7 @@ def process(
     overwrite: bool = False,
     append: bool = False,
     append_allow_missing_config: bool = False,
+    append_recompute_trailing: int = 0,
     zarr_store_chunk_size: dict = {
         "time": 10,
         "x": 250,
@@ -1102,6 +1162,20 @@ def process(
        NBAR, provider, resampling, composite method) cannot be verified, so
        appending is refused unless this is set. Only use it when you know the
        call matches the run that created the cube.
+    append_recompute_trailing: int, default=0
+       Recompute the ``N`` newest timesteps that the cube already holds,
+       instead of skipping them, and overwrite them in place. Use it when the
+       previous run's last ``time_composite_freq`` bin was aggregated before
+       all of its acquisitions had been published, which leaves that bin thin
+       forever because an append otherwise never revisits a stored timestep.
+       Only the stored timesteps that the requested ``datetime`` range still
+       covers can be recomputed; if fewer than ``N`` qualify, sentle warns.
+
+       The timesteps are cleared before being recomputed, because a composite
+       writes only where it found data and would otherwise leave the previous
+       run's pixels in the gaps of the new one. A run that fails partway
+       therefore leaves them NoData rather than restoring them -- sentle says
+       so explicitly when it rolls back. Requires ``append=True``.
     coord_save_mode: str, default="top-left"
        Specifies how coordinates are saved in zarr. Options:
          - "top-left": (default) coordinates represent the top-left corner of each pixel (current behavior)
@@ -1148,6 +1222,7 @@ def process(
         overwrite=overwrite,
         append=append,
         append_allow_missing_config=append_allow_missing_config,
+        append_recompute_trailing=append_recompute_trailing,
     )
 
     # instantiate the data provider (Planetary Computer or CDSE)
@@ -1278,9 +1353,12 @@ def process(
     bound_left, bound_bottom, bound_right, bound_top = (grid_left, grid_bottom,
                                                         grid_right, grid_top)
 
+    recomputed_indices = []
     if append:
-        timestamp_list, committed_length = drop_stored_timestamps(
-            append_root, timestamp_list, time_composite_freq)
+        timestamp_list, committed_length, reuse_index_map = (
+            drop_stored_timestamps(append_root, timestamp_list,
+                                   time_composite_freq,
+                                   append_recompute_trailing))
         if not timestamp_list:
             warnings.warn(
                 "Nothing to append: every timestep in the requested range is "
@@ -1290,11 +1368,23 @@ def process(
 
         # the mapping is the single source of the order the new timesteps go
         # in, so the time coordinate and the writes cannot disagree
-        ts_index_map = timestamp_index_map(timestamp_list, committed_length)
+        ts_index_map = timestamp_index_map(timestamp_list, committed_length,
+                                           reuse=reuse_index_map)
+        appended_timestamps = [
+            ts for ts in ts_index_map if ts not in reuse_index_map
+        ]
         extend_time_axis(
             append_root, append_store,
             timestamps_to_stored_seconds(
-                sorted(ts_index_map, key=ts_index_map.get)), reconsolidate)
+                sorted(appended_timestamps, key=ts_index_map.get)),
+            reconsolidate)
+
+        # recomputed timesteps are overwritten in place, so wipe them first --
+        # otherwise the old run's pixels survive wherever the new one has a gap
+        recomputed_indices = sorted(reuse_index_map.values())
+        if recomputed_indices:
+            clear_timesteps(append_root, recomputed_indices)
+
         sync_file_path = sync_file_path_for(zarr_store_chunk_size,
                                             processing_spatial_chunk_size)
     else:
@@ -1438,13 +1528,14 @@ def process(
             # the cube must never end up claiming timesteps that were not
             # fully processed, so drop the ones this run added
             rollback_append(append_root, append_store, committed_length,
-                            reconsolidate)
+                            reconsolidate, recomputed_indices)
             append_store.close()
         raise
 
     if append:
         commit_append(append_root, append_store,
-                      committed_length + len(ts_index_map), reconsolidate)
+                      committed_length + len(appended_timestamps),
+                      reconsolidate)
         append_store.close()
 
     # close cloud queue

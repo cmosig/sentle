@@ -55,7 +55,7 @@ def fake_pipeline(monkeypatch):
     process.
     """
     state = types.SimpleNamespace(timestamps=[], written=[], fail_on=None,
-                                  silent=False)
+                                  silent=False, value_offset=0.0)
 
     def fake_retrieve_timestamps(**kwargs):
         return [{
@@ -74,7 +74,7 @@ def fake_pipeline(monkeypatch):
         slices = kwargs["zarr_save_slice"]
         data = zarr.open(kwargs["zarr_store"])["sentle"]
         data[slices["time"], slices["band"], slices["y"],
-             slices["x"]] = _value_for(ts)
+             slices["x"]] = _value_for(ts) + state.value_offset
         return kwargs["job_id"]
 
     monkeypatch.setattr(sentle_mod, "retrieve_timestamps",
@@ -651,3 +651,116 @@ def test_inconsistent_committed_length_is_refused(cube, fake_pipeline):
     fake_pipeline.timestamps = [T3]
     with pytest.raises(ValueError, match="inconsistent"):
         _run(cube, append=True)
+
+
+# ------------------------------------------------ recomputing stored bins
+
+
+def test_recompute_trailing_overwrites_the_newest_stored_timestep(
+        cube, fake_pipeline):
+    # the cube holds T2 (newest) at index 0 and T1 at index 1
+    fake_pipeline.timestamps = [T1, T2, T3]
+    fake_pipeline.value_offset = 1000.0
+    _run(cube, append=True, append_recompute_trailing=1)
+
+    data = _open(cube)["sentle"][:]
+    assert data.shape[0] == 3
+    # T2 was recomputed in place, with the new run's value
+    assert np.all(data[0] == _value_for(T2) + 1000.0)
+    # T1 was left exactly as it was
+    assert np.all(data[1] == _value_for(T1))
+    # T3 was appended
+    assert np.all(data[2] == _value_for(T3) + 1000.0)
+    assert sorted(fake_pipeline.written) == [T2, T3]
+
+
+def test_recompute_trailing_does_not_change_the_time_axis(cube,
+                                                          fake_pipeline):
+    before = _times(cube)
+    fake_pipeline.timestamps = [T1, T2]      # nothing new, only a recompute
+    fake_pipeline.value_offset = 7.0
+    _run(cube, append=True, append_recompute_trailing=1)
+
+    assert _times(cube) == before
+    assert _open(cube)["sentle"].shape[0] == 2
+    assert _manifest(cube)["time_committed"] == 2
+    assert np.all(_open(cube)["sentle"][0] == _value_for(T2) + 7.0)
+
+
+def test_recompute_trailing_clears_the_timestep_first(cube, fake_pipeline):
+    # a composite writes only where it has data; if the recomputed run finds
+    # none, the bin must end up NoData rather than keeping the old pixels
+    fake_pipeline.timestamps = [T1, T2]
+    fake_pipeline.silent = True
+    _run(cube, append=True, append_recompute_trailing=1)
+
+    data = _open(cube)["sentle"][:]
+    assert np.isnan(data[0]).all(), "stale pixels survived the recompute"
+    assert np.all(data[1] == _value_for(T1)), "the other timestep was touched"
+
+
+def test_recompute_trailing_picks_the_newest_by_value_not_position(
+        cube, fake_pipeline):
+    # after this append the axis is [T2, T1, T3] -- non-monotonic, newest last
+    fake_pipeline.timestamps = [T3]
+    _run(cube, append=True)
+    assert _times(cube)[-1] == T3.tz_localize(None)
+
+    fake_pipeline.written.clear()
+    fake_pipeline.timestamps = [T1, T2, T3]
+    fake_pipeline.value_offset = 500.0
+    _run(cube, append=True, append_recompute_trailing=1)
+
+    # T3 is the newest timestamp, and it sits at index 2, not index 0
+    assert fake_pipeline.written == [T3]
+    data = _open(cube)["sentle"][:]
+    assert np.all(data[2] == _value_for(T3) + 500.0)
+    assert np.all(data[0] == _value_for(T2))
+    assert np.all(data[1] == _value_for(T1))
+
+
+def test_recompute_trailing_beyond_the_requested_range_warns(cube,
+                                                             fake_pipeline):
+    # only T2 is inside the requested range, so only one can be recomputed
+    fake_pipeline.timestamps = [T2, T3]
+    with pytest.warns(UserWarning, match="only 1 of the newest stored"):
+        _run(cube, append=True, append_recompute_trailing=2)
+
+    assert _open(cube)["sentle"].shape[0] == 3
+
+
+def test_recompute_trailing_requires_append(cube, fake_pipeline):
+    with pytest.raises(ValueError, match="only has an effect"):
+        _run(cube, append_recompute_trailing=1)
+
+
+@pytest.mark.parametrize("bad", [-1, 1.5, "1", True])
+def test_recompute_trailing_rejects_bad_values(cube, fake_pipeline, bad):
+    with pytest.raises(ValueError, match="append_recompute_trailing"):
+        _run(cube, append=True, append_recompute_trailing=bad)
+
+
+def test_failed_recompute_says_the_timesteps_were_cleared(cube,
+                                                          fake_pipeline):
+    fake_pipeline.timestamps = [T2, T3]
+    fake_pipeline.fail_on = T3
+
+    with pytest.warns(UserWarning, match="are now NoData"):
+        with pytest.raises(Exception):
+            _run(cube, append=True, append_recompute_trailing=1)
+
+    # the appended timestep is rolled back; the recomputed one stays cleared
+    assert _open(cube)["sentle"].shape[0] == 2
+    assert _manifest(cube)["time_committed"] == 2
+    assert np.isnan(_open(cube)["sentle"][0]).all()
+
+
+def test_recompute_trailing_of_several_timesteps(cube, fake_pipeline):
+    fake_pipeline.timestamps = [T1, T2]
+    fake_pipeline.value_offset = 3.0
+    _run(cube, append=True, append_recompute_trailing=2)
+
+    data = _open(cube)["sentle"][:]
+    assert np.all(data[0] == _value_for(T2) + 3.0)
+    assert np.all(data[1] == _value_for(T1) + 3.0)
+    assert _open(cube)["sentle"].shape[0] == 2
