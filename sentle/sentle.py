@@ -28,11 +28,12 @@ from .append import (
     check_composite_grid_alignment,
     clear_timesteps,
     commit_append,
-    extend_time_axis,
+    insert_time_slots,
     open_cube_for_append,
     read_store_config,
     recover_interrupted_append,
     rollback_append,
+    time_axis_order,
     timestamps_to_stored_seconds,
     write_store_config,
 )
@@ -770,7 +771,7 @@ def setup_zarr_storage(
         write_store_config(
             root,
             dict(store_config, time_committed=len(unique_timestamps),
-                 append_in_progress=None))
+                 time_order="descending", append_in_progress=None))
     elif SENTLE_CONFIG_ATTR in root.attrs:
         # never leave a manifest describing a cube that no longer exists
         del root.attrs[SENTLE_CONFIG_ATTR]
@@ -890,10 +891,10 @@ def open_and_validate_append(
 ):
     """Open the cube to append to and refuse the call if it does not fit.
 
-    Returns ``(store, root, reconsolidate)``. Raises before touching the cube
-    if the requested configuration disagrees with what is stored; only once
-    the call is known to be compatible is a previously interrupted append
-    rolled back.
+    Returns ``(store, root, reconsolidate, time_order)``. Raises before
+    touching the cube if the requested configuration disagrees with what is
+    stored; only once the call is known to be compatible is a previously
+    interrupted append rolled back.
     """
     store, root, was_consolidated = open_cube_for_append(zarr_store)
     # consolidated metadata caches the array shapes an append changes, so it
@@ -924,11 +925,28 @@ def open_and_validate_append(
         # an append that was killed outright left the cube longer than what it
         # actually wrote; put it back before anything is measured against it
         recover_interrupted_append(root, store, reconsolidate)
+
+        # new timesteps are merged into their sorted position, which is only
+        # safe if what is already there is sorted
+        stored_config = read_store_config(root) or {}
+        seconds = np.asarray(root["time"][:], dtype="int64")
+        time_order = time_axis_order(seconds)
+        if time_order is None:
+            raise ValueError(
+                "Cannot append to this cube: its time coordinate is not "
+                "sorted, so new timesteps cannot be merged into it without "
+                "moving stored data to lower indices. This happens to cubes "
+                "appended to by a sentle version that grew the time axis at "
+                "the end regardless of where the new timestamps belonged. "
+                "Sort it once with "
+                "sentle.append.repair_time_order(<zarr_store>), then append "
+                "again.")
+        time_order = stored_config.get("time_order", time_order)
     except BaseException:
         store.close()
         raise
 
-    return store, root, reconsolidate
+    return store, root, reconsolidate, time_order
 
 
 def drop_stored_timestamps(
@@ -994,19 +1012,6 @@ def drop_stored_timestamps(
             f"{len(reuse_index_map)} of the newest stored timesteps fall "
             f"inside the requested datetime range; the rest are left as they "
             f"are.")
-
-    if new_timestamps and len(existing_seconds) > 0:
-        new_seconds = timestamps_to_stored_seconds(new_timestamps)
-        if int(new_seconds.max()) > int(existing_seconds.min()):
-            # a run writes its timesteps most recent first and an append can
-            # only grow the axis at the end, so anything but a pure backfill
-            # leaves the time coordinate unsorted
-            warnings.warn(
-                "The appended timesteps are not all older than the stored "
-                "ones, so the time coordinate of this cube is no longer "
-                "monotonic. Read it with "
-                "xr.open_zarr(...).sortby(\"time\") if you rely on ordered "
-                "time selection (e.g. .sel(time=slice(...))).")
 
     keep = new_timestamps | set(reuse_index_map)
     return ([item for item in timestamp_list if item["ts"] in keep],
@@ -1150,10 +1155,13 @@ def process(
        Requires an existing cube (run once with ``append=False`` to create
        it) and is mutually exclusive with ``overwrite``.
 
-       New timesteps are appended at the end of the time axis. A cube written
-       in one run is ordered most recent first, so appending *newer* data
-       leaves the time coordinate non-monotonic; read such a cube with
-       ``xr.open_zarr(...).sortby("time")``.
+       New timesteps are merged into their sorted position, so the time
+       coordinate stays ordered (most recent first) and stays usable with
+       ``.sel(time=slice(...))``. Making room shifts the stored timesteps down
+       the axis, so an append rewrites the cube's data rather than only its
+       metadata; backfilling older data needs no shift. A cube whose axis is
+       already unsorted is refused -- sort it once with
+       ``sentle.append.repair_time_order``.
     append_allow_missing_config: bool, default=False
        Allow ``append=True`` against a cube created before sentle recorded its
        configuration in the store. Such a cube is still checked against
@@ -1322,7 +1330,8 @@ def process(
         # opens the cube, rolls back a previously interrupted append and
         # raises if this call disagrees with what is stored -- all before a
         # single byte is written
-        append_store, append_root, reconsolidate = open_and_validate_append(
+        (append_store, append_root, reconsolidate,
+         append_time_order) = open_and_validate_append(
             zarr_store=zarr_store,
             store_config=store_config,
             consolidate_metadata=consolidate_metadata,
@@ -1366,22 +1375,34 @@ def process(
             append_store.close()
             return
 
-        # the mapping is the single source of the order the new timesteps go
-        # in, so the time coordinate and the writes cannot disagree
-        ts_index_map = timestamp_index_map(timestamp_list, committed_length,
-                                           reuse=reuse_index_map)
-        appended_timestamps = [
-            ts for ts in ts_index_map if ts not in reuse_index_map
+        # New timesteps are inserted at their sorted position rather than
+        # tacked onto the end, so the cube's time coordinate stays ordered and
+        # xr.open_zarr(...).sel(time=slice(...)) keeps working.
+        new_timestamps = [
+            ts for ts in sorted({item["ts"]
+                                 for item in timestamp_list}, reverse=True)
+            if ts not in reuse_index_map
         ]
-        extend_time_axis(
+        slots, destinations = insert_time_slots(
             append_root, append_store,
-            timestamps_to_stored_seconds(
-                sorted(appended_timestamps, key=ts_index_map.get)),
+            timestamps_to_stored_seconds(new_timestamps), append_time_order,
             reconsolidate)
+
+        ts_index_map = {
+            ts: int(slot)
+            for ts, slot in zip(new_timestamps, slots)
+        }
+        # the shift moved the stored timesteps, so a timestep being recomputed
+        # is no longer at the index it occupied before
+        ts_index_map.update({
+            ts: int(destinations[index])
+            for ts, index in reuse_index_map.items()
+        })
 
         # recomputed timesteps are overwritten in place, so wipe them first --
         # otherwise the old run's pixels survive wherever the new one has a gap
-        recomputed_indices = sorted(reuse_index_map.values())
+        recomputed_indices = sorted(
+            int(destinations[index]) for index in reuse_index_map.values())
         if recomputed_indices:
             clear_timesteps(append_root, recomputed_indices)
 
@@ -1534,8 +1555,7 @@ def process(
 
     if append:
         commit_append(append_root, append_store,
-                      committed_length + len(appended_timestamps),
-                      reconsolidate)
+                      committed_length + len(new_timestamps), reconsolidate)
         append_store.close()
 
     # close cloud queue

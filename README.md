@@ -123,12 +123,13 @@ does not match the cube on disk.
 
 Notes:
 
-- **Time order.** A cube is written most recent first, and an append can only
-  grow the time axis at its end. Appending *newer* data therefore leaves the
-  time coordinate non-monotonic (sentle warns when it does); read such a cube
-  with `xr.open_zarr("mycube.zarr").sortby("time")` if you rely on ordered time
-  selection such as `.sel(time=slice(...))`. Appending strictly older data keeps
-  the axis sorted.
+- **Time order.** The time coordinate stays sorted (most recent first, as it
+  always is). New timesteps are merged into their sorted position rather than
+  tacked onto the end, so `.sel(time=slice(...))` and friends keep working
+  without the reader having to sort anything. Appending newer data does mean
+  the stored timesteps shift down the axis to make room, so an append rewrites
+  the cube's data — it is not a cheap metadata-only operation. Backfilling
+  older data needs no shift at all.
 - **Composites.** With `time_composite_freq` set, the bin boundaries are
   anchored to the epoch, so a second run lands on the same bins as the first no
   matter where its date range starts. A bin is either already stored (skipped
@@ -149,9 +150,13 @@ Notes:
   the previous run's pixels in the new one's gaps. An interrupted run therefore
   leaves them NoData, and sentle says so when it rolls back.
 - **Interruptions.** An append that fails rolls the cube back to its previous
-  length, so it never claims timesteps that were not written. If the process is
-  killed outright, the next append detects the partial state, warns, and rolls
-  it back before continuing.
+  state — undoing the shift as well as the resize — so it never claims
+  timesteps that were not written. If the process is killed outright, the next
+  append detects the partial state, warns, and rolls it back before continuing.
+- **Cubes left unsorted by an earlier sentle.** An append refuses to touch a
+  cube whose time axis is not sorted, because merging into it would have to
+  move stored data to lower indices. Sort it once with
+  `sentle.append.repair_time_order("mycube.zarr")` and append again.
 - Cubes created by sentle versions that did not record their configuration in
   the store cannot be fully validated; see `append_allow_missing_config`.
 
@@ -217,7 +222,7 @@ The package contains only one main function for retrieving and processing Sentin
 | `S2_apply_snow_mask`             | `bool`                      | `False`                                      | Whether to replace snow with NaN.                                                                                                                                                                                                                                                                                                                         |
 | `S2_apply_cloud_mask`            | `bool`                      | `False`                                      | Whether to replace anything that is not clear sky with NaN.                                                                                                                                                                                                                                                                                               |
 | `overwrite`                      | `bool`                      | `False`                                      | Whether to replace an existing zarr storage at `zarr_store`. Mutually exclusive with `append`. |
-| `append`                         | `bool`                      | `False`                                      | Extend the cube that already exists at `zarr_store` along the **time axis** instead of creating a new one: only the timesteps that are not stored yet are downloaded, and the ones already present are skipped rather than recomputed. Every parameter that shapes the pixels must match the cube on disk (see *Appending to an existing cube* in the Guide above); a mismatch raises before anything is written. Requires an existing cube and is mutually exclusive with `overwrite`. |
+| `append`                         | `bool`                      | `False`                                      | Extend the cube that already exists at `zarr_store` along the **time axis** instead of creating a new one: only the timesteps that are not stored yet are downloaded, and the ones already present are skipped rather than recomputed. New timesteps are merged into their sorted position, so the time coordinate stays ordered. Every parameter that shapes the pixels must match the cube on disk (see *Appending to an existing cube* in the Guide above); a mismatch raises before anything is written. Requires an existing cube and is mutually exclusive with `overwrite`. |
 | `append_allow_missing_config`    | `bool`                      | `False`                                      | Allow `append=True` against a cube created before sentle started recording its configuration in the store. Such a cube is still checked against everything derivable from it (CRS, x/y grid, band list, dtype, chunk sizes, composite bin spacing), but the rest (masking, NBAR, provider, resampling, composite method) cannot be verified, so appending is refused unless this is set. |
 | `append_recompute_trailing`      | `int`                       | `0`                                          | Recompute the `N` newest timesteps the cube already holds instead of skipping them, overwriting them in place. Use it when the previous run's last `time_composite_freq` bin was aggregated before all of its acquisitions were published. Only stored timesteps still covered by the requested `datetime` range qualify. The timesteps are cleared before being recomputed, so an interrupted run leaves them NoData. Requires `append=True`. |
 | `zarr_store_chunk_size`          | `dict`                      | `{"time": 10, "x": 250, "y": 250}`           | Chunk sizes for zarr storage. Must contain the keys 'time', 'y', and 'x'. Controls the size of data chunks for efficient storage and retrieval.                                                                                                                                                                                                           |

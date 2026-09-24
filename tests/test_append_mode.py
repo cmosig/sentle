@@ -131,6 +131,12 @@ def _manifest(store):
     return _open(store).attrs[SENTLE_CONFIG_ATTR]
 
 
+def _at(store, ts):
+    """The data slice stored for ``ts`` -- looked up, not assumed positional."""
+    index = _times(store).index(pd.Timestamp(ts).tz_localize(None))
+    return _open(store)["sentle"][index]
+
+
 # ---------------------------------------------------------------- happy path
 
 
@@ -151,13 +157,31 @@ def test_append_adds_the_new_timesteps(cube, fake_pipeline):
     _run(cube, append=True)
 
     assert _open(cube)["sentle"].shape[0] == 4
+    # newest first, and the new bins are merged into place rather than tacked
+    # onto the end
     assert _times(cube) == [
-        T2.tz_localize(None),
-        T1.tz_localize(None),
         T4.tz_localize(None),
         T3.tz_localize(None),
+        T2.tz_localize(None),
+        T1.tz_localize(None),
     ]
     assert sorted(fake_pipeline.written) == [T3, T4]
+
+
+def test_append_keeps_the_time_axis_sorted(cube, fake_pipeline):
+    # the whole point: a cube stays readable with .sel(time=slice(...))
+    for batch in ([T3], [T_OLD], [T4], [pd.Timestamp("2023-06-03", tz="UTC")]):
+        fake_pipeline.timestamps = batch
+        _run(cube, append=True)
+        times = _times(cube)
+        assert times == sorted(times, reverse=True), f"unsorted after {batch}"
+
+    ds = xr.open_zarr(str(cube))
+    assert list(pd.to_datetime(ds.time.values)) == sorted(
+        pd.to_datetime(ds.time.values), reverse=True)
+    # ascending slice selection works without the caller sorting first
+    window = ds.sortby("time").sel(time=slice("2023-06-01", "2023-07-01"))
+    assert window.sizes["time"] == 4
 
 
 def test_append_preserves_the_data_already_stored(cube, fake_pipeline):
@@ -165,8 +189,9 @@ def test_append_preserves_the_data_already_stored(cube, fake_pipeline):
     fake_pipeline.timestamps = [T3, T4]
     _run(cube, append=True)
 
+    # the stored bins moved down the axis to make room, values unchanged
     after = _open(cube)["sentle"][:]
-    assert np.array_equal(before, after[:2])
+    assert np.array_equal(before, after[2:])
 
 
 def test_append_writes_each_timestep_at_its_own_index(cube, fake_pipeline):
@@ -174,7 +199,7 @@ def test_append_writes_each_timestep_at_its_own_index(cube, fake_pipeline):
     _run(cube, append=True)
 
     data = _open(cube)["sentle"][:]
-    for index, ts in enumerate([T2, T1, T4, T3]):
+    for index, ts in enumerate([T4, T3, T2, T1]):
         assert np.all(data[index] == _value_for(ts)), f"wrong data at {ts}"
 
 
@@ -209,10 +234,14 @@ def test_append_can_backfill_older_timesteps(cube, fake_pipeline):
     assert times[-1] == T_OLD.tz_localize(None)
 
 
-def test_append_of_newer_data_warns_that_time_is_unsorted(cube, fake_pipeline):
+def test_append_of_newer_data_keeps_the_axis_sorted(cube, fake_pipeline):
     fake_pipeline.timestamps = [T3]
-    with pytest.warns(UserWarning, match="no longer monotonic"):
-        _run(cube, append=True)
+    _run(cube, append=True)
+
+    times = _times(cube)
+    assert times == [T3.tz_localize(None), T2.tz_localize(None),
+                     T1.tz_localize(None)]
+    assert np.all(_open(cube)["sentle"][0] == _value_for(T3))
 
 
 def test_append_can_fill_a_gap_between_stored_timesteps(cube, fake_pipeline):
@@ -220,9 +249,10 @@ def test_append_can_fill_a_gap_between_stored_timesteps(cube, fake_pipeline):
     fake_pipeline.timestamps = [middle]
     _run(cube, append=True)
 
-    cube_ds = xr.open_zarr(str(cube)).sortby("time")
+    cube_ds = xr.open_zarr(str(cube))
+    # inserted between T1 and T2 without the caller having to sort
     assert list(cube_ds.time.values) == [
-        np.datetime64(ts.tz_localize(None)) for ts in (T1, middle, T2)
+        np.datetime64(ts.tz_localize(None)) for ts in (T2, middle, T1)
     ]
     # the gap-filled timestep carries its own data, at its own place
     assert np.all(
@@ -237,10 +267,9 @@ def test_appended_cube_is_readable_by_xarray(cube, fake_pipeline):
     assert ds.sizes["time"] == 4
     assert ds.sizes["x"] == 20 and ds.sizes["y"] == 20
     assert list(ds.band.values) == BANDS
-    # non-monotonic after the append, but sortable
-    ordered = ds.sortby("time")
-    assert list(pd.to_datetime(ordered.time.values)) == [
-        ts.tz_localize(None) for ts in (T1, T2, T3, T4)
+    # still newest-first, and still sorted
+    assert list(pd.to_datetime(ds.time.values)) == [
+        ts.tz_localize(None) for ts in (T4, T3, T2, T1)
     ]
 
 
@@ -481,8 +510,9 @@ def test_composite_append_continues_the_same_bin_grid(composite_cube):
          time_composite_method="mean")
 
     after = _times(composite_cube)
-    # every stored bin survives untouched
-    assert after[:len(before)] == before
+    # every stored bin survives, and the axis is still sorted
+    assert set(before) <= set(after)
+    assert after == sorted(after, reverse=True)
     # and every bin, old or new, sits on the same 7-day lattice
     offsets = {(ts - after[0]).total_seconds() % (7 * 86400) for ts in after}
     assert offsets == {0.0}
@@ -663,14 +693,13 @@ def test_recompute_trailing_overwrites_the_newest_stored_timestep(
     fake_pipeline.value_offset = 1000.0
     _run(cube, append=True, append_recompute_trailing=1)
 
-    data = _open(cube)["sentle"][:]
-    assert data.shape[0] == 3
-    # T2 was recomputed in place, with the new run's value
-    assert np.all(data[0] == _value_for(T2) + 1000.0)
+    assert _open(cube)["sentle"].shape[0] == 3
+    # T2 was recomputed with the new run's value, wherever it now sits
+    assert np.all(_at(cube, T2) == _value_for(T2) + 1000.0)
     # T1 was left exactly as it was
-    assert np.all(data[1] == _value_for(T1))
-    # T3 was appended
-    assert np.all(data[2] == _value_for(T3) + 1000.0)
+    assert np.all(_at(cube, T1) == _value_for(T1))
+    # T3 was inserted
+    assert np.all(_at(cube, T3) == _value_for(T3) + 1000.0)
     assert sorted(fake_pipeline.written) == [T2, T3]
 
 
@@ -701,22 +730,21 @@ def test_recompute_trailing_clears_the_timestep_first(cube, fake_pipeline):
 
 def test_recompute_trailing_picks_the_newest_by_value_not_position(
         cube, fake_pipeline):
-    # after this append the axis is [T2, T1, T3] -- non-monotonic, newest last
+    # T3 is the newest timestamp but it is not the newest *stored* one until
+    # it is merged in; after this append it sits at index 0
     fake_pipeline.timestamps = [T3]
     _run(cube, append=True)
-    assert _times(cube)[-1] == T3.tz_localize(None)
+    assert _times(cube)[0] == T3.tz_localize(None)
 
     fake_pipeline.written.clear()
     fake_pipeline.timestamps = [T1, T2, T3]
     fake_pipeline.value_offset = 500.0
     _run(cube, append=True, append_recompute_trailing=1)
 
-    # T3 is the newest timestamp, and it sits at index 2, not index 0
     assert fake_pipeline.written == [T3]
-    data = _open(cube)["sentle"][:]
-    assert np.all(data[2] == _value_for(T3) + 500.0)
-    assert np.all(data[0] == _value_for(T2))
-    assert np.all(data[1] == _value_for(T1))
+    assert np.all(_at(cube, T3) == _value_for(T3) + 500.0)
+    assert np.all(_at(cube, T2) == _value_for(T2))
+    assert np.all(_at(cube, T1) == _value_for(T1))
 
 
 def test_recompute_trailing_beyond_the_requested_range_warns(cube,
@@ -764,3 +792,128 @@ def test_recompute_trailing_of_several_timesteps(cube, fake_pipeline):
     assert np.all(data[0] == _value_for(T2) + 3.0)
     assert np.all(data[1] == _value_for(T1) + 3.0)
     assert _open(cube)["sentle"].shape[0] == 2
+
+
+# ------------------------------------------- the sorted-axis invariant
+
+
+def test_stored_data_moves_down_to_make_room(cube, fake_pipeline):
+    before = _open(cube)["sentle"][:]
+    before_times = _times(cube)
+    fake_pipeline.timestamps = [T3, T4]
+    _run(cube, append=True)
+
+    after = _open(cube)["sentle"][:]
+    after_times = _times(cube)
+    # the two stored bins are now at the bottom of the axis, values intact
+    assert after_times[2:] == before_times
+    assert np.array_equal(after[2:], before)
+
+
+def test_backfill_leaves_stored_bins_where_they_were(cube, fake_pipeline):
+    before = _open(cube)["sentle"][:]
+    fake_pipeline.timestamps = [T_OLD]
+    _run(cube, append=True)
+
+    # a pure backfill sorts after everything stored, so nothing has to move
+    after = _open(cube)["sentle"][:]
+    assert np.array_equal(after[:2], before)
+    assert np.all(_at(cube, T_OLD) == _value_for(T_OLD))
+    assert _times(cube) == sorted(_times(cube), reverse=True)
+
+
+def test_inserted_slot_does_not_inherit_shifted_data(cube, fake_pipeline):
+    # the shift copies rather than moves, so a slot the run finds no data for
+    # must read back as NoData, not as whatever used to sit at that index
+    fake_pipeline.timestamps = [T3]
+    fake_pipeline.silent = True
+    _run(cube, append=True)
+
+    assert np.isnan(_at(cube, T3)).all()
+    assert np.all(_at(cube, T2) == _value_for(T2))
+    assert np.all(_at(cube, T1) == _value_for(T1))
+
+
+def test_failed_append_restores_the_original_layout(cube, fake_pipeline):
+    before = _open(cube)["sentle"][:]
+    before_times = _times(cube)
+    fake_pipeline.timestamps = [T3, T4]
+    fake_pipeline.fail_on = T4
+
+    with pytest.raises(Exception):
+        _run(cube, append=True)
+
+    # the shift has to be undone, not just the axis truncated
+    assert _open(cube)["sentle"].shape[0] == 2
+    assert _times(cube) == before_times
+    assert np.array_equal(_open(cube)["sentle"][:], before)
+
+
+def test_killed_append_mid_shift_is_repaired(cube, fake_pipeline):
+    before = _open(cube)["sentle"][:]
+    before_times = _times(cube)
+
+    # stop the run right after the shift, before any data is written
+    # (insert_time_slots clears the new slots, so that is the seam)
+    import sentle.append as append_mod
+    real_clear = append_mod.clear_timesteps
+
+    def boom(*a, **k):
+        real_clear(*a, **k)
+        raise KeyboardInterrupt("killed mid-append")
+
+    fake_pipeline.timestamps = [T3, T4]
+    with pytest.raises(KeyboardInterrupt):
+        append_mod.clear_timesteps = boom
+        try:
+            _run(cube, append=True)
+        finally:
+            append_mod.clear_timesteps = real_clear
+
+    # the cube is left claiming 4 timesteps; the next append must repair it
+    fake_pipeline.timestamps = [T3]
+    with pytest.warns(UserWarning, match="did not finish"):
+        _run(cube, append=True)
+
+    assert _times(cube) == [T3.tz_localize(None)] + before_times
+    assert np.array_equal(_open(cube)["sentle"][1:], before)
+    assert np.all(_at(cube, T3) == _value_for(T3))
+
+
+def test_unsorted_cube_is_refused_and_can_be_repaired(cube, fake_pipeline):
+    from sentle.append import repair_time_order
+
+    # forge the layout the old append produced: sorted block + newer block
+    root = zarr.open_group(str(cube), mode="a", use_consolidated=False)
+    data, time = root["sentle"], root["time"]
+    data.resize((3, ) + tuple(data.shape[1:]))
+    time.resize((3, ))
+    time[2] = int(T3.tz_localize(None).timestamp())
+    data[2] = _value_for(T3)
+    config = dict(root.attrs[SENTLE_CONFIG_ATTR])
+    config["time_committed"] = 3
+    root.attrs[SENTLE_CONFIG_ATTR] = config
+    zarr.consolidate_metadata(zarr.storage.LocalStore(str(cube)))
+    assert _times(cube) != sorted(_times(cube), reverse=True)
+
+    fake_pipeline.timestamps = [T4]
+    with pytest.raises(ValueError, match="repair_time_order"):
+        _run(cube, append=True)
+
+    assert repair_time_order(str(cube)) is True
+    assert _times(cube) == [T3.tz_localize(None), T2.tz_localize(None),
+                            T1.tz_localize(None)]
+    assert np.all(_at(cube, T3) == _value_for(T3))
+    assert np.all(_at(cube, T2) == _value_for(T2))
+    assert np.all(_at(cube, T1) == _value_for(T1))
+
+    # and it is appendable again
+    _run(cube, append=True)
+    assert _times(cube) == sorted(_times(cube), reverse=True)
+
+
+def test_repair_is_a_no_op_on_a_sorted_cube(cube):
+    from sentle.append import repair_time_order
+    before = _times(cube)
+    assert repair_time_order(str(cube)) is False
+    assert _times(cube) == before

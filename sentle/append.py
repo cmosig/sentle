@@ -30,6 +30,7 @@ and :func:`recover_interrupted_append` performs the same rollback at the start
 of the next append if the process was killed outright.
 """
 
+import os
 import warnings
 
 import numpy as np
@@ -472,6 +473,33 @@ def _truncate_time_axis(root, length: int) -> None:
     root["time"].resize((length, ))
 
 
+def _undo_insertion(root, committed: int, in_progress: dict | None) -> None:
+    """Put the cube back the way it was before an interrupted insertion.
+
+    The stored timesteps were shifted up to make room; move them back down and
+    restore the time coordinate before the axis is truncated. Both the shift
+    and this undo are idempotent, so it does not matter how far the interrupted
+    run got.
+    """
+    destinations = (in_progress or {}).get("destinations")
+    if not destinations:
+        return
+    destinations = np.asarray(destinations, dtype="int64")
+    if len(destinations) != committed:
+        raise ValueError(
+            f"The cube is inconsistent: an interrupted append recorded "
+            f"{len(destinations)} shifted timesteps but {committed} were "
+            f"committed. Refusing to touch it.")
+
+    time = root["time"]
+    seconds = np.asarray(time[:], dtype="int64")
+    _unshift_existing_timesteps(root, destinations, committed)
+    if (in_progress or {}).get("time_merged"):
+        # the coordinate was rewritten in merged order, so move it back too;
+        # if the run died before that, the original values never moved
+        time[:committed] = seconds[destinations]
+
+
 def recover_interrupted_append(root, store, reconsolidate: bool) -> int:
     """Roll a cube back to its last committed length, if it was interrupted.
 
@@ -497,6 +525,7 @@ def recover_interrupted_append(root, store, reconsolidate: bool) -> int:
         f"{stored_length} timesteps but only {committed} were committed. "
         f"Rolling the cube back to {committed} timesteps and discarding the "
         f"{stored_length - committed} partial ones.")
+    _undo_insertion(root, committed, config.get("append_in_progress"))
     _truncate_time_axis(root, committed)
     _update_store_config(root, time_committed=committed,
                          append_in_progress=None)
@@ -505,36 +534,213 @@ def recover_interrupted_append(root, store, reconsolidate: bool) -> int:
     return committed
 
 
-def extend_time_axis(root, store, new_seconds: np.ndarray,
-                     reconsolidate: bool) -> int:
-    """Grow the cube by ``len(new_seconds)`` timesteps and write their times.
+def time_axis_order(seconds: np.ndarray) -> str | None:
+    """``"descending"``, ``"ascending"``, or None if the axis is not sorted."""
+    seconds = np.asarray(seconds)
+    if len(seconds) < 2:
+        return "descending"
+    diffs = np.diff(seconds)
+    if (diffs < 0).all():
+        return "descending"
+    if (diffs > 0).all():
+        return "ascending"
+    return None
 
-    Returns the index the new timesteps start at. The manifest is marked as
-    having an append in progress *before* the arrays grow, so a hard kill
-    leaves a cube that the next append rolls back rather than one silently
-    claiming timesteps nobody wrote.
+
+def plan_sorted_insertion(existing_seconds: np.ndarray,
+                          new_seconds: np.ndarray, order: str):
+    """Where every timestep ends up once the new ones are merged in.
+
+    Returns ``(destinations, slots)``: ``destinations[i]`` is the final index
+    of the existing timestep currently at ``i``, and ``slots[j]`` the final
+    index of ``new_seconds[j]``.
+
+    Merging into an already-sorted axis only ever moves existing timesteps to
+    *higher* indices -- inserting can push data back but never pull it
+    forward. That is what makes the shift safe to perform in place: walking the
+    existing timesteps from the last one down, every write lands on an index at
+    or above the one being read, so a source is never clobbered before it is
+    moved.
+    """
+    reverse = order == "descending"
+    merged = sorted(
+        [(int(s), 0, i) for i, s in enumerate(existing_seconds)] +
+        [(int(s), 1, j) for j, s in enumerate(new_seconds)],
+        key=lambda item: item[0],
+        reverse=reverse)
+
+    destinations = np.empty(len(existing_seconds), dtype="int64")
+    slots = np.empty(len(new_seconds), dtype="int64")
+    for final_index, (_, is_new, origin) in enumerate(merged):
+        if is_new:
+            slots[origin] = final_index
+        else:
+            destinations[origin] = final_index
+
+    if len(destinations) and (destinations < np.arange(len(destinations))).any():
+        # only possible if the stored axis was not sorted to begin with
+        raise ValueError(
+            "Cannot insert into this cube in place: its time axis is not "
+            "sorted, so merging would have to move stored timesteps to lower "
+            "indices. Repair it first with sentle.append.repair_time_order().")
+    return destinations, slots
+
+
+def insert_time_slots(root, store, new_seconds: np.ndarray, order: str,
+                      reconsolidate: bool) -> np.ndarray:
+    """Make room for ``new_seconds`` at their sorted positions.
+
+    Returns ``(slots, destinations)``: the indices the new timesteps must be
+    written to, and where each previously stored timestep ended up. Existing
+    data is
+    shifted up to keep the time coordinate sorted, so the cube is never left
+    with an out-of-order axis for ``xr.open_zarr`` users to trip over.
+
+    The manifest is marked as having an append in progress *before* anything
+    moves, so a hard kill leaves a cube the next append repairs rather than one
+    silently claiming timesteps nobody wrote.
     """
     data = root["sentle"]
     time = root["time"]
     start = int(time.shape[0])
     new_length = start + len(new_seconds)
 
+    existing_seconds = np.asarray(time[:], dtype="int64")
+    destinations, slots = plan_sorted_insertion(existing_seconds, new_seconds,
+                                                order)
+
     _update_store_config(root,
                          time_committed=start,
                          append_in_progress={
                              "committed": start,
-                             "pending": new_length
+                             "pending": new_length,
+                             "order": order,
+                             "destinations": [int(d) for d in destinations],
+                             "slots": [int(v) for v in slots],
                          })
 
     data.resize((new_length, ) + tuple(data.shape[1:]))
     time.resize((new_length, ))
-    time[start:new_length] = new_seconds
+
+    _shift_existing_timesteps(root, destinations, start)
+
+    # the shift copies rather than moves, so every gap still holds a stale copy
+    # of whatever used to sit there. Clear them, or a timestep the download
+    # finds no data for would read back as another timestep's pixels.
+    clear_timesteps(root, [int(v) for v in slots])
+
+    # the coordinate goes last: until every slice has moved, the old values are
+    # what describes the data still sitting at the old indices
+    merged_seconds = np.empty(new_length, dtype="int64")
+    merged_seconds[destinations] = existing_seconds
+    merged_seconds[slots] = np.asarray(new_seconds, dtype="int64")
+    time[:] = merged_seconds
+    # from here on the coordinate describes the *merged* layout, so an undo has
+    # to permute it back; before this point the old values are still in place
+    _update_store_config(root,
+                         append_in_progress={
+                             "committed": start,
+                             "pending": new_length,
+                             "order": order,
+                             "destinations": [int(d) for d in destinations],
+                             "slots": [int(v) for v in slots],
+                             "time_merged": True,
+                         })
 
     if reconsolidate:
         # the workers re-open the store per tile and would otherwise read the
         # pre-resize shape from the consolidated metadata and fail out of bounds
         consolidate(store)
-    return start
+    return slots, destinations
+
+
+def _shift_existing_timesteps(root, destinations, count) -> None:
+    """Move stored timesteps up to their merged positions, last one first.
+
+    Copying downwards-to-upwards in descending index order never clobbers a
+    source: ``destinations[i] >= i`` always, and nothing below ``i`` has been
+    written yet. The copies are left behind rather than erased, which makes the
+    whole pass idempotent -- an interrupted shift is simply run again from the
+    start, and :func:`_unshift_existing_timesteps` can undo it the same way.
+    """
+    data = root["sentle"]
+    for i in range(int(count) - 1, -1, -1):
+        destination = int(destinations[i])
+        if destination != i:
+            data[destination] = data[i]
+
+
+def _unshift_existing_timesteps(root, destinations, count) -> None:
+    """Move stored timesteps back down, undoing :func:`_shift_existing_timesteps`.
+
+    Ascending order this time, for the mirror-image reason: every source still
+    to be read sits above the index just written. Also idempotent.
+    """
+    data = root["sentle"]
+    for i in range(int(count)):
+        destination = int(destinations[i])
+        if destination != i:
+            data[i] = data[destination]
+
+
+def repair_time_order(zarr_store, consolidate_metadata: bool = True) -> bool:
+    """Sort the time axis of a cube whose timesteps are out of order.
+
+    Cubes written by sentle always keep their time axis sorted. This repairs
+    one that does not -- a cube appended to by a sentle version that grew the
+    axis at the end regardless of where the new timestamps belonged. Returns
+    True if the cube was reordered, False if it was already sorted.
+
+    The reordered data is staged in a sibling array and swapped in only once it
+    is complete, so an interrupted repair leaves the original untouched.
+    """
+    store, root, was_consolidated = open_cube_for_append(zarr_store)
+    reconsolidate = was_consolidated or consolidate_metadata
+    try:
+        seconds = np.asarray(root["time"][:], dtype="int64")
+        if time_axis_order(seconds) is not None:
+            return False
+
+        config = read_store_config(root) or {}
+        order = config.get("time_order", "descending")
+        permutation = np.argsort(seconds, kind="stable")
+        if order == "descending":
+            permutation = permutation[::-1]
+
+        data = root["sentle"]
+        staging_path = "sentle__resort"
+        if staging_path in root:
+            del root[staging_path]
+        staging = zarr.create(
+            shape=data.shape,
+            chunks=data.chunks,
+            dtype=data.dtype,
+            fill_value=data.fill_value,
+            store=store,
+            path=f"/{staging_path}",
+            overwrite=True,
+            config=dict(write_empty_chunks=False),
+            dimension_names=["time", "band", "y", "x"],
+        )
+        for new_index, old_index in enumerate(permutation):
+            staging[new_index] = data[int(old_index)]
+
+        root["time"][:] = seconds[permutation]
+        for key, value in dict(data.attrs).items():
+            staging.attrs[key] = value
+        del root["sentle"]
+        store_root = str(zarr_store) if isinstance(zarr_store, str) else None
+        if store_root is None:
+            raise ValueError(
+                "repair_time_order currently supports local zarr stores only")
+        os.rename(os.path.join(store_root, staging_path),
+                  os.path.join(store_root, "sentle"))
+        _update_store_config(root, time_order=order)
+        if reconsolidate:
+            consolidate(store)
+        return True
+    finally:
+        store.close()
 
 
 def commit_append(root, store, length: int, reconsolidate: bool) -> None:
@@ -554,6 +760,8 @@ def rollback_append(root, store, committed: int, reconsolidate: bool,
     restored here -- say so loudly rather than leave the caller to discover
     empty timesteps later.
     """
+    _undo_insertion(root, int(committed),
+                    (read_store_config(root) or {}).get("append_in_progress"))
     _truncate_time_axis(root, committed)
     _update_store_config(root, time_committed=int(committed),
                          append_in_progress=None)
