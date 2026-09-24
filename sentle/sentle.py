@@ -21,6 +21,23 @@ from rasterio.enums import Resampling
 from tqdm.auto import tqdm
 from filelock import FileLock
 
+from .append import (
+    SENTLE_CONFIG_ATTR,
+    build_store_config,
+    check_append_compatible,
+    check_composite_grid_alignment,
+    apply_extension,
+    clear_timesteps,
+    commit_append,
+    open_cube_for_append,
+    read_store_config,
+    recover_interrupted_append,
+    plan_extension,
+    rollback_append,
+    time_axis_order,
+    timestamps_to_stored_seconds,
+    write_store_config,
+)
 from .cloud_mask import (
     S2_cloud_mask_band,
     S2_cloud_prob_bands,
@@ -255,6 +272,10 @@ def validate_user_input(
     save_as_uint16: bool = False,
     S2_bands: list[str] = S2_RAW_BANDS,
     provider: str = "planetary_computer",
+    overwrite: bool = False,
+    append: bool = False,
+    append_allow_missing_config: bool = False,
+    append_recompute_trailing: int = 0,
 ):
     # validate the data provider and its constraints
     if provider not in ("planetary_computer", "cdse"):
@@ -422,6 +443,30 @@ def validate_user_input(
     if not isinstance(save_as_uint16, bool):
         raise ValueError("save_as_uint16 must be a boolean")
 
+    # append: extend an existing cube along the time axis instead of creating
+    # one. Mutually exclusive with overwrite, which does the opposite.
+    if not isinstance(append, bool):
+        raise ValueError("append must be a boolean")
+    if not isinstance(append_allow_missing_config, bool):
+        raise ValueError("append_allow_missing_config must be a boolean")
+    if append and overwrite:
+        raise ValueError(
+            "append=True and overwrite=True are mutually exclusive: append "
+            "extends the existing cube, overwrite replaces it")
+    if append_allow_missing_config and not append:
+        raise ValueError(
+            "append_allow_missing_config=True only has an effect together "
+            "with append=True")
+    if not isinstance(append_recompute_trailing,
+                      int) or isinstance(append_recompute_trailing, bool):
+        raise ValueError("append_recompute_trailing must be an integer")
+    if append_recompute_trailing < 0:
+        raise ValueError("append_recompute_trailing must not be negative")
+    if append_recompute_trailing and not append:
+        raise ValueError(
+            "append_recompute_trailing only has an effect together with "
+            "append=True")
+
     if save_as_uint16:
         sentinel1_disabled = (S1_assets
                               is None) or (isinstance(S1_assets, list)
@@ -496,6 +541,79 @@ def validate_user_input(
                     f"S2_bands must include {missing} when S2_nbar is True")
 
 
+def sync_file_path_for(zarr_store_chunk_size: dict,
+                       processing_spatial_chunk_size: int) -> str | None:
+    """Path of the write lock, or None when the workers cannot collide.
+
+    Each worker writes one spatial chunk of one timestep. When the zarr chunks
+    line up exactly with those writes (one timestep per chunk, spatial chunks
+    of the processing size) no two workers ever touch the same chunk and the
+    lock can be skipped.
+    """
+    if (zarr_store_chunk_size["time"] == 1
+            and zarr_store_chunk_size["y"] == processing_spatial_chunk_size
+            and zarr_store_chunk_size["x"] == processing_spatial_chunk_size):
+        return None
+    return path.join(tempfile.gettempdir(), f"sentle_{currenttime()}.lock")
+
+
+def coordinate_arrays(bound_left: float, bound_top: float, width: int,
+                      height: int, target_resolution: float,
+                      coord_save_mode: str):
+    """The x/y coordinate arrays a cube with these bounds would hold.
+
+    Used both when creating a cube and when validating an append against one,
+    so grid alignment is checked against exactly what this call would have
+    written.
+    """
+    # build coordinates from integer pixel indices (bound + i * resolution)
+    # rather than np.arange over the bounds, so a fractional resolution can
+    # never produce an off-by-one number of coordinates vs. width/height.
+    x_coords = bound_left + np.arange(width) * target_resolution
+    y_coords = bound_top - np.arange(height) * target_resolution
+    if coord_save_mode == "center":
+        x_coords = x_coords + target_resolution / 2
+        y_coords = y_coords - target_resolution / 2
+    return x_coords.astype(np.float32), y_coords.astype(np.float32)
+
+
+def band_chunk_size(S2_bands_to_save: list[str],
+                    total_bands_to_save: list[str]) -> int:
+    """Chunk size along the band axis.
+
+    The band axis is chunked at the number of S2 bands so S1 and S2 write into
+    disjoint band chunks. When S2 is disabled there are no S2 bands, so fall
+    back to a single chunk spanning all (S1) bands.
+    """
+    return len(S2_bands_to_save) if len(S2_bands_to_save) > 0 else len(
+        total_bands_to_save)
+
+
+def timestamp_index_map(timestamp_list: list[dict],
+                        start_index: int = 0,
+                        reuse: dict | None = None) -> dict:
+    """Map each distinct timestamp to the time index it is written at.
+
+    Timestamps are ordered most recent first, matching the order the ``time``
+    coordinate is written in. ``start_index`` offsets the mapping for an
+    append, where new timesteps go after the ones already stored. ``reuse``
+    maps timestamps that are being recomputed onto the index they already
+    occupy, so they are overwritten in place instead of appended.
+    """
+    reuse = reuse or {}
+    unique_timestamps = sorted(set(item["ts"] for item in timestamp_list),
+                               reverse=True)
+    mapping = {}
+    appended = 0
+    for ts in unique_timestamps:
+        if ts in reuse:
+            mapping[ts] = reuse[ts]
+        else:
+            mapping[ts] = start_index + appended
+            appended += 1
+    return mapping
+
+
 def setup_zarr_storage(
     zarr_store: str | zarr.storage.StoreLike,
     timestamp_list: list[str],
@@ -515,6 +633,7 @@ def setup_zarr_storage(
     overwrite: bool = False,
     coord_save_mode: str = "top-left",
     save_as_uint16: bool = False,
+    store_config: dict | None = None,
 ) -> None | str:
     """
     Parameters
@@ -523,6 +642,10 @@ def setup_zarr_storage(
         Specifies how coordinates are saved in zarr.
         - "top-left": coordinates represent the top-left corner of each pixel (default, current behavior).
         - "center": coordinates represent the center of each pixel (shifted by half a pixel).
+    store_config : dict, optional
+        Config manifest (see ``sentle.append``) recording the parameters that
+        shaped this cube, so a later ``process(..., append=True)`` can check
+        that it agrees with the cube before writing anything.
     """
 
     if isinstance(zarr_store, str):
@@ -535,13 +658,8 @@ def setup_zarr_storage(
     root = zarr.group(store=store)
     root.attrs["crs_wkt"] = target_crs.to_wkt()
 
-    sync_file_path = None
-    if not (zarr_store_chunk_size["time"] == 1
-            and zarr_store_chunk_size["y"] == processing_spatial_chunk_size
-            and zarr_store_chunk_size["x"] == processing_spatial_chunk_size):
-        # get a uuid for sync file
-        sync_file_path = path.join(tempfile.gettempdir(),
-                                   f"sentle_{currenttime()}.lock")
+    sync_file_path = sync_file_path_for(zarr_store_chunk_size,
+                                        processing_spatial_chunk_size)
 
     # create array for where to store the processed sentinel data
     # chunk size is the number of S2 bands, because we parallelize S1/S2
@@ -550,11 +668,7 @@ def setup_zarr_storage(
     data_dtype = np.uint16 if save_as_uint16 else np.float32
     data_fill_value = 0 if save_as_uint16 else float("nan")
 
-    # the band axis is chunked at the number of S2 bands so S1 and S2 write
-    # into disjoint band chunks. When S2 is disabled there are no S2 bands, so
-    # fall back to a single chunk spanning all (S1) bands.
-    band_chunk = len(S2_bands_to_save) if len(S2_bands_to_save) > 0 else len(
-        total_bands_to_save)
+    band_chunk = band_chunk_size(S2_bands_to_save, total_bands_to_save)
     data = zarr.create(
         shape=(len(unique_timestamps), len(total_bands_to_save), height,
                width),
@@ -568,6 +682,7 @@ def setup_zarr_storage(
         fill_value=data_fill_value,
         store=store,
         path="/sentle",
+        overwrite=overwrite,
         config=dict(write_empty_chunks=False),
         dimension_names=["time", "band", "y", "x"],
     )
@@ -615,13 +730,10 @@ def setup_zarr_storage(
         overwrite=overwrite,
         dimension_names=["x"],
     )
-    # build coordinates from integer pixel indices (bound + i * resolution)
-    # rather than np.arange over the bounds, so a fractional resolution can
-    # never produce an off-by-one number of coordinates vs. width/height.
-    x_coords = bound_left + np.arange(width) * target_resolution
-    if coord_save_mode == "center":
-        x_coords = x_coords + target_resolution / 2
-    x[:] = x_coords.astype(np.float32)
+    x_coords, y_coords = coordinate_arrays(bound_left, bound_top, width,
+                                           height, target_resolution,
+                                           coord_save_mode)
+    x[:] = x_coords
     x.attrs["coord_save_mode"] = coord_save_mode
 
     # y dimension
@@ -633,10 +745,7 @@ def setup_zarr_storage(
         overwrite=overwrite,
         dimension_names=["y"],
     )
-    y_coords = bound_top - np.arange(height) * target_resolution
-    if coord_save_mode == "center":
-        y_coords = y_coords - target_resolution / 2
-    y[:] = y_coords.astype(np.float32)
+    y[:] = y_coords
     y.attrs["coord_save_mode"] = coord_save_mode
 
     # time dimension
@@ -654,6 +763,19 @@ def setup_zarr_storage(
         time[i] = (ts.tz_localize(tz=None) -
                    pd.Timestamp(0, tz=None)).total_seconds()
     time.attrs.update(ZARR_TIME_ATTRS)
+
+    # record the parameters that shaped this cube so that a later
+    # ``process(..., append=True)`` can refuse a call that disagrees with it.
+    # ``time_committed`` is the append bookkeeping: for a fresh store every
+    # timestep is declared up front, exactly as before.
+    if store_config is not None:
+        write_store_config(
+            root,
+            dict(store_config, time_committed=len(unique_timestamps),
+                 time_order="descending", append_in_progress=None))
+    elif SENTLE_CONFIG_ATTR in root.attrs:
+        # never leave a manifest describing a cube that no longer exists
+        del root.attrs[SENTLE_CONFIG_ATTR]
 
     # see https://zarr.readthedocs.io/en/main/user-guide/consolidated_metadata/
     if consolidate_metadata:
@@ -753,6 +875,161 @@ def retrieve_timestamps(
         } for ts in timestamps for collection in collections]
 
 
+def open_and_validate_append(
+    *,
+    zarr_store: str | zarr.storage.StoreLike,
+    store_config: dict,
+    consolidate_metadata: bool,
+    height: int,
+    width: int,
+    grid_left: float,
+    grid_top: float,
+    target_resolution: float,
+    coord_save_mode: str,
+    S2_bands_to_save: list[str],
+    total_bands_to_save: list[str],
+    append_allow_missing_config: bool,
+):
+    """Open the cube to append to and refuse the call if it does not fit.
+
+    Returns ``(store, root, reconsolidate, time_order, reserved_slots)``.
+    Raises before
+    touching the cube if the requested configuration disagrees with what is
+    stored; only once the call is known to be compatible is a previously
+    interrupted append rolled back.
+    """
+    store, root, was_consolidated = open_cube_for_append(zarr_store)
+    # consolidated metadata caches the array shapes an append changes, so it
+    # has to be refreshed whenever the cube carries it -- the workers read the
+    # shape from there
+    reconsolidate = was_consolidated or consolidate_metadata
+
+    try:
+        requested_x, requested_y = coordinate_arrays(grid_left, grid_top,
+                                                     width, height,
+                                                     target_resolution,
+                                                     coord_save_mode)
+        check_append_compatible(
+            stored_config=read_store_config(root),
+            requested_config=store_config,
+            stored_bands=[str(b) for b in root["band"][:]],
+            stored_chunks=tuple(root["sentle"].chunks),
+            stored_dtype=root["sentle"].dtype,
+            stored_x=np.asarray(root["x"][:]),
+            stored_y=np.asarray(root["y"][:]),
+            requested_x=requested_x,
+            requested_y=requested_y,
+            requested_band_chunk=band_chunk_size(S2_bands_to_save,
+                                                 total_bands_to_save),
+            allow_missing_config=append_allow_missing_config,
+        )
+
+        # an append that was killed outright left the cube longer than what it
+        # actually wrote; put it back before anything is measured against it
+        recover_interrupted_append(root, store, zarr_store,
+                                   reconsolidate)
+
+        # new timesteps are merged into their sorted position, which is only
+        # safe if what is already there is sorted
+        stored_config = read_store_config(root) or {}
+        seconds = np.asarray(root["time"][:], dtype="int64")
+        time_order = time_axis_order(seconds)
+        if time_order is None:
+            raise ValueError(
+                "Cannot append to this cube: its time coordinate is not "
+                "sorted, so new timesteps cannot be merged into it without "
+                "moving stored data to lower indices. This happens to cubes "
+                "appended to by a sentle version that grew the time axis at "
+                "the end regardless of where the new timestamps belonged. "
+                "Sort it once with "
+                "sentle.append.repair_time_order(<zarr_store>), then append "
+                "again.")
+        time_order = stored_config.get("time_order", time_order)
+        reserved_slots = {
+            int(k): int(v)
+            for k, v in (stored_config.get("reserved_slots") or {}).items()
+        }
+    except BaseException:
+        store.close()
+        raise
+
+    return store, root, reconsolidate, time_order, reserved_slots
+
+
+def drop_stored_timestamps(
+        root,
+        timestamp_list: list[dict],
+        time_composite_freq,
+        recompute_trailing: int = 0,
+        reserved: dict | None = None) -> tuple[list[dict], int, dict]:
+    """Keep the timesteps the cube does not hold yet, plus any to recompute.
+
+    Comparison happens in the cube's own representation (int64 epoch seconds),
+    which is the only thing a stored timestamp can be compared against.
+
+    ``recompute_trailing`` keeps the N newest *stored* timesteps in the job
+    list instead of skipping them, so they are computed again and overwritten
+    in place. "Newest" is by timestamp value, not by position, because the time
+    axis is not necessarily sorted after an earlier append.
+
+    Returns the filtered job list, the number of timesteps already stored, and
+    the map from recomputed timestamp to the index it already occupies.
+    """
+    existing_seconds = np.asarray(root["time"][:], dtype="int64")
+    candidates = sorted({item["ts"] for item in timestamp_list}, reverse=True)
+    candidate_seconds = timestamps_to_stored_seconds(candidates)
+
+    # with compositing every timestep is a whole bin, so a new timestep that
+    # is offset against the stored grid would split a bin in two
+    check_composite_grid_alignment(existing_seconds, candidate_seconds,
+                                   time_composite_freq)
+
+    stored = {}
+    for index, seconds in enumerate(existing_seconds):
+        # a duplicate stored timestamp can only come from a corrupted cube;
+        # keep the first index so the mapping stays deterministic
+        stored.setdefault(int(seconds), index)
+    # a reserved slot carries its timestamp but no data yet, so it is a
+    # timestep still to be downloaded rather than one already stored
+    for seconds in (reserved or {}).values():
+        stored.pop(int(seconds), None)
+
+    to_recompute = {}
+    if recompute_trailing > 0:
+        newest = sorted(stored, reverse=True)[:recompute_trailing]
+        to_recompute = {seconds: stored[seconds] for seconds in newest}
+
+    new_timestamps = set()
+    reuse_index_map = {}
+    for ts, seconds in zip(candidates, candidate_seconds):
+        seconds = int(seconds)
+        if seconds not in stored:
+            new_timestamps.add(ts)
+        elif seconds in to_recompute:
+            reuse_index_map[ts] = to_recompute[seconds]
+
+    skipped = len(candidates) - len(new_timestamps) - len(reuse_index_map)
+    if skipped:
+        print(f"Skipping {skipped} of {len(candidates)} timesteps that are "
+              f"already stored in the cube.")
+    if reuse_index_map:
+        print(f"Recomputing {len(reuse_index_map)} already-stored timestep(s) "
+              f"in place (append_recompute_trailing="
+              f"{recompute_trailing}).")
+    if recompute_trailing > len(reuse_index_map):
+        # the newest stored timesteps are only recomputable if the requested
+        # range still covers them
+        warnings.warn(
+            f"append_recompute_trailing={recompute_trailing} but only "
+            f"{len(reuse_index_map)} of the newest stored timesteps fall "
+            f"inside the requested datetime range; the rest are left as they "
+            f"are.")
+
+    keep = new_timestamps | set(reuse_index_map)
+    return ([item for item in timestamp_list if item["ts"] in keep],
+            len(existing_seconds), reuse_index_map)
+
+
 def process(
     target_crs: CRS | str,
     target_resolution: float,
@@ -778,6 +1055,9 @@ def process(
     S2_apply_cloud_mask: bool = False,
     S2_nbar: bool = False,
     overwrite: bool = False,
+    append: bool = False,
+    append_allow_missing_config: bool = False,
+    append_recompute_trailing: int = 0,
     zarr_store_chunk_size: dict = {
         "time": 10,
         "x": 250,
@@ -873,6 +1153,55 @@ def process(
        order given.
     overwrite: bool, default=False
        Whether to overwrite existing zarr storage.
+    append: bool, default=False
+       Extend the cube that already exists at ``zarr_store`` along the time
+       axis instead of creating a new one. Only the timesteps that are not
+       stored yet are downloaded; timestamps (and, with
+       ``time_composite_freq``, composite bins) that are already present are
+       skipped rather than recomputed. Every parameter that shapes the pixels
+       must match the cube on disk -- ``target_crs``, ``target_resolution``,
+       the bounds and the exact x/y grid, the band selection, the composite
+       settings, the mask/NBAR flags, ``save_as_uint16``, ``provider``,
+       ``resampling_method`` and the zarr chunk sizes -- otherwise the call
+       raises before writing anything, naming the parameters that disagree.
+       Requires an existing cube (run once with ``append=False`` to create
+       it) and is mutually exclusive with ``overwrite``.
+
+       The time coordinate stays sorted, most recent first, exactly as a
+       freshly created cube is, and the stored data is never read or
+       rewritten: newer timesteps are prepended by renaming whole time-chunk
+       keys, so only the time coordinate changes. Renaming works in whole
+       chunks, so a prepend frees a multiple of
+       ``zarr_store_chunk_size["time"]`` slots and any surplus becomes a
+       reserved slot -- a real timestamp on the same grid with no data yet,
+       which a later append fills in place instead of skipping. A timestamp
+       falling *between* stored ones is refused, since making room for it
+       would mean moving stored data. Prepending needs a local zarr store
+       (renaming keys on an object store would copy the cube). A cube whose
+       axis is already unsorted is refused -- sort it once with
+       ``sentle.append.repair_time_order``.
+    append_allow_missing_config: bool, default=False
+       Allow ``append=True`` against a cube created before sentle recorded its
+       configuration in the store. Such a cube is still checked against
+       everything derivable from it (CRS, x/y grid, band list, dtype, chunk
+       sizes, composite bin spacing), but the remaining parameters (masking,
+       NBAR, provider, resampling, composite method) cannot be verified, so
+       appending is refused unless this is set. Only use it when you know the
+       call matches the run that created the cube.
+    append_recompute_trailing: int, default=0
+       Recompute the ``N`` newest timesteps that the cube already holds,
+       instead of skipping them, and overwrite them in place. Use it when the
+       previous run's last ``time_composite_freq`` bin was aggregated before
+       all of its acquisitions had been published, which leaves that bin thin
+       forever because an append otherwise never revisits a stored timestep.
+       Only the stored timesteps that the requested ``datetime`` range still
+       covers can be recomputed; if fewer than ``N`` qualify, sentle warns.
+
+       The timesteps are cleared before being recomputed, because a composite
+       writes only where it found data and would otherwise leave the previous
+       run's pixels in the gaps of the new one. A run that fails partway
+       therefore leaves them NoData rather than restoring them -- sentle says
+       so explicitly when it rolls back. Requires ``append=True``.
     coord_save_mode: str, default="top-left"
        Specifies how coordinates are saved in zarr. Options:
          - "top-left": (default) coordinates represent the top-left corner of each pixel (current behavior)
@@ -916,6 +1245,10 @@ def process(
         save_as_uint16=save_as_uint16,
         S2_bands=S2_bands,
         provider=provider,
+        overwrite=overwrite,
+        append=append,
+        append_allow_missing_config=append_allow_missing_config,
+        append_recompute_trailing=append_recompute_trailing,
     )
 
     # instantiate the data provider (Planetary Computer or CDSE)
@@ -969,6 +1302,68 @@ def process(
     if S1_assets is not None:
         collections.append(data_provider.s1_collection)
 
+    # compute the bounds, width and height of the cube's grid. Done before
+    # querying the catalog so that an append is refused against a mismatching
+    # cube before anything slow or destructive happens. The unrounded bounds
+    # are what the catalog search uses, as before.
+    grid_left, grid_bottom, grid_right, grid_top = check_and_round_bounds(
+        bound_left, bound_bottom, bound_right, bound_top, target_resolution)
+
+    height, width = height_width_from_bounds_res(grid_left, grid_bottom,
+                                                 grid_right, grid_top,
+                                                 target_resolution)
+
+    # everything that shapes the pixels of this cube, recorded in the store so
+    # a later append can be checked against it
+    store_config = build_store_config(
+        target_crs=target_crs,
+        target_resolution=target_resolution,
+        bound_left=grid_left,
+        bound_bottom=grid_bottom,
+        bound_right=grid_right,
+        bound_top=grid_top,
+        S2_bands=S2_bands,
+        S2_bands_to_save=S2_bands_to_save,
+        S1_assets=S1_assets,
+        total_bands_to_save=total_bands_to_save,
+        time_composite_freq=time_composite_freq,
+        time_composite_method=time_composite_method,
+        S2_mask_snow=S2_mask_snow,
+        S2_apply_snow_mask=S2_apply_snow_mask,
+        S2_cloud_classification=S2_cloud_classification,
+        S2_apply_cloud_mask=S2_apply_cloud_mask,
+        S2_return_cloud_probabilities=S2_return_cloud_probabilities,
+        S2_nbar=S2_nbar,
+        save_as_uint16=save_as_uint16,
+        provider=provider,
+        coord_save_mode=coord_save_mode,
+        resampling_method=resampling_method,
+        zarr_store_chunk_size=zarr_store_chunk_size,
+    )
+
+    append_store = None
+    append_root = None
+    reconsolidate = False
+    if append:
+        # opens the cube, rolls back a previously interrupted append and
+        # raises if this call disagrees with what is stored -- all before a
+        # single byte is written
+        (append_store, append_root, reconsolidate, append_time_order,
+         append_reserved_slots) = open_and_validate_append(
+            zarr_store=zarr_store,
+            store_config=store_config,
+            consolidate_metadata=consolidate_metadata,
+            height=height,
+            width=width,
+            grid_left=grid_left,
+            grid_top=grid_top,
+            target_resolution=target_resolution,
+            coord_save_mode=coord_save_mode,
+            S2_bands_to_save=S2_bands_to_save,
+            total_bands_to_save=total_bands_to_save,
+            append_allow_missing_config=append_allow_missing_config,
+        )
+
     timestamp_list = retrieve_timestamps(
         time_composite_freq=time_composite_freq,
         bound_left=bound_left,
@@ -981,34 +1376,93 @@ def process(
         provider=data_provider,
     )
 
-    # compute bounds, with and height  for the entire dataset
-    bound_left, bound_bottom, bound_right, bound_top = check_and_round_bounds(
-        bound_left, bound_bottom, bound_right, bound_top, target_resolution)
+    # from here on the cube grid is the rounded one
+    bound_left, bound_bottom, bound_right, bound_top = (grid_left, grid_bottom,
+                                                        grid_right, grid_top)
 
-    height, width = height_width_from_bounds_res(bound_left, bound_bottom,
-                                                 bound_right, bound_top,
-                                                 target_resolution)
+    recomputed_indices = []
+    if append:
+        timestamp_list, committed_length, reuse_index_map = (
+            drop_stored_timestamps(append_root, timestamp_list,
+                                   time_composite_freq,
+                                   append_recompute_trailing,
+                                   append_reserved_slots))
+        if not timestamp_list:
+            warnings.warn(
+                "Nothing to append: every timestep in the requested range is "
+                "already stored in the cube. Leaving it unchanged.")
+            append_store.close()
+            return
 
-    # setup zarr storage
-    sync_file_path = setup_zarr_storage(
-        zarr_store=zarr_store,
-        timestamp_list=timestamp_list,
-        height=height,
-        width=width,
-        bound_left=bound_left,
-        bound_bottom=bound_bottom,
-        bound_right=bound_right,
-        bound_top=bound_top,
-        target_resolution=target_resolution,
-        processing_spatial_chunk_size=processing_spatial_chunk_size,
-        zarr_store_chunk_size=zarr_store_chunk_size,
-        S2_bands_to_save=S2_bands_to_save,
-        total_bands_to_save=total_bands_to_save,
-        target_crs=target_crs,
-        coord_save_mode=coord_save_mode,
-        consolidate_metadata=consolidate_metadata,
-        save_as_uint16=save_as_uint16,
-    )
+        # The cube is newest-first, so newer timesteps are prepended by
+        # renaming time-chunk keys: the stored data is never read or rewritten,
+        # only the (tiny) time coordinate is. Prepending works in whole chunks,
+        # so any surplus slots become reserved -- real lattice timestamps with
+        # no data yet, which a later append fills instead of skipping.
+        new_timestamps = [
+            ts for ts in sorted({item["ts"]
+                                 for item in timestamp_list}, reverse=True)
+            if ts not in reuse_index_map
+        ]
+        plan = plan_extension(
+            np.asarray(append_root["time"][:], dtype="int64"),
+            timestamps_to_stored_seconds(new_timestamps),
+            int(append_root["sentle"].chunks[0]),
+            reserved=append_reserved_slots)
+        apply_extension(append_root, append_store, zarr_store, plan,
+                        append_time_order, reconsolidate)
+
+        seconds_for = dict(
+            zip(new_timestamps, timestamps_to_stored_seconds(new_timestamps)))
+        placed = {**plan["fill"], **plan["prepend"], **plan["tail"]}
+        ts_index_map = {
+            ts: int(placed[int(seconds_for[ts])])
+            for ts in new_timestamps
+        }
+        # the prepend slid the stored timesteps up, so a timestep being
+        # recomputed is no longer at the index it occupied before
+        ts_index_map.update({
+            ts: int(index) + int(plan["shift"])
+            for ts, index in reuse_index_map.items()
+        })
+
+        # recomputed timesteps are overwritten in place, and reserved slots
+        # being filled may hold nothing yet -- wipe both, or the old run's
+        # pixels survive wherever the new one has a gap
+        recomputed_indices = sorted(
+            int(index) + int(plan["shift"])
+            for index in reuse_index_map.values())
+        if recomputed_indices:
+            clear_timesteps(append_root, recomputed_indices)
+
+        sync_file_path = sync_file_path_for(zarr_store_chunk_size,
+                                            processing_spatial_chunk_size)
+    else:
+        committed_length = 0
+        # setup zarr storage
+        sync_file_path = setup_zarr_storage(
+            zarr_store=zarr_store,
+            timestamp_list=timestamp_list,
+            height=height,
+            width=width,
+            bound_left=bound_left,
+            bound_bottom=bound_bottom,
+            bound_right=bound_right,
+            bound_top=bound_top,
+            target_resolution=target_resolution,
+            processing_spatial_chunk_size=processing_spatial_chunk_size,
+            zarr_store_chunk_size=zarr_store_chunk_size,
+            S2_bands_to_save=S2_bands_to_save,
+            total_bands_to_save=total_bands_to_save,
+            target_crs=target_crs,
+            coord_save_mode=coord_save_mode,
+            consolidate_metadata=consolidate_metadata,
+            save_as_uint16=save_as_uint16,
+            overwrite=overwrite,
+            store_config=store_config,
+        )
+        # which time index each timestamp is written to
+        ts_index_map = timestamp_index_map(timestamp_list)
 
     cloud_request_queue = None
     if S2_cloud_classification:
@@ -1063,8 +1517,6 @@ def process(
              (x_min, y_min, x_max, y_max)) in spatial_chunk_grid(
                  bound_left, bound_top, width, height, target_resolution,
                  processing_spatial_chunk_size):
-            last_ts = timestamp_list[0]["ts"]
-            ts_save_index = 0
             for item in timestamp_list:
                 ret_config = dict(config)
                 ret_config["bound_left"] = x_min
@@ -1074,17 +1526,13 @@ def process(
                 ret_config["ts"] = item["ts"]
                 ret_config["collection"] = item["collection"]
 
-                if item["ts"] != last_ts:
-                    last_ts = item["ts"]
-                    ts_save_index += 1
-
                 ret_config["zarr_save_slice"] = dict(
                     x=slice(x_off, x_end),
                     y=slice(y_off, y_end),
                     band=slice(0, len(S2_bands_to_save))
                     if item["collection"] == "sentinel-2-l2a" else slice(
                         len(S2_bands_to_save), len(total_bands_to_save)),
-                    time=ts_save_index,
+                    time=ts_index_map[item["ts"]],
                 )
                 if item["collection"] == "sentinel-2-l2a":
                     if (xi, yi) not in subtile_cache:
@@ -1112,18 +1560,33 @@ def process(
                 ret_config["save_as_uint16"] = save_as_uint16
                 yield ret_config
 
-    with tqdm_joblib(
-            tqdm(
-                desc="processing",
-                unit="ptiles",
-                dynamic_ncols=True,
-                total=len(timestamp_list),
-            )) as progress_bar:
-        with parallel_backend("cleanupqueue"):
-            # backend can be loky or threading (or maybe something else)
-            Parallel(n_jobs=num_workers,
-                     batch_size=1)(delayed(process_ptile)(**p)
-                                   for p in job_generator())
+    try:
+        with tqdm_joblib(
+                tqdm(
+                    desc="processing",
+                    unit="ptiles",
+                    dynamic_ncols=True,
+                    total=len(timestamp_list),
+                )) as progress_bar:
+            with parallel_backend("cleanupqueue"):
+                # backend can be loky or threading (or maybe something else)
+                Parallel(n_jobs=num_workers,
+                         batch_size=1)(delayed(process_ptile)(**p)
+                                       for p in job_generator())
+    except BaseException:
+        if append:
+            # the cube must never end up claiming timesteps that were not
+            # fully processed, so drop the ones this run added
+            rollback_append(append_root, append_store, zarr_store,
+                            committed_length, reconsolidate,
+                            recomputed_indices)
+            append_store.close()
+        raise
+
+    if append:
+        commit_append(append_root, append_store, plan["length"],
+                      reconsolidate)
+        append_store.close()
 
     # close cloud queue
     if S2_cloud_classification:

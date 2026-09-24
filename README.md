@@ -71,6 +71,110 @@ This code downloads data for a 10km by 10km area with three months of both Senti
 
 Everything is parallelized across 10 workers and each worker immediately saves its results to the specified path to a `zarr_store`. This ensures you can download larger-than-memory cubes.
 
+**Appending to an existing cube**
+
+Pointing `process` at a store that already holds data normally fails. Pass
+`append=True` to extend that cube along the time axis instead — useful to keep a
+cube current as new acquisitions land, or to backfill an earlier period.
+
+```
+from sentle import sentle
+
+common = dict(
+    zarr_store="mycube.zarr",
+    target_crs="EPSG:32633",
+    bound_left=176000,
+    bound_bottom=5660000,
+    bound_right=186000,
+    bound_top=5670000,
+    target_resolution=10,
+    S1_assets=None,
+    S2_cloud_classification=True,
+    S2_apply_cloud_mask=True,
+    time_composite_freq="7d",
+    num_workers=10,
+)
+
+# first run: creates the cube
+sentle.process(datetime="2022-06-01/2022-09-01", **common)
+
+# later: add the next three months to the same cube
+sentle.process(datetime="2022-09-01/2022-12-01", append=True, **common)
+```
+
+Only the timesteps that are not in the cube yet are downloaded. Re-running an
+append over a range that is already stored is a no-op, so the call above is safe
+to put on a schedule.
+
+An append is only accepted if the new call agrees with the cube on disk.
+`target_crs`, `target_resolution`, the four `bound_*` values and the exact x/y
+grid, the band selection (`S2_bands`/`S1_assets`), `time_composite_freq` and
+`time_composite_method`, the cloud/snow mask flags, `S2_nbar`, `save_as_uint16`,
+`provider`, `resampling_method` and `zarr_store_chunk_size` must all match.
+Anything else raises before a byte is written, naming the parameter, the stored
+value and the requested one:
+
+```
+ValueError: Cannot append to the existing cube: the requested configuration
+does not match the cube on disk.
+  - target_resolution: stored 10.0, requested 20.0
+  - time_composite_freq: stored '7d', requested None
+```
+
+Notes:
+
+- **Time order.** The time coordinate stays sorted, most recent first, exactly
+  as a freshly created cube is — so `.sel(time=slice(...))` and friends keep
+  working without the reader having to sort anything.
+- **Stored data is never touched.** Because the cube is newest-first and zarr
+  only grows an array at its end, newer timesteps are *prepended* by renaming
+  whole time-chunk keys. The stored chunks keep their exact bytes; only the
+  (metadata-sized) time coordinate is rewritten. An append is therefore cheap
+  no matter how big the cube is.
+- **Reserved slots.** Renaming works in whole chunks, so a prepend frees a
+  multiple of `zarr_store_chunk_size["time"]` slots. Any surplus becomes
+  *reserved*: real timestamps on the same grid, newer than everything else,
+  carrying no data yet. They are recorded in the cube's manifest, and a later
+  append fills them in place instead of skipping them — so with a `time` chunk
+  of 10, nine out of ten weekly appends need no renaming at all. Until they are
+  filled they read as NoData, like any bin with no valid observations.
+- **Extension only.** New timesteps can be added at either end of the axis, but
+  a timestamp falling *between* ones the cube already holds is refused: making
+  room for it would mean moving stored data. Rebuild with `overwrite=True` if
+  you need that.
+- **Local stores only for prepending.** Renaming chunk keys is a cheap metadata
+  operation on a filesystem; on an object store it would be a server-side copy
+  of the whole cube. Append to a local copy and upload it.
+- **Composites.** With `time_composite_freq` set, the bin boundaries are
+  anchored to the epoch, so a second run lands on the same bins as the first no
+  matter where its date range starts. A bin is either already stored (skipped
+  whole) or entirely new — it is never half-recomputed.
+- **Stale trailing bins.** A bin at the end of the first run's range was
+  aggregated over the whole bin, including days whose acquisitions had not been
+  published yet, so it can stay permanently thin. An append skips stored bins,
+  so pass `append_recompute_trailing=1` (or more) to recompute the newest
+  stored bins in place:
+
+  ```
+  sentle.process(datetime="2022-09-01/2022-12-01", append=True,
+                 append_recompute_trailing=1, **common)
+  ```
+
+  Those bins are cleared before being recomputed — a composite only writes
+  where it found data, so recomputing on top of the old contents would leave
+  the previous run's pixels in the new one's gaps. An interrupted run therefore
+  leaves them NoData, and sentle says so when it rolls back.
+- **Interruptions.** An append that fails rolls the cube back to its previous
+  state — undoing the chunk renames as well as the resize — so it never claims
+  timesteps that were not written. If the process is killed outright, the next
+  append detects the partial state, warns, and rolls it back before continuing.
+- **Cubes left unsorted by an earlier sentle.** An append refuses to touch a
+  cube whose time axis is not sorted, because merging into it would have to
+  move stored data to lower indices. Sort it once with
+  `sentle.append.repair_time_order("mycube.zarr")` and append again.
+- Cubes created by sentle versions that did not record their configuration in
+  the store cannot be fully validated; see `append_allow_missing_config`.
+
 **Visualize**
 
 Load the data with xarray.
@@ -132,7 +236,10 @@ The package contains only one main function for retrieving and processing Sentin
 | `time_composite_method`          | `str`                       | `"mean"`                                     | How to aggregate the acquisitions within each `time_composite_freq` window: `"mean"` (default), `"median"`, `"min"` or `"max"`. Applies to both Sentinel-2 and Sentinel-1. NoData/masked pixels are ignored per band and pixel. Only used when `time_composite_freq` is set.                                                                                |
 | `S2_apply_snow_mask`             | `bool`                      | `False`                                      | Whether to replace snow with NaN.                                                                                                                                                                                                                                                                                                                         |
 | `S2_apply_cloud_mask`            | `bool`                      | `False`                                      | Whether to replace anything that is not clear sky with NaN.                                                                                                                                                                                                                                                                                               |
-| `overwrite`                      | `bool`                      | `False`                                      | Whether to overwrite existing zarr storage.                                                                                                                                                                                                                                                                                                               |
+| `overwrite`                      | `bool`                      | `False`                                      | Whether to replace an existing zarr storage at `zarr_store`. Mutually exclusive with `append`. |
+| `append`                         | `bool`                      | `False`                                      | Extend the cube that already exists at `zarr_store` along the **time axis** instead of creating a new one: only the timesteps that are not stored yet are downloaded, and the ones already present are skipped rather than recomputed. New timesteps are merged into their sorted position, so the time coordinate stays ordered. Every parameter that shapes the pixels must match the cube on disk (see *Appending to an existing cube* in the Guide above); a mismatch raises before anything is written. Requires an existing cube and is mutually exclusive with `overwrite`. |
+| `append_allow_missing_config`    | `bool`                      | `False`                                      | Allow `append=True` against a cube created before sentle started recording its configuration in the store. Such a cube is still checked against everything derivable from it (CRS, x/y grid, band list, dtype, chunk sizes, composite bin spacing), but the rest (masking, NBAR, provider, resampling, composite method) cannot be verified, so appending is refused unless this is set. |
+| `append_recompute_trailing`      | `int`                       | `0`                                          | Recompute the `N` newest timesteps the cube already holds instead of skipping them, overwriting them in place. Use it when the previous run's last `time_composite_freq` bin was aggregated before all of its acquisitions were published. Only stored timesteps still covered by the requested `datetime` range qualify. The timesteps are cleared before being recomputed, so an interrupted run leaves them NoData. Requires `append=True`. |
 | `zarr_store_chunk_size`          | `dict`                      | `{"time": 10, "x": 250, "y": 250}`           | Chunk sizes for zarr storage. Must contain the keys 'time', 'y', and 'x'. Controls the size of data chunks for efficient storage and retrieval.                                                                                                                                                                                                           |
 | `resampling_method`              | `rasterio.enums.Resampling` | `Resampling.nearest`                         | Specifies the resampling method that is used to reproject the raw data into the target CRS. It is recommended to use nearest neighbor to prevent potential issues near cloud edges and dynamic range changes.                                                                                                                                             |
 | `save_as_uint16` | `bool` | `False` | When `True` and `S1_assets` is `None`, store Sentinel-2 bands as unsigned 16-bit integers with zeros for nodata. NaNs are rounded and clipped into `[0, 65535]` before saving. |
@@ -146,6 +253,7 @@ The package contains only one main function for retrieving and processing Sentin
 - When `S1_assets` is supplied as an empty list, it will be converted to `None`, meaning no Sentinel-1 data will be downloaded.
 - Passing `S2_bands=None` or `S2_bands=[]` disables Sentinel-2 entirely (Sentinel-1 only) and requires `S1_assets` to be set — this mirrors how `S1_assets=None`/`[]` disables Sentinel-1. Passing a subset list restricts which Sentinel-2 bands are downloaded.
 - The `zarr_store_chunk_size` dictionary must contain the keys 'time', 'y', and 'x'.
+- `append=True` never changes the spatial grid or the band axis of a cube — it only grows the time axis. It also cannot create a cube: run once with `append=False` first.
 - When using cloud or snow masking with temporal composites, the masks will be applied before aggregation.
 - To download from CDSE (`provider="cdse"`), first create a free [Copernicus Data Space](https://dataspace.copernicus.eu/) account and generate S3 credentials, then make them available to GDAL/boto3 (e.g. add a `[cdse]` profile to `~/.aws/credentials` and run with `AWS_PROFILE=cdse`). CDSE is Sentinel-2 only.
 - GDAL's raster block cache is tunable via the standard `GDAL_CACHEMAX` environment variable (sentle honours it and does not override it), e.g. `GDAL_CACHEMAX=512` (MB) — useful on memory-constrained hosts or when running many `num_workers` (the cache is per-process). In practice it has little effect on CDSE JP2 reads (their decoded tiles are cached inside the open dataset, not GDAL's block cache) but does govern the Planetary Computer COG path; the default (≈5% of RAM) is fine for most machines.
