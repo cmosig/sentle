@@ -1,11 +1,10 @@
 import gc
 import multiprocessing as mp
-import shutil
 import tempfile
 import typing
 import warnings
 from importlib.resources import files
-from os import path
+from os import path, remove
 from time import time as currenttime
 
 import geopandas as gpd
@@ -13,7 +12,7 @@ import numpy as np
 import pandas as pd
 import zarr
 import zarr.storage
-from joblib import Parallel, delayed, parallel_backend
+from joblib import Parallel, delayed, effective_n_jobs, parallel_backend
 from pystac_client.item_search import DatetimeLike
 from rasterio import warp
 from rasterio.crs import CRS
@@ -27,7 +26,14 @@ from .cloud_mask import (
     init_cloud_prediction_service,
 )
 from .snow_mask import S2_snow_mask_band
-from .const import S1_ASSETS, S2_NBAR_BANDS, S2_RAW_BANDS, ZARR_TIME_ATTRS
+from .const import (
+    DEFAULT_READ_RETRIES,
+    S1_ASSETS,
+    S2_NBAR_BANDS,
+    S2_RAW_BAND_RESOLUTION,
+    S2_RAW_BANDS,
+    ZARR_TIME_ATTRS,
+)
 from .reproject_util import (
     check_and_round_bounds,
     height_width_from_bounds_res,
@@ -38,6 +44,28 @@ from .sentinel1 import process_ptile_S1
 from .sentinel2 import obtain_subtiles, process_ptile_S2_dispatcher
 from .stac import get_provider
 from .utils import GLOBAL_QUEUE_MANAGER, GLOBAL_QUEUES, tqdm_joblib
+
+
+def _s2_bands_to_save(S2_bands, S2_mask_snow, S2_cloud_classification,
+                      S2_return_cloud_probabilities, time_composite_freq):
+    """Band labels for the saved Sentinel-2 array, in the order it is produced.
+
+    ``process_ptile`` writes the array into the zarr band axis positionally, so
+    this order has to match what ``process_ptile_S2`` actually returns: the raw
+    bands, then the cloud probabilities (appended in ``process_S2_subtile``),
+    then the cloud classification, then the snow mask. Labelling them in a
+    different order silently stored the snow and cloud layers under each other's
+    names whenever both were requested.
+    """
+    bands = list(S2_bands)
+    if S2_return_cloud_probabilities:
+        bands += S2_cloud_prob_bands
+    # the mask layers are dropped again when compositing over time
+    if S2_cloud_classification and time_composite_freq is None:
+        bands.append(S2_cloud_mask_band)
+    if S2_mask_snow and time_composite_freq is None:
+        bands.append(S2_snow_mask_band)
+    return bands
 
 
 def catalog_search_ptile(
@@ -80,6 +108,18 @@ def catalog_search_ptile(
             ),
         ).item_collection())
 
+    # The catalog does not promise an order, and the order decides which of two
+    # reprocessed products wins (sentinel2.py takes the first item for a tile)
+    # as well as the order a mean composite accumulates float32 in. Sort so two
+    # runs agree.
+    #
+    # Descending, deliberately. The last field of a Sentinel product id is its
+    # processing timestamp, so descending id puts the most recent reprocessing
+    # of an acquisition first -- the newer baseline is the one to prefer, and it
+    # is also what Planetary Computer happens to return today, so this pins the
+    # current selection rather than silently switching to superseded products.
+    item_list.sort(key=lambda item: (item.datetime, item.id), reverse=True)
+
     return item_list
 
 
@@ -115,6 +155,7 @@ def process_ptile(
     save_as_uint16: bool,
     provider,
     reuse_open_datasets: bool,
+    read_retries: int,
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor"""
 
@@ -162,6 +203,7 @@ def process_ptile(
             time_composite_method=time_composite_method,
             S1_assets=S1_assets,
             resampling_method=resampling_method,
+            read_retries=read_retries,
         )
     elif collection == "sentinel-2-l2a":
         ptile_array = process_ptile_S2_dispatcher(
@@ -193,6 +235,7 @@ def process_ptile(
             resampling_method=resampling_method,
             provider=provider,
             reuse_open_datasets=reuse_open_datasets,
+            read_retries=read_retries,
         )
 
     else:
@@ -255,6 +298,8 @@ def validate_user_input(
     save_as_uint16: bool = False,
     S2_bands: list[str] = S2_RAW_BANDS,
     provider: str = "planetary_computer",
+    worker_timeout: float | None = 3600,
+    read_retries: int = DEFAULT_READ_RETRIES,
 ):
     # validate the data provider and its constraints
     if provider not in ("planetary_computer", "cdse"):
@@ -373,6 +418,21 @@ def validate_user_input(
     if not isinstance(num_workers, int):
         raise ValueError("num_workers must be an integer")
 
+    # check the per-ptile timeout
+    if worker_timeout is not None:
+        if isinstance(worker_timeout, bool) or not isinstance(
+                worker_timeout, (int, float)):
+            raise ValueError("worker_timeout must be a number or None")
+        if worker_timeout <= 0:
+            raise ValueError(
+                "worker_timeout must be positive; pass None to disable it")
+
+    # check the per-read retry count
+    if isinstance(read_retries, bool) or not isinstance(read_retries, int):
+        raise ValueError("read_retries must be an integer")
+    if read_retries < 0:
+        raise ValueError("read_retries must be zero or more")
+
     # check if time_composite_freq is a string
     if time_composite_freq is not None and not isinstance(
             time_composite_freq, str):
@@ -479,6 +539,14 @@ def validate_user_input(
             raise ValueError(
                 "S2_bands cannot be a subset when S2_cloud_classification "
                 "is True (the cloud model requires all bands)")
+
+        # the 10 m grid transform of the Sentinel-2 tile is taken from a
+        # 10 m band; without one, every subtile would be dropped and the cube
+        # would come out empty with no error at all
+        if not any(S2_RAW_BAND_RESOLUTION[b] == 10 for b in S2_bands):
+            raise ValueError(
+                f"S2_bands must include at least one 10m band "
+                f"({[b for b, r in S2_RAW_BAND_RESOLUTION.items() if r == 10]})")
 
         # snow mask is computed from B03/B08/B11
         if S2_mask_snow:
@@ -667,6 +735,27 @@ def setup_zarr_storage(
     return sync_file_path
 
 
+def cleanup_sync_file(sync_file_path: str | None) -> None:
+    """Delete the FileLock sync file created by :func:`setup_zarr_storage`.
+
+    ``sync_file_path`` points at a plain file (``/tmp/sentle_<ts>.lock``), not a
+    directory -- this used to call ``shutil.rmtree``, which always raised
+    ``NotADirectoryError`` into a bare ``except``, so every run leaked one lock
+    file (issue #87). filelock deliberately leaves the file behind on release
+    (tox-dev/filelock#31), so it has to be unlinked here.
+
+    The file may legitimately not exist -- workers only acquire the lock for
+    ptiles that actually carry data -- and unlinking may fail on an unusual
+    tmpdir; neither is worth failing a finished run over.
+    """
+    if sync_file_path is None:
+        return
+    try:
+        remove(sync_file_path)
+    except OSError:
+        pass
+
+
 def retrieve_timestamps(
     time_composite_freq: str,
     datetime: DatetimeLike,
@@ -704,8 +793,10 @@ def retrieve_timestamps(
         df = pd.DataFrame()
         items = list(search.item_collection())
         if len(items) == 0:
-            print("No items found for specified time range and area.")
-            exit()
+            # used to be exit(), which raises SystemExit(None) -> status 0, so
+            # a batch job reported success while producing no cube at all
+            raise ValueError(
+                "No items found for the specified time range and area.")
 
         df["ts_raw"] = [i.datetime for i in items]
         df["collection"] = [i.collection_id for i in items]
@@ -772,6 +863,8 @@ def process(
     S2_cloud_classification_device="cpu",
     S2_return_cloud_probabilities: bool = False,
     num_workers: int = 1,
+    worker_timeout: float | None = 3600,
+    read_retries: int = DEFAULT_READ_RETRIES,
     time_composite_freq: str = None,
     time_composite_method: str = "mean",
     S2_apply_snow_mask: bool = False,
@@ -816,6 +909,30 @@ def process(
         Whether to return raw cloud probabilities which were used to determine the cloud classes.
     num_workers : int, default=1
         Number of cores to scale computation across. Plan 2GiB of RAM per worker. -1 uses all available cores.
+    worker_timeout : float or None, default=3600
+        Per-ptile timeout in seconds. A ptile that does not deliver a result
+        within this budget aborts the run with a ``multiprocessing.TimeoutError``
+        instead of hanging forever behind a dead or wedged worker. This is a
+        budget for a *single* ptile, not for the whole call: it is measured from
+        the moment a ptile reaches the head of the retrieval queue, so it is
+        unaffected by the total number of ptiles and by ptiles waiting their turn
+        in the pool. (Time joblib spends pulling the next batch out of the job
+        generator does count against whichever ptile is at the head, because
+        both run on the same thread -- a fraction of a second per batch here.)
+        Raise it for very wide
+        ``time_composite_freq`` windows (one ptile then aggregates every
+        acquisition in the window) and set it to ``None`` to disable. Only
+        effective with more than one worker -- ``num_workers=1`` runs the ptiles
+        in the main process, which joblib cannot interrupt; the HTTP and
+        cloud-service timeouts still apply there.
+    read_retries : int, default=2
+        How many extra attempts to make when reading a raster asset fails
+        (403/404/503, a dropped connection, a stalled transfer). Once they are
+        used up the whole run is aborted with a ``SentleReadError`` rather than
+        skipping the band: a cube that finishes therefore always holds the same
+        data as any other run over the same area. Set to 0 to fail on the first
+        failure; there is no setting that restores the old skip-and-warn
+        behaviour.
     time_composite_freq: str, default=None
         Rounding interval across which data is aggregated.
     time_composite_method: str, default="mean"
@@ -916,6 +1033,8 @@ def process(
         save_as_uint16=save_as_uint16,
         S2_bands=S2_bands,
         provider=provider,
+        worker_timeout=worker_timeout,
+        read_retries=read_retries,
     )
 
     # instantiate the data provider (Planetary Computer or CDSE)
@@ -931,14 +1050,12 @@ def process(
     if s2_enabled:
         S2_bands = [b for b in S2_RAW_BANDS if b in S2_bands]
 
-        # derive bands to save from arguments
-        S2_bands_to_save = S2_bands.copy()
-        if S2_mask_snow and time_composite_freq is None:
-            S2_bands_to_save.append(S2_snow_mask_band)
-        if S2_cloud_classification and time_composite_freq is None:
-            S2_bands_to_save.append(S2_cloud_mask_band)
-        if S2_return_cloud_probabilities:
-            S2_bands_to_save += S2_cloud_prob_bands
+        S2_bands_to_save = _s2_bands_to_save(
+            S2_bands=S2_bands,
+            S2_mask_snow=S2_mask_snow,
+            S2_cloud_classification=S2_cloud_classification,
+            S2_return_cloud_probabilities=S2_return_cloud_probabilities,
+            time_composite_freq=time_composite_freq)
     else:
         # Sentinel-2 disabled -> no S2 bands at all
         S2_bands = []
@@ -1008,140 +1125,161 @@ def process(
         coord_save_mode=coord_save_mode,
         consolidate_metadata=consolidate_metadata,
         save_as_uint16=save_as_uint16,
+        overwrite=overwrite,
     )
 
-    cloud_request_queue = None
-    if S2_cloud_classification:
-        global GLOBAL_QUEUE_MANAGER
+    try:
+        cloud_request_queue = None
+        if S2_cloud_classification:
+            global GLOBAL_QUEUE_MANAGER
 
-        GLOBAL_QUEUE_MANAGER, cloud_request_queue = init_cloud_prediction_service(
-            device=S2_cloud_classification_device)
+            GLOBAL_QUEUE_MANAGER, cloud_request_queue = init_cloud_prediction_service(
+                device=S2_cloud_classification_device)
 
-    # figure out jobs for multiprocessing -> one per chunk
-    config = {
-        "target_crs": target_crs,
-        "target_resolution": target_resolution,
-        "S2_cloud_classification_device": S2_cloud_classification_device,
-        "time_composite_freq": time_composite_freq,
-        "time_composite_method": time_composite_method,
-        "S2_apply_snow_mask": S2_apply_snow_mask,
-        "S2_apply_cloud_mask": S2_apply_cloud_mask,
-        "S2_cloud_classification": S2_cloud_classification,
-        "S2_mask_snow": S2_mask_snow,
-        "S2_return_cloud_probabilities": S2_return_cloud_probabilities,
-        "zarr_store": zarr_store,
-        "S2_bands_to_save": S2_bands_to_save,
-        "S2_bands": S2_bands,
-        "S1_assets": S1_assets,
-        "cloud_request_queue": cloud_request_queue,
-        "sync_file_path": sync_file_path,
-        "S2_nbar": S2_nbar,
-        "resampling_method": resampling_method,
-        "save_as_uint16": save_as_uint16,
-        "provider": data_provider,
-        "reuse_open_datasets": reuse_open_datasets,
-    }
+        # figure out jobs for multiprocessing -> one per chunk
+        config = {
+            "target_crs": target_crs,
+            "target_resolution": target_resolution,
+            "S2_cloud_classification_device": S2_cloud_classification_device,
+            "time_composite_freq": time_composite_freq,
+            "time_composite_method": time_composite_method,
+            "S2_apply_snow_mask": S2_apply_snow_mask,
+            "S2_apply_cloud_mask": S2_apply_cloud_mask,
+            "S2_cloud_classification": S2_cloud_classification,
+            "S2_mask_snow": S2_mask_snow,
+            "S2_return_cloud_probabilities": S2_return_cloud_probabilities,
+            "zarr_store": zarr_store,
+            "S2_bands_to_save": S2_bands_to_save,
+            "S2_bands": S2_bands,
+            "S1_assets": S1_assets,
+            "cloud_request_queue": cloud_request_queue,
+            "sync_file_path": sync_file_path,
+            "S2_nbar": S2_nbar,
+            "resampling_method": resampling_method,
+            "save_as_uint16": save_as_uint16,
+            "provider": data_provider,
+            "reuse_open_datasets": reuse_open_datasets,
+            "read_retries": read_retries,
+        }
 
-    s2grid = gpd.read_file(
-        str(files("sentle") / "data" /
-            "sentinel2_grid_stripped_with_epsg.gpkg"))
+        s2grid = gpd.read_file(
+            str(files("sentle") / "data" /
+                "sentinel2_grid_stripped_with_epsg.gpkg"))
 
-    def job_generator():
-        global GLOBAL_QUEUE_MANAGER
-        global GLOBAL_QUEUES
-        job_id = 0
+        def job_generator():
+            global GLOBAL_QUEUE_MANAGER
+            global GLOBAL_QUEUES
+            job_id = 0
 
-        # the S2 subtiles depend only on the spatial chunk, not on the
-        # timestamp, so cache them per spatial chunk to avoid recomputing the
-        # (relatively expensive) geometry intersection for every timestamp
-        subtile_cache = {}
+            # the S2 subtiles depend only on the spatial chunk, not on the
+            # timestamp, so cache them per spatial chunk to avoid recomputing the
+            # (relatively expensive) geometry intersection for every timestamp
+            subtile_cache = {}
 
-        # iterate spatial chunks in integer *pixel* space (see
-        # ``spatial_chunk_grid``); the CRS bounds are derived from the pixel
-        # offsets so fractional resolutions / geographic CRSs work.
-        for (xi, yi, x_off, x_end, y_off, y_end,
-             (x_min, y_min, x_max, y_max)) in spatial_chunk_grid(
-                 bound_left, bound_top, width, height, target_resolution,
-                 processing_spatial_chunk_size):
-            last_ts = timestamp_list[0]["ts"]
-            ts_save_index = 0
-            for item in timestamp_list:
-                ret_config = dict(config)
-                ret_config["bound_left"] = x_min
-                ret_config["bound_bottom"] = y_min
-                ret_config["bound_right"] = x_max
-                ret_config["bound_top"] = y_max
-                ret_config["ts"] = item["ts"]
-                ret_config["collection"] = item["collection"]
+            # iterate spatial chunks in integer *pixel* space (see
+            # ``spatial_chunk_grid``); the CRS bounds are derived from the pixel
+            # offsets so fractional resolutions / geographic CRSs work.
+            for (xi, yi, x_off, x_end, y_off, y_end,
+                 (x_min, y_min, x_max, y_max)) in spatial_chunk_grid(
+                     bound_left, bound_top, width, height, target_resolution,
+                     processing_spatial_chunk_size):
+                last_ts = timestamp_list[0]["ts"]
+                ts_save_index = 0
+                for item in timestamp_list:
+                    ret_config = dict(config)
+                    ret_config["bound_left"] = x_min
+                    ret_config["bound_bottom"] = y_min
+                    ret_config["bound_right"] = x_max
+                    ret_config["bound_top"] = y_max
+                    ret_config["ts"] = item["ts"]
+                    ret_config["collection"] = item["collection"]
 
-                if item["ts"] != last_ts:
-                    last_ts = item["ts"]
-                    ts_save_index += 1
+                    if item["ts"] != last_ts:
+                        last_ts = item["ts"]
+                        ts_save_index += 1
 
-                ret_config["zarr_save_slice"] = dict(
-                    x=slice(x_off, x_end),
-                    y=slice(y_off, y_end),
-                    band=slice(0, len(S2_bands_to_save))
-                    if item["collection"] == "sentinel-2-l2a" else slice(
-                        len(S2_bands_to_save), len(total_bands_to_save)),
-                    time=ts_save_index,
-                )
-                if item["collection"] == "sentinel-2-l2a":
-                    if (xi, yi) not in subtile_cache:
-                        subtile_cache[(xi, yi)] = obtain_subtiles(
-                            target_crs=target_crs,
-                            left=ret_config["bound_left"],
-                            bottom=ret_config["bound_bottom"],
-                            right=ret_config["bound_right"],
-                            top=ret_config["bound_top"],
-                            s2grid=s2grid,
-                        )
-                    ret_config["S2_subtiles"] = subtile_cache[(xi, yi)]
-                else:
-                    ret_config["S2_subtiles"] = None
-                if (S2_cloud_classification
-                        and item["collection"] == "sentinel-2-l2a"):
-                    GLOBAL_QUEUES[job_id] = GLOBAL_QUEUE_MANAGER.Queue(
-                        maxsize=1)
-                    ret_config["cloud_response_queue"] = GLOBAL_QUEUES[job_id]
-                    ret_config["job_id"] = job_id
-                    job_id += 1
-                else:
-                    ret_config["cloud_response_queue"] = None
-                    ret_config["job_id"] = None
-                ret_config["save_as_uint16"] = save_as_uint16
-                yield ret_config
+                    ret_config["zarr_save_slice"] = dict(
+                        x=slice(x_off, x_end),
+                        y=slice(y_off, y_end),
+                        band=slice(0, len(S2_bands_to_save))
+                        if item["collection"] == "sentinel-2-l2a" else slice(
+                            len(S2_bands_to_save), len(total_bands_to_save)),
+                        time=ts_save_index,
+                    )
+                    if item["collection"] == "sentinel-2-l2a":
+                        if (xi, yi) not in subtile_cache:
+                            subtile_cache[(xi, yi)] = obtain_subtiles(
+                                target_crs=target_crs,
+                                left=ret_config["bound_left"],
+                                bottom=ret_config["bound_bottom"],
+                                right=ret_config["bound_right"],
+                                top=ret_config["bound_top"],
+                                s2grid=s2grid,
+                            )
+                        ret_config["S2_subtiles"] = subtile_cache[(xi, yi)]
+                    else:
+                        ret_config["S2_subtiles"] = None
+                    if (S2_cloud_classification
+                            and item["collection"] == "sentinel-2-l2a"):
+                        GLOBAL_QUEUES[job_id] = GLOBAL_QUEUE_MANAGER.Queue(
+                            maxsize=1)
+                        ret_config["cloud_response_queue"] = GLOBAL_QUEUES[job_id]
+                        ret_config["job_id"] = job_id
+                        job_id += 1
+                    else:
+                        ret_config["cloud_response_queue"] = None
+                        ret_config["job_id"] = None
+                    ret_config["save_as_uint16"] = save_as_uint16
+                    yield ret_config
 
-    with tqdm_joblib(
-            tqdm(
-                desc="processing",
-                unit="ptiles",
-                dynamic_ncols=True,
-                total=len(timestamp_list),
-            )) as progress_bar:
-        with parallel_backend("cleanupqueue"):
-            # backend can be loky or threading (or maybe something else)
-            Parallel(n_jobs=num_workers,
-                     batch_size=1)(delayed(process_ptile)(**p)
-                                   for p in job_generator())
+        with tqdm_joblib(
+                tqdm(
+                    desc="processing",
+                    unit="ptiles",
+                    dynamic_ncols=True,
+                    total=len(timestamp_list),
+                )) as progress_bar:
+            with parallel_backend("cleanupqueue"):
+                # joblib's ``timeout`` is a per-task budget: it is measured from
+                # the moment a task reaches the head of the retrieval queue
+                # until its result arrives, not as wall clock for the whole
+                # call. joblib can only honour it when it actually forks
+                # workers -- with an effective n_jobs of 1 it falls back to the
+                # SequentialBackend and warns that the timeout is ignored.
+                ptile_timeout = (worker_timeout if
+                                 effective_n_jobs(num_workers) != 1 else None)
+                # backend can be loky or threading (or maybe something else)
+                Parallel(n_jobs=num_workers, batch_size=1,
+                         timeout=ptile_timeout)(delayed(process_ptile)(**p)
+                                                for p in job_generator())
+    finally:
+        # This teardown has to run on the failure path too, otherwise a timed
+        # out, failed or interrupted run leaks the cloud-prediction process, the
+        # queue manager and the sync file (issue #87).
 
-    # close cloud queue
-    if S2_cloud_classification:
-        # end cloud prediction service by sending None to queue
-        cloud_request_queue.put(None)
+        # close cloud queue
+        if S2_cloud_classification:
+            try:
+                if cloud_request_queue is not None:
+                    # end cloud prediction service by sending None to queue
+                    cloud_request_queue.put(None)
 
-        # close response queues manager
-        GLOBAL_QUEUE_MANAGER.shutdown()
+                # close response queues manager
+                if GLOBAL_QUEUE_MANAGER is not None:
+                    GLOBAL_QUEUE_MANAGER.shutdown()
+            except Exception:
+                # an exception raised in a finally replaces the one on its way
+                # out, so never let a teardown failure mask the real error
+                pass
 
-        GLOBAL_QUEUE_MANAGER = None
-        GLOBAL_QUEUES = dict()
+            GLOBAL_QUEUE_MANAGER = None
+            # clear in place: rebinding would only rebind the name in this
+            # module and permanently detach it from sentle.utils.GLOBAL_QUEUES,
+            # which is the dict the "cleanupqueue" backend hook pops from
+            GLOBAL_QUEUES.clear()
 
-    # try to remove sync file
-    if sync_file_path is not None:
-        try:
-            shutil.rmtree(sync_file_path)
-        except Exception:
-            pass
+        # remove the sync file (a plain file, not a directory)
+        cleanup_sync_file(sync_file_path)
 
-    # clean up
-    gc.collect()
+        # clean up
+        gc.collect()

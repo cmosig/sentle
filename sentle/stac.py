@@ -1,8 +1,13 @@
-import contextlib
+import os
+import queue
 import re
+import threading
+import time
+import warnings
 
 import planetary_computer as pc
 import pystac_client
+import rasterio
 from pystac_client.stac_api_io import StacApiIO
 from urllib3 import Retry
 from urllib.parse import urlparse, urlunparse
@@ -10,35 +15,239 @@ from urllib.parse import urlparse, urlunparse
 from .const import (
     CDSE_S3_ENDPOINT,
     CDSE_STAC_ENDPOINT,
+    READ_RETRY_BACKOFF,
     S2_RAW_BAND_RESOLUTION,
+    SAS_SIGN_TIMEOUT,
     STAC_ENDPOINT,
+    STAC_RETRY_AFTER_MAX,
+    STAC_TIMEOUT,
 )
+
+
+class CappedRetry(Retry):
+    """``Retry`` that never sleeps longer than ``STAC_RETRY_AFTER_MAX``.
+
+    urllib3 honours a server-sent ``Retry-After`` verbatim, and only capped it
+    from 2.6.3 on (via a ``retry_after_max`` argument that does not exist on
+    older releases). sentle declares no urllib3 constraint -- it arrives
+    transitively via requests -- so the cap is applied here instead, which works
+    on every version. Without it a ``Retry-After: 3600`` answered 15 times is a
+    15-hour wait inside a single search (issue #87).
+    """
+
+    def get_retry_after(self, response):
+        seconds = super().get_retry_after(response)
+        if seconds is None:
+            return None
+        return min(seconds, STAC_RETRY_AFTER_MAX)
 
 
 def get_stac_api_io():
     """
     Returns a StacApiIO object with a retry policy that retries on 502, 503, 504
-    with exponential backoff to handle server overload
+    with exponential backoff to handle server overload, and a timeout so a
+    request can never wait forever (issue #87).
+
+    ``read=3`` caps how often a *read timeout* is retried while leaving all 15
+    attempts available for 502/503/504 responses: without it a stalled endpoint
+    costs 16 x 60 s plus backoff (~34 min) per STAC request.
     """
-    retry = Retry(total=15,
-                  backoff_factor=1.0,
-                  backoff_jitter=0.2,
-                  backoff_max=120,
-                  status_forcelist=[502, 503, 504],
-                  allowed_methods=None)
-    return StacApiIO(max_retries=retry)
+    retry = CappedRetry(total=15,
+                        read=3,
+                        backoff_factor=1.0,
+                        backoff_jitter=0.2,
+                        backoff_max=120,
+                        status_forcelist=[502, 503, 504],
+                        allowed_methods=None)
+    api_io = StacApiIO(max_retries=retry, timeout=STAC_TIMEOUT)
+    # pystac-client 0.7.7 (the floor declared in setup.py) stores the timeout
+    # and then calls update() without forwarding it, resetting it to None
+    api_io.timeout = STAC_TIMEOUT
+    return api_io
 
 
 def open_catalog():
-    return pystac_client.Client.open(STAC_ENDPOINT,
-                                     stac_io=get_stac_api_io())
+    return _open_stac_client(STAC_ENDPOINT)
 
 
-def refresh_sas_token(url):
+def _open_stac_client(endpoint):
+    """Open a STAC catalog with sentle's retry policy and request timeout.
+
+    ``timeout`` has to be passed to ``Client.open`` as well as to the
+    ``StacApiIO``: ``Client.from_file`` calls ``stac_io.update(...,
+    timeout=timeout)`` unconditionally, so an unset ``timeout`` here would reset
+    the one the ``StacApiIO`` was constructed with back to ``None``.
+    """
+    return pystac_client.Client.open(endpoint,
+                                     stac_io=get_stac_api_io(),
+                                     timeout=STAC_TIMEOUT)
+
+
+# --------------------------------------------------------------------------- #
+# GDAL/libcurl HTTP timeouts
+#
+# GDAL ships without any read timeout: every GDAL_HTTP_* knob below reads back
+# as None on a stock install, so libcurl uses its own defaults --
+# CURLOPT_TIMEOUT 0 (infinite) and CURLOPT_LOW_SPEED_LIMIT 0 (disabled). A peer
+# that accepts the connection and then goes silent -- before or in the middle of
+# a range response -- blocks rasterio.open()/read() forever, which wedges a
+# worker and, since nothing else in the pipeline has a timeout either, the whole
+# run. See issue #87.
+#
+# The bound is deliberately expressed with the *low-speed* knobs rather than
+# GDAL_HTTP_TIMEOUT. GDAL_HTTP_TIMEOUT caps the total transfer time, so it
+# aborts reads that are slow but healthy (a big cold JP2 range read over a thin
+# link fails under GDAL_HTTP_TIMEOUT=5 even though it is progressing the whole
+# time). LOW_SPEED_LIMIT/LOW_SPEED_TIME fire only when throughput actually
+# collapses, which covers both stall shapes. 1000 B/s sustained for 30 s is
+# orders of magnitude below any healthy Planetary Computer / CDSE read. GDAL
+# retries a failed range download internally, so the wall-clock ceiling per dead
+# asset is roughly 6 x GDAL_HTTP_LOW_SPEED_TIME.
+_GDAL_HTTP_TIMEOUT_OPTIONS = {
+    "GDAL_HTTP_CONNECTTIMEOUT": "30",
+    "GDAL_HTTP_LOW_SPEED_LIMIT": "1000",  # bytes per second
+    "GDAL_HTTP_LOW_SPEED_TIME": "30",  # seconds below the limit -> abort
+    "GDAL_HTTP_TCP_KEEPALIVE": "YES",
+}
+
+
+def gdal_http_timeout_options():
+    """HTTP timeout options for GDAL, minus any the user set themselves.
+
+    ``rasterio.Env(**options)`` overrides GDAL's fallback to the process
+    environment, so passing a key unconditionally would silently defeat a user
+    who tuned it through the standard ``GDAL_HTTP_*`` environment variables.
+    Keys the user actually supplied a value for are therefore dropped and the
+    user's value wins. An empty value does not count: GDAL parses ``""`` as 0,
+    which *disables* the abort, and an empty variable is easy to produce by
+    accident (an ``ENV GDAL_HTTP_LOW_SPEED_LIMIT=`` in a Dockerfile, say), so
+    sentle keeps its own default in that case rather than silently going back
+    to an unbounded read.
+    """
+    return {
+        key: value
+        for key, value in _GDAL_HTTP_TIMEOUT_OPTIONS.items()
+        if not os.environ.get(key, "").strip()
+    }
+
+
+class SasSigningTimeout(RuntimeError):
+    """Signing an asset href with a Planetary Computer SAS token timed out."""
+
+
+class SentleReadError(RuntimeError):
+    """A raster read failed on every attempt, so the run is aborted.
+
+    Read failures used to be warned about and skipped, which meant a finished
+    cube could quietly hold less data than the next run over the same area.
+    Failing the whole run instead keeps the contract that a cube which finishes
+    is complete. Deliberately has no custom ``__init__``: joblib re-raises a
+    worker exception by replaying ``cls(*args)``, and an incompatible signature
+    kills the pool's result handler instead of surfacing the error.
+    """
+
+
+def retry_read(operation, description, retries, on_failure=None):
+    """Run ``operation``, retrying transient read failures, then fail loudly.
+
+    ``retries`` extra attempts are made after the first, with exponential
+    backoff. ``on_failure`` runs after every failed attempt and is where the
+    caller drops any state the failure may have poisoned (a cached dataset
+    handle, say). ``RasterioIOError`` is the only thing retried: every network
+    failure shape -- 403/404/503, connection refused, DNS failure, a silent peer
+    and a stalled body -- surfaces as one, at both ``open`` and ``read``.
+    """
+    for attempt in range(retries + 1):
+        try:
+            return operation()
+        except rasterio.errors.RasterioIOError as exc:
+            if on_failure is not None:
+                on_failure()
+            if attempt >= retries:
+                raise SentleReadError(
+                    f"{description} failed after {attempt + 1} attempt(s): "
+                    f"{type(exc).__name__}: {exc}") from exc
+            warnings.warn(f"stac_read_retry {description} "
+                          f"attempt={attempt + 1}/{retries + 1} "
+                          f"exception_type={type(exc).__name__} "
+                          f"message={exc}")
+            time.sleep(READ_RETRY_BACKOFF * (2**attempt))
+
+
+class _SignWorker:
+    """One reusable daemon thread that runs ``planetary_computer.sign`` calls.
+
+    ``pc.sign`` fetches the SAS token with a ``requests.Session`` it builds
+    itself and passes no ``timeout``, so a token endpoint that accepts the
+    connection and then goes silent blocks the caller forever -- the same
+    unbounded wait as everything else in issue #87, on the hottest path in the
+    pipeline (once per asset read). There is no way to inject a timeout into
+    that session, so the call is handed to this thread and abandoned if it does
+    not come back.
+
+    The thread is reused (a fresh thread per call would cost ~6x more) and is a
+    *daemon* so an abandoned, permanently blocked one cannot hold up interpreter
+    shutdown. A worker that has been abandoned is never reused: it may still be
+    stuck in the dead request, which would make every later call wait behind it.
+    """
+
+    def __init__(self):
+        self._requests = queue.Queue()
+        self.usable = True
+        threading.Thread(target=self._loop,
+                         daemon=True,
+                         name="sentle-sas-sign").start()
+
+    def _loop(self):
+        while True:
+            unsigned, done, outcome = self._requests.get()
+            try:
+                outcome["href"] = pc.sign(unsigned)
+            except BaseException as exc:  # reported to the caller verbatim
+                outcome["error"] = exc
+            done.set()
+
+    def sign(self, unsigned, timeout):
+        done, outcome = threading.Event(), {}
+        self._requests.put((unsigned, done, outcome))
+        if not done.wait(timeout):
+            self.usable = False
+            raise SasSigningTimeout(
+                f"signing {unsigned} with a Planetary Computer SAS token took "
+                f"longer than {timeout:g}s -- the token endpoint is not "
+                f"responding")
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["href"]
+
+
+_sign_worker = None
+_sign_worker_pid = None
+_sign_worker_lock = threading.Lock()
+
+
+def _get_sign_worker():
+    global _sign_worker, _sign_worker_pid
+    with _sign_worker_lock:
+        # threads do not survive fork, and sentle forks its workers
+        if (_sign_worker is None or not _sign_worker.usable
+                or _sign_worker_pid != os.getpid()):
+            _sign_worker = _SignWorker()
+            _sign_worker_pid = os.getpid()
+        return _sign_worker
+
+
+def refresh_sas_token(url, timeout=SAS_SIGN_TIMEOUT):
+    """Strip any (possibly expired) SAS token off ``url`` and re-sign it.
+
+    ``timeout`` bounds the token request; pass ``None`` to sign on this thread
+    and wait indefinitely.
+    """
     parsed = urlparse(url)
     unsigned = urlunparse(parsed._replace(query=""))
-    new_signed = pc.sign(unsigned)
-    return new_signed
+    if timeout is None:
+        return pc.sign(unsigned)
+    return _get_sign_worker().sign(unsigned, timeout)
 
 
 # --------------------------------------------------------------------------- #
@@ -66,15 +275,15 @@ class PlanetaryComputerProvider:
     s1_collection = "sentinel-1-rtc"
 
     def open_catalog(self):
-        return pystac_client.Client.open(STAC_ENDPOINT,
-                                         stac_io=get_stac_api_io())
+        return _open_stac_client(STAC_ENDPOINT)
 
     def prepare_href(self, href):
         return refresh_sas_token(href)
 
     def rasterio_env(self):
-        # PC hrefs are plain (signed) HTTPS -> no special GDAL config needed
-        return contextlib.nullcontext()
+        # PC hrefs are plain (signed) HTTPS -> no S3 config needed, but the
+        # reads still need a timeout (see gdal_http_timeout_options)
+        return rasterio.Env(**gdal_http_timeout_options())
 
     def s2_asset_key(self, band):
         return band
@@ -103,7 +312,9 @@ class CDSEProvider:
     s1_collection = None
 
     def open_catalog(self):
-        return pystac_client.Client.open(CDSE_STAC_ENDPOINT)
+        # pystac-client's default StacApiIO has no timeout and retries GET only,
+        # so give CDSE the same policy as Planetary Computer
+        return _open_stac_client(CDSE_STAC_ENDPOINT)
 
     def prepare_href(self, href):
         # s3://eodata/...  ->  /vsis3/eodata/...
@@ -126,7 +337,6 @@ class CDSEProvider:
         # (see ``reuse_open_datasets``), which amortizes the discovery and lets
         # GDAL reuse its decoded-tile block cache. See issue #75.
         import boto3
-        import rasterio
         from rasterio.session import AWSSession
         return rasterio.Env(
             AWSSession(boto3.Session(), endpoint_url=CDSE_S3_ENDPOINT),
@@ -136,6 +346,7 @@ class CDSEProvider:
             GDAL_HTTP_MULTIRANGE="YES",
             GDAL_HTTP_MERGE_CONSECUTIVE_RANGES="YES",
             VSI_CACHE="TRUE",
+            **gdal_http_timeout_options(),
         )
 
     def s2_asset_key(self, band):

@@ -7,7 +7,11 @@ from rasterio import transform, warp, windows
 from rasterio.crs import CRS
 from rasterio.enums import Resampling
 
-from .const import ORBIT_STATE_ABBREVIATION, S1_TRUE_ASSETS
+from .const import (
+    DEFAULT_READ_RETRIES,
+    ORBIT_STATE_ABBREVIATION,
+    S1_TRUE_ASSETS,
+)
 from .reproject_util import (
     bounds_from_transform_height_width_res,
     calculate_aligned_transform,
@@ -15,14 +19,19 @@ from .reproject_util import (
     reproject_nodata_zero,
     window_overlaps_bounds,
 )
-from .stac import refresh_sas_token
+from .stac import (
+    gdal_http_timeout_options,
+    refresh_sas_token,
+    retry_read,
+)
 
 
 def process_ptile_S1(target_crs: CRS, target_resolution: float,
                      time_composite_freq: str, bound_left, bound_right,
                      bound_bottom, bound_top, ts, S1_assets, ptile_height,
                      ptile_width, ptile_transform, item_list,
-                     resampling_method, time_composite_method: str = "mean"):
+                     resampling_method, time_composite_method: str = "mean",
+                     read_retries: int = DEFAULT_READ_RETRIES):
     """Processes a single sentinel 1 ptile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution. The function
     returns the reprojected ptile.
@@ -83,10 +92,18 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
 
             # compute index to save
             band_save_index = S1_assets.index(band_index_string)
-            href = refresh_sas_token(item.assets[s1_true_asset].href)
+            asset_href = item.assets[s1_true_asset].href
 
-            try:
-                with rasterio.open(href) as dr:
+            def read_asset(asset_href=asset_href):
+                # Sentinel-1 does not go through the provider abstraction (only
+                # Planetary Computer serves RTC), but the reads still need the
+                # GDAL HTTP timeouts or a stalled socket hangs forever (#87).
+                # The Env wraps the whole block so ``dr.read`` is covered too.
+                # Only the download lives in here: everything after it mutates
+                # ptile_array, which a retry must not repeat.
+                href = refresh_sas_token(asset_href)
+                with rasterio.Env(**gdal_http_timeout_options()), \
+                        rasterio.open(href) as dr:
 
                     # reproject ptile bounds to S1 tile CRS
                     ptile_bounds_local_crs = warp.transform_bounds(
@@ -97,10 +114,7 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                         # figure out which area of the image is interesting for us
                         read_win = dr.window(*ptile_bounds_local_crs)
                     except rasterio.errors.WindowError:
-                        warnings.warn(
-                            "Asset has transform that rasterio cannot handle. Skipping."
-                        )
-                        continue
+                        return None
 
                     # read windowed
                     data = dr.read(indexes=1,
@@ -112,80 +126,90 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                     # replace nodata with zeros
                     data[data == dr.nodata] = 0
 
-                    # compute aligned reprojection
-                    tile_repr_transform, tile_repr_height, tile_repr_width = calculate_aligned_transform(
-                        dr.crs, target_crs, data.shape[0], data.shape[1],
-                        *ptile_bounds_local_crs, target_resolution)
+                    return data, dr.crs, ptile_bounds_local_crs, read_win
 
-                    data_repr = np.empty((tile_repr_height, tile_repr_width),
-                                         dtype=np.float32)
-
-                    # billinear reprojection for everything
-                    reproject_nodata_zero(
-                        source=data,
-                        destination=data_repr,
-                        src_transform=transform.from_bounds(
-                            *ptile_bounds_local_crs,
-                            height=read_win.height,
-                            width=read_win.width),
-                        src_crs=dr.crs,
-                        dst_crs=target_crs,
-                        dst_transform=tile_repr_transform,
-                        resampling=resampling_method)
-
-                    # explicit clear
-                    del data
-
-                    # compute bounds of reprojected tile in target crs
-                    # this will have nans and so on
-                    tile_bounds_trcs = bounds_from_transform_height_width_res(
-                        tf=tile_repr_transform,
-                        height=tile_repr_height,
-                        width=tile_repr_width,
-                        resolution=target_resolution)
-
-                    # figure out where to write the subtile within the overall bounds
-                    write_win = windows.from_bounds(
-                        *tile_bounds_trcs, transform=ptile_transform
-                    ).round_offsets().round_lengths()
-
-                    if not window_overlaps_bounds(write_win, ptile_height,
-                                                  ptile_width):
-                        continue
-
-                    # determine crop to avoid out of bounds
-                    write_win, local_win = recrop_write_window(
-                        write_win, ptile_height, ptile_width)
-
-                    # crop reprojected downlaoded data
-                    data_repr = data_repr[local_win.row_off:local_win.height +
-                                          local_win.row_off,
-                                          local_win.col_off:local_win.col_off +
-                                          local_win.width]
-
-                    rs = slice(write_win.row_off,
-                               write_win.row_off + write_win.height)
-                    cs = slice(write_win.col_off,
-                               write_win.col_off + write_win.width)
-                    if use_buffer:
-                        # this acquisition writes exactly one band; NoData (0)
-                        # -> NaN so the reducer ignores it
-                        block = data_repr.copy()
-                        block[block == 0] = np.nan
-                        item_array[band_save_index, rs, cs] = block
-                    else:
-                        # save it
-                        ptile_array[band_save_index, rs, cs] += data_repr
-
-                        if perform_aggregation:
-                            # save where we have NaNs
-                            tile_array_count[band_save_index, rs,
-                                             cs] += ~(data_repr == 0)
-
-            except rasterio.errors.RasterioIOError as e:
+            # a read that fails every attempt aborts the run rather than
+            # silently leaving this acquisition out of the cube (issue #87)
+            read_result = retry_read(read_asset,
+                                     f"asset={asset_href}",
+                                     retries=read_retries)
+            if read_result is None:
                 warnings.warn(
-                    f"stac_read_failure asset={href} exception_type={type(e).__name__} message={e} note=planetary_computer_issue"
+                    "Asset has transform that rasterio cannot handle. Skipping."
                 )
+                continue
+            data, src_crs, ptile_bounds_local_crs, read_win = read_result
+
+            # compute aligned reprojection
+            tile_repr_transform, tile_repr_height, tile_repr_width = calculate_aligned_transform(
+                src_crs, target_crs, data.shape[0], data.shape[1],
+                *ptile_bounds_local_crs, target_resolution)
+
+            data_repr = np.empty((tile_repr_height, tile_repr_width),
+                                 dtype=np.float32)
+
+            # billinear reprojection for everything
+            reproject_nodata_zero(
+                source=data,
+                destination=data_repr,
+                src_transform=transform.from_bounds(
+                    *ptile_bounds_local_crs,
+                    height=read_win.height,
+                    width=read_win.width),
+                src_crs=src_crs,
+                dst_crs=target_crs,
+                dst_transform=tile_repr_transform,
+                resampling=resampling_method)
+
+            # explicit clear
+            del data
+
+            # compute bounds of reprojected tile in target crs
+            # this will have nans and so on
+            tile_bounds_trcs = bounds_from_transform_height_width_res(
+                tf=tile_repr_transform,
+                height=tile_repr_height,
+                width=tile_repr_width,
+                resolution=target_resolution)
+
+            # figure out where to write the subtile within the overall bounds
+            write_win = windows.from_bounds(
+                *tile_bounds_trcs, transform=ptile_transform
+            ).round_offsets().round_lengths()
+
+            if not window_overlaps_bounds(write_win, ptile_height,
+                                          ptile_width):
+                continue
+
+            # determine crop to avoid out of bounds
+            write_win, local_win = recrop_write_window(
+                write_win, ptile_height, ptile_width)
+
+            # crop reprojected downlaoded data
+            data_repr = data_repr[local_win.row_off:local_win.height +
+                                  local_win.row_off,
+                                  local_win.col_off:local_win.col_off +
+                                  local_win.width]
+
+            rs = slice(write_win.row_off,
+                       write_win.row_off + write_win.height)
+            cs = slice(write_win.col_off,
+                       write_win.col_off + write_win.width)
+            if use_buffer:
+                # this acquisition writes exactly one band; NoData (0)
+                # -> NaN so the reducer ignores it
+                block = data_repr.copy()
+                block[block == 0] = np.nan
+                item_array[band_save_index, rs, cs] = block
+            else:
+                # save it
+                ptile_array[band_save_index, rs, cs] += data_repr
+
+                if perform_aggregation:
+                    # save where we have NaNs
+                    tile_array_count[band_save_index, rs,
+                                     cs] += ~(data_repr == 0)
+
 
         if use_buffer:
             buffered_items.append(item_array)

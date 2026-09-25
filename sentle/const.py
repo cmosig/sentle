@@ -35,6 +35,28 @@ STAC_ENDPOINT = "https://planetarycomputer.microsoft.com/api/stac/v1"
 CDSE_STAC_ENDPOINT = "https://stac.dataspace.copernicus.eu/v1"
 CDSE_S3_ENDPOINT = "eodata.dataspace.copernicus.eu"
 
+# (connect, read) timeout in seconds for every STAC HTTP request. Without it
+# requests passes timeout=None down to the socket and a peer that accepts the
+# connection but never answers blocks the worker forever -- urllib3's Retry only
+# fires on an exception, and a stalled recv() never raises one. See issue #87.
+STAC_TIMEOUT = (10, 60)
+
+# Upper bound in seconds on a server-sent Retry-After. urllib3 honours the
+# header verbatim, so without a cap a single search can legally sleep for hours.
+STAC_RETRY_AFTER_MAX = 120
+
+# Extra attempts made after a raster read fails, before the run is aborted.
+DEFAULT_READ_RETRIES = 2
+
+# Seconds to wait before the first retry of a failed raster read; doubled for
+# each further attempt.
+READ_RETRY_BACKOFF = 1.0
+
+# How long to wait for a Planetary Computer SAS token before giving up.
+# ``planetary_computer.sign`` passes no timeout to requests, so a silent token
+# endpoint would block a worker forever -- see ``stac.refresh_sas_token``.
+SAS_SIGN_TIMEOUT = 120
+
 S1_ASSETS = ["vh_asc", "vh_desc", "vv_asc", "vv_desc"]
 S1_TRUE_ASSETS = ["vv", "vh"]
 

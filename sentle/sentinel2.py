@@ -14,6 +14,7 @@ from shapely.ops import unary_union
 
 from .cloud_mask import S2_cloud_mask_band, S2_cloud_prob_bands, worker_get_cloud_mask
 from .const import (
+    DEFAULT_READ_RETRIES,
     S2_NBAR_BANDS,
     S2_RAW_BAND_RESOLUTION,
     S2_RAW_BANDS,
@@ -28,7 +29,7 @@ from .reproject_util import (
     window_overlaps_bounds,
 )
 from .snow_mask import S2_snow_mask_band, compute_potential_snow_layer
-from .stac import PlanetaryComputerProvider
+from .stac import PlanetaryComputerProvider, retry_read
 
 
 def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
@@ -179,6 +180,7 @@ def process_S2_subtile(
     S2_bands: list = None,
     provider=None,
     ds_cache=None,
+    read_retries: int = DEFAULT_READ_RETRIES,
 ):
     """Processes a single sentinel 2 subtile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution, applying
@@ -200,8 +202,11 @@ def process_S2_subtile(
         S2_bands = S2_RAW_BANDS
     download_bands = list(S2_bands)
 
-    # init array that needs to be filled
-    subtile_array = np.empty(
+    # init array that needs to be filled. Zero-filled rather than np.empty: 0 is
+    # sentle's NoData sentinel everywhere downstream, so a band whose download
+    # fails below stays NoData instead of carrying uninitialised heap memory
+    # into the cloud classifier and the zarr store (issue #87).
+    subtile_array = np.zeros(
         (len(download_bands), S2_subtile_size, S2_subtile_size),
         dtype=np.float32)
     band_names = download_bands.copy()
@@ -221,12 +226,22 @@ def process_S2_subtile(
     # are cheap, so reusing the open dataset amortizes that one-time cost.
     with provider.rasterio_env():
         for i, band in enumerate(download_bands):
-            href = provider.prepare_href(
-                stac_item.assets[provider.s2_asset_key(band)].href)
-            try:
+            asset_href = stac_item.assets[provider.s2_asset_key(band)].href
+            factor = S2_RAW_BAND_RESOLUTION[band] // 10
+            orig_win = intersecting_windows
+            # convert read window respective to tile resolution
+            # (lower resolution -> fewer pixels for same area)
+            read_window = windows.Window(orig_win.col_off // factor,
+                                         orig_win.row_off // factor,
+                                         orig_win.width // factor,
+                                         orig_win.height // factor)
+
+            def attempt(asset_href=asset_href, read_window=read_window):
+                # re-signed on every attempt: an expired SAS token is a
+                # plausible cause of a failed read, and re-signing is cheap
+                href = provider.prepare_href(asset_href)
                 if ds_cache is not None and href in ds_cache:
-                    dr = ds_cache[href]
-                    owns_dataset = False
+                    dr, owns_dataset = ds_cache[href], False
                 else:
                     dr = rasterio.open(href)
                     if ds_cache is not None:
@@ -235,51 +250,59 @@ def process_S2_subtile(
                     else:
                         owns_dataset = True
                 try:
-                    # convert read window respective to tile resolution
-                    # (lower resolution -> fewer pixels for same area)
-                    factor = S2_RAW_BAND_RESOLUTION[band] // 10
-                    orig_win = intersecting_windows
-                    read_window = windows.Window(orig_win.col_off // factor,
-                                                 orig_win.row_off // factor,
-                                                 orig_win.width // factor,
-                                                 orig_win.height // factor)
-
                     # read subtile and directly upsample to 10m resolution
                     # using nearest-neighbor (default)
-                    read_data = dr.read(indexes=1,
-                                        window=read_window,
-                                        out_shape=(S2_subtile_size,
-                                                   S2_subtile_size),
-                                        out_dtype=np.float32)
-
-                    # harmonization
-                    if apply_harmonization:
-                        # clip values to minimum 1000; done here instead of
-                        # clipping to zero later to avoid integer underflow
-                        # when using a uint16 potentially later on
-                        read_data[read_data < 1000] = 1000
-                        # adjust reflectance for non-zero values
-                        read_data[read_data != 0] -= 1000
-
-                    # save
-                    subtile_array[i] = read_data
-
-                    # save and validate epsg
-                    assert (s2_crs is None) or (
-                        s2_crs
-                        == dr.crs), "CRS mismatch within one sentinel tile"
-                    s2_crs = dr.crs
-
-                    # save transform for a 10m band tile
-                    if band == "B02":
-                        s2_tile_transform = dr.transform
+                    return dr.read(indexes=1,
+                                   window=read_window,
+                                   out_shape=(S2_subtile_size,
+                                              S2_subtile_size),
+                                   out_dtype=np.float32), dr.crs, dr.transform
                 finally:
                     if owns_dataset:
                         dr.close()
-            except rasterio.errors.RasterioIOError as e:
-                warnings.warn(
-                    f"stac_read_failure asset={href} band={band} exception_type={type(e).__name__} message={e} note=provider_issue"
-                )
+
+            def drop_cached_dataset(asset_href=asset_href):
+                # a handle that just failed a read is not reliably reusable --
+                # GTiff latches the failed block for one more attempt and JP2
+                # keeps the corrupted decoded tile indefinitely -- so the retry
+                # has to reopen rather than read through the cached one
+                if ds_cache is None:
+                    return
+                dr = ds_cache.pop(provider.prepare_href(asset_href), None)
+                if dr is not None:
+                    try:
+                        dr.close()
+                    except Exception:
+                        pass
+
+            read_data, band_crs, band_transform = retry_read(
+                attempt,
+                f"asset={asset_href} band={band}",
+                retries=read_retries,
+                on_failure=drop_cached_dataset)
+
+            # harmonization
+            if apply_harmonization:
+                # clip values to minimum 1000; done here instead of
+                # clipping to zero later to avoid integer underflow
+                # when using a uint16 potentially later on
+                read_data[read_data < 1000] = 1000
+                # adjust reflectance for non-zero values
+                read_data[read_data != 0] -= 1000
+
+            # save
+            subtile_array[i] = read_data
+
+            # save and validate epsg
+            assert (s2_crs is None) or (
+                s2_crs == band_crs), "CRS mismatch within one sentinel tile"
+            s2_crs = band_crs
+
+            # save the transform of a 10m band tile. Keyed on the resolution,
+            # not on B02: an S2_bands subset without B02 used to leave this None
+            # and silently drop every subtile, i.e. write an empty cube.
+            if s2_tile_transform is None and factor == 1:
+                s2_tile_transform = band_transform
 
     # in this case we have no data for this subtile, or the tile has no CRS
     if s2_tile_transform is None or not s2_crs:
@@ -414,6 +437,7 @@ def process_ptile_S2_dispatcher(
     time_composite_method: str = "mean",
     provider=None,
     reuse_open_datasets: bool = True,
+    read_retries: int = DEFAULT_READ_RETRIES,
 ):
     if provider is None:
         provider = PlanetaryComputerProvider()
@@ -475,6 +499,7 @@ def process_ptile_S2_dispatcher(
             S2_bands=S2_bands,
             provider=provider,
             reuse_open_datasets=reuse_open_datasets,
+            read_retries=read_retries,
         )
 
         # this happens when the href is not available in subtile -> planetary
@@ -589,6 +614,7 @@ def process_ptile_S2(
     S2_bands: list = None,
     provider=None,
     reuse_open_datasets: bool = True,
+    read_retries: int = DEFAULT_READ_RETRIES,
 ):
     if provider is None:
         provider = PlanetaryComputerProvider()
@@ -653,6 +679,7 @@ def process_ptile_S2(
             S2_bands=S2_bands,
             provider=provider,
             ds_cache=ds_cache,
+            read_retries=read_retries,
         )
 
         # this happens when the href is not available

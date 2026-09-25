@@ -6,9 +6,8 @@ which item properties are available; these offline tests pin that per-provider
 logic (no network).
 """
 
-import contextlib
-
 import pytest
+import rasterio
 
 from sentle.stac import (
     CDSEProvider,
@@ -59,9 +58,13 @@ class TestPlanetaryComputer:
         item = _Item(properties={"s2:processing_baseline": "05.10"})
         assert self.p.s2_processing_baseline(item) == 5.10
 
-    def test_rasterio_env_is_noop(self):
-        assert isinstance(self.p.rasterio_env(),
-                          contextlib.nullcontext)
+    def test_rasterio_env_sets_http_timeouts(self):
+        # this used to be a contextlib.nullcontext -- PC reads had no timeout
+        # at all, so a stalled socket hung the whole run forever (issue #87)
+        env = self.p.rasterio_env()
+        assert isinstance(env, rasterio.Env)
+        assert env.options["GDAL_HTTP_LOW_SPEED_LIMIT"] == "1000"
+        assert env.options["GDAL_HTTP_LOW_SPEED_TIME"] == "30"
 
     def test_supports_sentinel1(self):
         assert self.p.supports_sentinel1 is True
