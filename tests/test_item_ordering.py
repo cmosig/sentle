@@ -18,67 +18,38 @@ Offline: the catalog is a stand-in, nothing is downloaded.
 
 import datetime as dt
 
+import pystac
 import pytest
 
-from sentle.sentle import catalog_search_ptile
+from sentle.stac import ItemIndex, lonlat_bbox
 
 # same acquisition, processed in 2023 and reprocessed in 2024
 ORIGINAL = "S2A_MSIL2A_20230612T100601_R022_T32TPS_20230612T173551"
 REPROCESSED = "S2A_MSIL2A_20230612T100601_R022_T32TPS_20240911T004021"
 
-EARLIER = dt.datetime(2023, 6, 10, 10, 6, 1)
-LATER = dt.datetime(2023, 6, 12, 10, 6, 1)
+UTC = dt.timezone.utc
+EARLIER = dt.datetime(2023, 6, 10, 10, 6, 1, tzinfo=UTC)
+LATER = dt.datetime(2023, 6, 12, 10, 6, 1, tzinfo=UTC)
+
+AREA = lonlat_bbox([9.0, 46.0, 9.1, 46.1])
 
 
-class _Item:
-
-    def __init__(self, item_id, when):
-        self.id = item_id
-        self.datetime = when
-
-    def __repr__(self):
-        return f"_Item({self.id})"
-
-
-class _Search:
-
-    def __init__(self, items):
-        self._items = items
-
-    def item_collection(self):
-        return self._items
-
-
-class _Catalog:
-
-    def __init__(self, items):
-        self._items = items
-
-    def search(self, **kwargs):
-        return _Search(self._items)
-
-
-class _Provider:
-
-    def __init__(self, items):
-        self._items = items
-
-    def open_catalog(self):
-        return _Catalog(self._items)
+def _item(item_id, when):
+    return pystac.Item(
+        id=item_id,
+        geometry={
+            "type": "Polygon",
+            "coordinates": [[[8, 45], [10, 45], [10, 47], [8, 47], [8, 45]]],
+        },
+        bbox=[8, 45, 10, 47],
+        datetime=when,
+        properties={},
+        collection="sentinel-2-l2a",
+    )
 
 
 def _search(items):
-    return catalog_search_ptile(
-        collection="sentinel-2-l2a",
-        ts=LATER,
-        time_composite_freq=None,
-        bound_left=600000,
-        bound_bottom=5099900,
-        bound_right=600100,
-        bound_top=5100000,
-        target_crs="EPSG:32632",
-        provider=_Provider(items),
-    )
+    return ItemIndex(items).query("sentinel-2-l2a", EARLIER, LATER, AREA)
 
 
 @pytest.mark.parametrize("catalog_order", [
@@ -88,14 +59,14 @@ def _search(items):
 def test_newest_reprocessing_is_selected(catalog_order):
     # whichever way the catalog lists them, the reprocessed product wins --
     # ascending order silently downloaded the superseded baseline instead
-    items = [_Item(item_id, LATER) for item_id in catalog_order]
+    items = [_item(item_id, LATER) for item_id in catalog_order]
 
     assert _search(items)[0].id == REPROCESSED
 
 
 def test_order_is_independent_of_what_the_catalog_returned():
-    forwards = [_Item(ORIGINAL, LATER), _Item(REPROCESSED, LATER)]
-    backwards = [_Item(REPROCESSED, LATER), _Item(ORIGINAL, LATER)]
+    forwards = [_item(ORIGINAL, LATER), _item(REPROCESSED, LATER)]
+    backwards = [_item(REPROCESSED, LATER), _item(ORIGINAL, LATER)]
 
     assert [i.id for i in _search(forwards)] == [i.id
                                                  for i in _search(backwards)]
@@ -103,6 +74,6 @@ def test_order_is_independent_of_what_the_catalog_returned():
 
 def test_timestamps_are_ordered_newest_first():
     # pins the accumulation order a mean composite sums float32 in
-    items = [_Item("b", EARLIER), _Item("a", LATER)]
+    items = [_item("b", EARLIER), _item("a", LATER)]
 
     assert [i.datetime for i in _search(items)] == [LATER, EARLIER]

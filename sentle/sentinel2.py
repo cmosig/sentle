@@ -1,4 +1,5 @@
 import itertools
+import math
 import multiprocessing as mp
 import warnings
 
@@ -9,13 +10,15 @@ import scipy.ndimage as sc
 from rasterio import transform, warp, windows
 from rasterio.crs import CRS
 from rasterio.enums import Resampling
-from shapely.geometry import box, shape
+from shapely.geometry import box, mapping, shape
 from shapely.ops import unary_union
 
 from .cloud_mask import S2_cloud_mask_band, S2_cloud_prob_bands, worker_get_cloud_mask
 from .const import (
     DEFAULT_READ_RETRIES,
+    S2_FOOTPRINT_BUFFER_DEG,
     S2_NBAR_BANDS,
+    S2_NEEDED_WINDOW_MARGIN,
     S2_RAW_BAND_RESOLUTION,
     S2_RAW_BANDS,
     S2_subtile_size,
@@ -33,9 +36,13 @@ from .stac import PlanetaryComputerProvider, retry_read
 
 
 def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
-                    top: float, s2grid):
+                    top: float, s2grid, drop_redundant: bool = True):
     """Retrieves the sentinel subtiles that intersect the with the specified
     bounds. The bounds are interpreted based on the given target_crs.
+
+    With ``drop_redundant=False`` subtiles that another tile fully covers are
+    kept too (still in priority order), for ``needed_tile_windows`` to decide
+    per acquisition, when it knows which tiles actually have data.
     """
 
     # TODO make it possible to not only use naive bounds but also MultiPolygons
@@ -140,9 +147,10 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
     claimed = None
     kept_names = []
     kept_windows = []
+    kept_rows = []
     for row in s2grid.itertuples(index=False):
         for win_subtile, footprint in row.window_footprints:
-            if claimed is None:
+            if claimed is None or not drop_redundant:
                 keep = True
             else:
                 covered_area = footprint.intersection(claimed).area
@@ -151,14 +159,139 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
             if keep:
                 kept_names.append(row.name)
                 kept_windows.append(win_subtile)
+                kept_rows.append(row)
         claimed = (row.aoi_footprint
                    if claimed is None else claimed.union(row.aoi_footprint))
 
-    # each row is one subtile of a sentinel tile to download and process
+    # each row is one subtile of a sentinel tile to download and process,
+    # grouped by tile in priority order. The tile's footprint (in s2grid.crs),
+    # CRS and 10 m transform ride along for ``needed_tile_windows``.
     return pd.DataFrame({
         "name": kept_names,
-        "intersecting_windows": kept_windows
+        "intersecting_windows": kept_windows,
+        "tile_footprint": [r.geometry for r in kept_rows],
+        "tile_crs": [r.crs for r in kept_rows],
+        "tile_transform": [r.tile_transform for r in kept_rows],
     })
+
+
+def needed_tile_windows(subtiles, footprints, ptile_area,
+                        margin=S2_NEEDED_WINDOW_MARGIN):
+    """For one acquisition: the 10 m pixel window each tile has to be read in.
+
+    ``obtain_subtiles`` removes overlap between MGRS tiles once per spatial
+    chunk and at subtile granularity, so every acquisition still reads the
+    whole of every kept subtile: the margin of subtiles that stick out of the
+    chunk, and overlap strips in partially redundant subtiles, which are then
+    averaged across tiles. Here each location of the chunk is assigned to one
+    tile per acquisition, and only the part a tile is assigned is read:
+
+    * only tiles with an item in this acquisition (``footprints`` keys) take
+      part, in the priority order of ``subtiles``. With ``subtiles`` from
+      ``obtain_subtiles(..., drop_redundant=False)`` a tile whose item is
+      missing no longer leaves a hole that an overlapping tile can fill.
+    * a tile only claims what its item has data for: its footprint (the
+      ``footprints`` value, lon/lat, or ``None`` if unknown) grown by
+      ``S2_FOOTPRINT_BUFFER_DEG``. Reads of the empty side of a swath edge are
+      skipped, and the next tile fills in if it has data there.
+    * each claim is widened to a pixel window, by ``margin`` pixels so edge
+      resampling sees real neighbours, and clipped to the tile's subtiles.
+
+    ``ptile_area`` is the chunk as a lon/lat geometry. Returns ``{tile name:
+    Window}``; tiles that contribute nothing are left out. Windows are aligned
+    to 6 px so they are whole pixels in the 20 m and 60 m bands too.
+    """
+    needed = {}
+    claimed = None
+    for name, group in subtiles.groupby("name", sort=False):
+        if name not in footprints:
+            continue
+        tile = group.iloc[0]
+        available = ptile_area.intersection(tile.tile_footprint)
+        if footprints[name] is not None:
+            available = available.intersection(footprints[name].buffer(
+                S2_FOOTPRINT_BUFFER_DEG))
+        mine = available if claimed is None else available.difference(claimed)
+        if mine.is_empty or mine.area == 0:
+            continue
+        claimed = mine if claimed is None else claimed.union(mine)
+
+        local = shape(warp.transform_geom("EPSG:4326", tile.tile_crs,
+                                          mapping(mine)))
+        float_win = windows.from_bounds(*local.bounds,
+                                        transform=tile.tile_transform)
+        col0 = (math.floor(float_win.col_off) - margin) // 6 * 6
+        row0 = (math.floor(float_win.row_off) - margin) // 6 * 6
+        col1 = -(-(math.ceil(float_win.col_off + float_win.width) + margin)
+                 // 6) * 6
+        row1 = -(-(math.ceil(float_win.row_off + float_win.height) + margin)
+                 // 6) * 6
+        win = windows.Window(col0, row0, col1 - col0, row1 - row0)
+        tile_union = windows.union(*group["intersecting_windows"])
+        if not windows.intersect(win, tile_union):
+            continue
+        needed[name] = win.intersection(tile_union)
+    return needed
+
+
+def union_tile_windows(subtiles):
+    """The smallest 10 m pixel window per MGRS tile that covers all of that
+    tile's subtiles in ``subtiles`` (the ``obtain_subtiles`` result).
+
+    Subtile windows start at multiples of ``S2_subtile_size`` (732), which 2
+    and 6 divide, so the union lines up with the pixel grid of the 20 m and
+    60 m bands too.
+    """
+    return {
+        name: windows.union(*group["intersecting_windows"])
+        for name, group in subtiles.groupby("name")
+    }
+
+
+def read_subtile_from_tile_window(href, read_window, factor, tile_window,
+                                  window_cache):
+    """Return one subtile band exactly as a direct windowed read would, but
+    served from a single read of the whole ``tile_window``.
+
+    A ptile spans many subtiles (25 for a 30 km cube), and reading each on its
+    own costs an HTTP request per COG block per read, with blocks shared by
+    neighbouring subtiles fetched again whenever they fall out of GDAL's cache.
+    One read of the union window lets GDAL fetch every block once, in
+    contiguous runs. The window is kept in the band's native dtype and
+    resolution (uint16, and 4x/36x fewer pixels for the 20 m/60 m bands) and
+    upsampled per subtile with ``np.repeat`` -- for an integer factor that is
+    the same pixel GDAL's nearest-neighbour ``out_shape`` read picks.
+
+    ``read_window`` is in the band's own pixel grid, like the direct read.
+    """
+    entry = window_cache.get(href)
+    if entry is None:
+        native = windows.Window(tile_window.col_off // factor,
+                                tile_window.row_off // factor,
+                                tile_window.width // factor,
+                                tile_window.height // factor)
+        with rasterio.open(href) as dr:
+            entry = (dr.read(indexes=1, window=native), native, dr.crs,
+                     dr.transform)
+        window_cache[href] = entry
+    data, native, crs, tf = entry
+
+    # the subtile may stick out of the window (S2_skip_redundant_reads reads
+    # only the part an acquisition needs); what lies outside stays 0 = NoData
+    subtile = np.zeros((int(read_window.height), int(read_window.width)),
+                       dtype=np.float32)
+    if windows.intersect(read_window, native):
+        part = read_window.intersection(native)
+        src_row = int(part.row_off - native.row_off)
+        src_col = int(part.col_off - native.col_off)
+        dst_row = int(part.row_off - read_window.row_off)
+        dst_col = int(part.col_off - read_window.col_off)
+        h, w = int(part.height), int(part.width)
+        subtile[dst_row:dst_row + h, dst_col:dst_col + w] = \
+            data[src_row:src_row + h, src_col:src_col + w]
+    if factor > 1:
+        subtile = subtile.repeat(factor, axis=0).repeat(factor, axis=1)
+    return subtile, crs, tf
 
 
 def process_S2_subtile(
@@ -181,6 +314,8 @@ def process_S2_subtile(
     provider=None,
     ds_cache=None,
     read_retries: int = DEFAULT_READ_RETRIES,
+    tile_window=None,
+    window_cache=None,
 ):
     """Processes a single sentinel 2 subtile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution, applying
@@ -193,6 +328,12 @@ def process_S2_subtile(
     requires the full set (enforced upstream). ``provider`` supplies the
     catalog-specific asset keys / href preparation / GDAL env (default:
     Planetary Computer).
+
+    ``tile_window`` (with ``window_cache``) switches the download from one
+    windowed read per subtile and band to one read per band of ``tile_window``,
+    the 10 m pixel window covering every subtile of this ptile in the tile; the
+    subtiles are then sliced out of that. Same pixels, fewer HTTP requests, see
+    ``read_subtile_from_tile_window``.
     """
     if provider is None:
         provider = PlanetaryComputerProvider()
@@ -236,10 +377,14 @@ def process_S2_subtile(
                                          orig_win.width // factor,
                                          orig_win.height // factor)
 
-            def attempt(asset_href=asset_href, read_window=read_window):
+            def attempt(asset_href=asset_href, read_window=read_window,
+                        factor=factor):
                 # re-signed on every attempt: an expired SAS token is a
                 # plausible cause of a failed read, and re-signing is cheap
                 href = provider.prepare_href(asset_href)
+                if window_cache is not None and tile_window is not None:
+                    return read_subtile_from_tile_window(
+                        href, read_window, factor, tile_window, window_cache)
                 if ds_cache is not None and href in ds_cache:
                     dr, owns_dataset = ds_cache[href], False
                 else:
@@ -438,6 +583,8 @@ def process_ptile_S2_dispatcher(
     provider=None,
     reuse_open_datasets: bool = True,
     read_retries: int = DEFAULT_READ_RETRIES,
+    read_ptile_windows: bool = False,
+    skip_redundant_reads: bool = False,
 ):
     if provider is None:
         provider = PlanetaryComputerProvider()
@@ -500,6 +647,8 @@ def process_ptile_S2_dispatcher(
             provider=provider,
             reuse_open_datasets=reuse_open_datasets,
             read_retries=read_retries,
+            read_ptile_windows=read_ptile_windows,
+            skip_redundant_reads=skip_redundant_reads,
         )
 
         # this happens when the href is not available in subtile -> planetary
@@ -615,9 +764,36 @@ def process_ptile_S2(
     provider=None,
     reuse_open_datasets: bool = True,
     read_retries: int = DEFAULT_READ_RETRIES,
+    read_ptile_windows: bool = False,
+    skip_redundant_reads: bool = False,
 ):
     if provider is None:
         provider = PlanetaryComputerProvider()
+
+    # one read per band of everything this ptile needs from a tile, instead of
+    # one per subtile and band (see read_subtile_from_tile_window). The window
+    # cache holds one tile at a time: subtiles come grouped by tile.
+    if skip_redundant_reads:
+        # ... and of each tile only the part this acquisition needs from it
+        read_ptile_windows = True
+        footprints = {}
+        for item in items["item"]:
+            tile = provider.s2_mgrs_tile(item)
+            if tile not in footprints:
+                footprints[tile] = (shape(item.geometry)
+                                    if item.geometry is not None else None)
+        ptile_area = shape(warp.transform_geom(
+            target_crs, "EPSG:4326",
+            mapping(box(*transform.array_bounds(ptile_height, ptile_width,
+                                                ptile_transform)).segmentize(
+                                                    100 * target_resolution))))
+        tile_windows = needed_tile_windows(subtiles, footprints, ptile_area)
+    elif read_ptile_windows:
+        tile_windows = union_tile_windows(subtiles)
+    else:
+        tile_windows = {}
+    window_cache = {} if read_ptile_windows else None
+    window_cache_tile = None
 
     # reuse open band datasets across subtiles of the same tile so the (JP2)
     # per-file tile-structure discovery cost is paid once per file, not per
@@ -660,6 +836,17 @@ def process_ptile_S2(
         # sentinel2 repository
         stac_item = subdf["item"].iloc[0]
 
+        if skip_redundant_reads and not (
+                st.name in tile_windows and windows.intersect(
+                    tile_windows[st.name], st.intersecting_windows)):
+            # another tile covers this subtile in this acquisition, or its
+            # item has no data here
+            continue
+
+        if read_ptile_windows and st.name != window_cache_tile:
+            window_cache.clear()
+            window_cache_tile = st.name
+
         subtile_array_ret, write_win, ret_bands = process_S2_subtile(
             intersecting_windows=st.intersecting_windows,
             stac_item=stac_item,
@@ -680,12 +867,22 @@ def process_ptile_S2(
             provider=provider,
             ds_cache=ds_cache,
             read_retries=read_retries,
+            tile_window=tile_windows.get(st.name),
+            window_cache=window_cache,
         )
 
         # this happens when the href is not available
         # -> planetary computer issue
         if subtile_array_ret is None or write_win is None or ret_bands is None:
             continue
+
+        if skip_redundant_reads:
+            # the part of the subtile that was not read is 0, but the derived
+            # layers (snow, cloud) computed there are not -- drop them so they
+            # are not averaged with the tile that does cover those pixels
+            raw = [ret_bands.index(b) for b in S2_bands]
+            subtile_array_ret[:, np.all(subtile_array_ret[raw] == 0,
+                                        axis=0)] = 0
 
         # only assign the sentinel/band accumulator for valid subtiles, so an
         # out-of-bounds last subtile cannot clobber it back to None and discard
