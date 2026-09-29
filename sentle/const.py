@@ -41,6 +41,20 @@ CDSE_S3_ENDPOINT = "eodata.dataspace.copernicus.eu"
 # fires on an exception, and a stalled recv() never raises one. See issue #87.
 STAC_TIMEOUT = (10, 60)
 
+# Items requested per STAC search page. Left unset, Planetary Computer serves
+# 10 items per page, so a search over a year of a few tiles took dozens of
+# round trips. 1000 is Planetary Computer's maximum and well within the 10000
+# every stac-fastapi deployment (including CDSE) accepts.
+STAC_SEARCH_PAGE_SIZE = 1000
+
+# Degrees added on every side of the area's bbox for the single up-front item
+# search. The per-ptile filter compares against each spatial chunk's own
+# lon/lat bbox, which ``transform_bounds`` densifies independently of the full
+# area's, so a chunk on the edge can poke out of the area bbox by a hair. The
+# pad keeps the search a superset of every chunk; the extra items it pulls in
+# are dropped again by the local filter.
+STAC_SEARCH_BBOX_PAD = 0.01
+
 # Upper bound in seconds on a server-sent Retry-After. urllib3 honours the
 # header verbatim, so without a cap a single search can legally sleep for hours.
 STAC_RETRY_AFTER_MAX = 120

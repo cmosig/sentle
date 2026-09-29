@@ -11,7 +11,8 @@ the new timeout, and Ctrl-C) leaked the cloud-prediction process, the queue
 manager and the sync file.
 
 Offline: the joblib tests only sleep, and the ``process()`` tests replace
-``retrieve_timestamps`` and ``Parallel`` with stand-ins, so nothing downloads.
+``search_items``, ``retrieve_timestamps`` and ``Parallel`` with stand-ins, so
+nothing downloads.
 """
 
 import multiprocessing
@@ -19,6 +20,7 @@ import time
 from pathlib import Path
 
 import pandas as pd
+import pystac
 import pytest
 from joblib import Parallel, delayed, parallel_backend
 
@@ -93,7 +95,25 @@ class _FakeManager:
         self.shutdown_calls += 1
 
 
+def _fake_item():
+    # covers the bounds _offline_process asks for (UTM 32N, ~11.0E 46.0N)
+    return pystac.Item(
+        id="S2A_MSIL2A_20230601T100601_R022_T32TPS_20230601T173551",
+        geometry={
+            "type": "Polygon",
+            "coordinates": [[[10, 45], [12, 45], [12, 47], [10, 47],
+                             [10, 45]]],
+        },
+        bbox=[10, 45, 12, 47],
+        datetime=pd.Timestamp("2023-06-01T10:00:00Z").to_pydatetime(),
+        properties={},
+        collection="sentinel-2-l2a",
+    )
+
+
 def _offline_process(monkeypatch, tmp_path, parallel_cls, **overrides):
+    monkeypatch.setattr(sentle_mod, "search_items",
+                        lambda *a, **k: [_fake_item()])
     monkeypatch.setattr(
         sentle_mod, "retrieve_timestamps", lambda **kwargs: [{
             "collection": "sentinel-2-l2a",

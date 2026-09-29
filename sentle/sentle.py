@@ -17,6 +17,7 @@ from pystac_client.item_search import DatetimeLike
 from rasterio import warp
 from rasterio.crs import CRS
 from rasterio.enums import Resampling
+from shapely.geometry import shape
 from tqdm.auto import tqdm
 from filelock import FileLock
 
@@ -42,7 +43,13 @@ from .reproject_util import (
 )
 from .sentinel1 import process_ptile_S1
 from .sentinel2 import obtain_subtiles, process_ptile_S2_dispatcher
-from .stac import get_provider
+from .stac import (
+    ItemIndex,
+    get_provider,
+    lonlat_bbox,
+    pad_lonlat_bbox,
+    search_items,
+)
 from .utils import GLOBAL_QUEUE_MANAGER, GLOBAL_QUEUES, tqdm_joblib
 
 
@@ -68,59 +75,26 @@ def _s2_bands_to_save(S2_bands, S2_mask_snow, S2_cloud_classification,
     return bands
 
 
-def catalog_search_ptile(
-    collection: str,
-    ts,
-    time_composite_freq,
-    bound_left,
-    bound_bottom,
-    bound_right,
-    bound_top,
-    target_crs,
-    provider,
-) -> list:
-    # timestamp
+def lonlat_bounds(target_crs, bound_left, bound_bottom, bound_right,
+                  bound_top):
+    """Bounds in ``target_crs`` as a STAC ``[west, south, east, north]``."""
+    return warp.transform_bounds(
+        src_crs=target_crs,
+        dst_crs="EPSG:4326",
+        left=bound_left,
+        bottom=bound_bottom,
+        right=bound_right,
+        top=bound_top,
+    )
+
+
+def ptile_time_range(ts, time_composite_freq):
+    """The ``[start, end]`` (both inclusive) a ptile at ``ts`` covers: just
+    ``ts`` itself, or the composite window centred on it."""
     if time_composite_freq is None:
-        datetime_range = ts
-    else:
-        timestamp_center = ts
-        datetime_range = [
-            timestamp_center - (pd.Timedelta(time_composite_freq) / 2),
-            timestamp_center + (pd.Timedelta(time_composite_freq) / 2),
-        ]
-
-    # open stac catalog
-    catalog = provider.open_catalog()
-
-    # retrieve items (possible across multiple sentinel tile) for specified
-    # timestamp
-    item_list = list(
-        catalog.search(
-            collections=[collection],
-            datetime=datetime_range,
-            bbox=warp.transform_bounds(
-                src_crs=target_crs,
-                dst_crs="EPSG:4326",
-                left=bound_left,
-                bottom=bound_bottom,
-                right=bound_right,
-                top=bound_top,
-            ),
-        ).item_collection())
-
-    # The catalog does not promise an order, and the order decides which of two
-    # reprocessed products wins (sentinel2.py takes the first item for a tile)
-    # as well as the order a mean composite accumulates float32 in. Sort so two
-    # runs agree.
-    #
-    # Descending, deliberately. The last field of a Sentinel product id is its
-    # processing timestamp, so descending id puts the most recent reprocessing
-    # of an acquisition first -- the newer baseline is the one to prefer, and it
-    # is also what Planetary Computer happens to return today, so this pins the
-    # current selection rather than silently switching to superseded products.
-    item_list.sort(key=lambda item: (item.datetime, item.id), reverse=True)
-
-    return item_list
+        return ts, ts
+    half_window = pd.Timedelta(time_composite_freq) / 2
+    return ts - half_window, ts + half_window
 
 
 def process_ptile(
@@ -156,34 +130,20 @@ def process_ptile(
     provider,
     reuse_open_datasets: bool,
     read_retries: int,
+    item_list: list,
 ):
-    """Passing chunk to either sentinel-1 or sentinel-2 processor"""
+    """Passing chunk to either sentinel-1 or sentinel-2 processor
+
+    ``item_list`` holds the STAC items covering this ptile, newest first. They
+    are picked out of the one catalog search ``process`` runs up front (see
+    ``ItemIndex``), so a ptile makes no catalog request of its own.
+    """
 
     # determine ptile dimensions and transform from bounds
     ptile_transform, ptile_height, ptile_width = transform_height_width_from_bounds_res(
         bound_left, bound_bottom, bound_right, bound_top, target_resolution)
 
-    # TODO too many unessary stac requests are created here
-    # when not using aggregation across large spatial scales
-    # -> this function is called for each timestamp that there was a sentinel 2
-    # tile anywhere in the entire bounds
-    # one could share the initial item list with all processes and the
-    # processes filter these instead based on extent -> we have the dataframe
-    # ready anyway
-    item_list = catalog_search_ptile(
-        collection=collection,
-        ts=ts,
-        time_composite_freq=time_composite_freq,
-        bound_left=bound_left,
-        bound_right=bound_right,
-        bound_bottom=bound_bottom,
-        bound_top=bound_top,
-        target_crs=target_crs,
-        provider=provider,
-    )
-
     if len(item_list) == 0:
-        # no items found for this ptile, this happens sometimes. planetary problem. dunno why.
         return job_id
 
     if collection == "sentinel-1-rtc":
@@ -766,32 +726,36 @@ def retrieve_timestamps(
     target_crs: CRS,
     collections: list[str],
     provider=None,
+    items=None,
 ) -> list[dict]:
+    """The time axis of the cube, newest first, one entry per timestamp and
+    collection.
+
+    Without ``time_composite_freq`` these are the acquisition times of the
+    ``items`` found in the area. ``items`` is the result of a search over the
+    requested ``datetime`` range (the area may be padded, see ``process``); if
+    it is not given, the catalog is searched here.
+    """
     if time_composite_freq is None:
         # get all items within date range and area
+        area_bbox = lonlat_bounds(target_crs, bound_left, bound_bottom,
+                                  bound_right, bound_top)
+        if items is None:
+            if provider is None:
+                provider = get_provider("planetary_computer")
+            items = search_items(provider, collections, datetime, area_bbox)
 
-        # open the provider's stac catalog
-        if provider is None:
-            provider = get_provider("planetary_computer")
-        catalog = provider.open_catalog()
-
-        search = catalog.search(
-            collections=collections,
-            datetime=datetime,
-            bbox=warp.transform_bounds(
-                src_crs=target_crs,
-                dst_crs="EPSG:4326",
-                left=bound_left,
-                bottom=bound_bottom,
-                right=bound_right,
-                top=bound_top,
-            ),
-        )
+        # the caller's search may have covered a padded area, so keep only the
+        # items that intersect the area itself -- what the search used to match
+        area = lonlat_bbox(area_bbox)
+        items = [
+            i for i in items if i.collection_id in collections
+            and i.geometry is not None and shape(i.geometry).intersects(area)
+        ]
 
         # sort timesteps and filter duplicates -> multiple items can have the
         # exact same timestamp
         df = pd.DataFrame()
-        items = list(search.item_collection())
         if len(items) == 0:
             # used to be exit(), which raises SystemExit(None) -> status 0, so
             # a batch job reported success while producing no cube at all
@@ -1086,7 +1050,15 @@ def process(
     if S1_assets is not None:
         collections.append(data_provider.s1_collection)
 
-    timestamp_list = retrieve_timestamps(
+    # Search the catalog exactly once, for the whole area and time range.
+    # Every ptile picks its items out of this result locally (``ItemIndex``)
+    # instead of searching the catalog itself: that used to cost at least two
+    # requests per ptile (open the catalog, search, plus a page per 10 items)
+    # and was what ran into Planetary Computer's rate limit.
+    search_bbox = pad_lonlat_bbox(
+        lonlat_bounds(target_crs, bound_left, bound_bottom, bound_right,
+                      bound_top))
+    timestamp_kwargs = dict(
         time_composite_freq=time_composite_freq,
         bound_left=bound_left,
         bound_bottom=bound_bottom,
@@ -1097,6 +1069,20 @@ def process(
         collections=collections,
         provider=data_provider,
     )
+    if time_composite_freq is None:
+        items = search_items(data_provider, collections, datetime,
+                             search_bbox)
+        timestamp_list = retrieve_timestamps(items=items, **timestamp_kwargs)
+    else:
+        # the time axis comes from the frequency alone; the composite windows
+        # around its first and last timestamp may reach past ``datetime``
+        timestamp_list = retrieve_timestamps(**timestamp_kwargs)
+        timestamps = [entry["ts"] for entry in timestamp_list]
+        items = search_items(data_provider, collections, [
+            ptile_time_range(min(timestamps), time_composite_freq)[0],
+            ptile_time_range(max(timestamps), time_composite_freq)[1],
+        ], search_bbox)
+    item_index = ItemIndex(items)
 
     # compute bounds, with and height  for the entire dataset
     bound_left, bound_bottom, bound_right, bound_top = check_and_round_bounds(
@@ -1166,6 +1152,41 @@ def process(
             str(files("sentle") / "data" /
                 "sentinel2_grid_stripped_with_epsg.gpkg"))
 
+        # One job per spatial chunk and timestamp that actually has items. The
+        # rest used to be dispatched anyway only to find nothing in the worker
+        # -- the common case without compositing, where a timestamp in one
+        # corner of a large area is empty in every other chunk.
+        #
+        # Spatial chunks are iterated in integer *pixel* space (see
+        # ``spatial_chunk_grid``); the CRS bounds are derived from the pixel
+        # offsets so fractional resolutions / geographic CRSs work.
+        jobs = []
+        for chunk in spatial_chunk_grid(bound_left, bound_top, width, height,
+                                        target_resolution,
+                                        processing_spatial_chunk_size):
+            chunk_area = lonlat_bbox(lonlat_bounds(target_crs, *chunk[-1]))
+            last_ts = timestamp_list[0]["ts"]
+            ts_save_index = 0
+            for item in timestamp_list:
+                if item["ts"] != last_ts:
+                    last_ts = item["ts"]
+                    ts_save_index += 1
+                item_list = item_index.query(
+                    item["collection"],
+                    *ptile_time_range(item["ts"], time_composite_freq),
+                    chunk_area)
+                if item_list:
+                    jobs.append((chunk, item, ts_save_index, item_list))
+
+        # fetch the SAS tokens once here rather than in every worker at pool
+        # start: forked workers inherit them. One item per collection covers
+        # every storage container the reads go to.
+        one_item_per_collection = {}
+        for _, _, _, item_list in jobs:
+            one_item_per_collection.setdefault(item_list[0].collection_id,
+                                               item_list[0])
+        data_provider.prefetch_sas_tokens(one_item_per_collection.values())
+
         def job_generator():
             global GLOBAL_QUEUE_MANAGER
             global GLOBAL_QUEUES
@@ -1176,68 +1197,57 @@ def process(
             # (relatively expensive) geometry intersection for every timestamp
             subtile_cache = {}
 
-            # iterate spatial chunks in integer *pixel* space (see
-            # ``spatial_chunk_grid``); the CRS bounds are derived from the pixel
-            # offsets so fractional resolutions / geographic CRSs work.
-            for (xi, yi, x_off, x_end, y_off, y_end,
-                 (x_min, y_min, x_max, y_max)) in spatial_chunk_grid(
-                     bound_left, bound_top, width, height, target_resolution,
-                     processing_spatial_chunk_size):
-                last_ts = timestamp_list[0]["ts"]
-                ts_save_index = 0
-                for item in timestamp_list:
-                    ret_config = dict(config)
-                    ret_config["bound_left"] = x_min
-                    ret_config["bound_bottom"] = y_min
-                    ret_config["bound_right"] = x_max
-                    ret_config["bound_top"] = y_max
-                    ret_config["ts"] = item["ts"]
-                    ret_config["collection"] = item["collection"]
-
-                    if item["ts"] != last_ts:
-                        last_ts = item["ts"]
-                        ts_save_index += 1
-
-                    ret_config["zarr_save_slice"] = dict(
-                        x=slice(x_off, x_end),
-                        y=slice(y_off, y_end),
-                        band=slice(0, len(S2_bands_to_save))
-                        if item["collection"] == "sentinel-2-l2a" else slice(
-                            len(S2_bands_to_save), len(total_bands_to_save)),
-                        time=ts_save_index,
-                    )
-                    if item["collection"] == "sentinel-2-l2a":
-                        if (xi, yi) not in subtile_cache:
-                            subtile_cache[(xi, yi)] = obtain_subtiles(
-                                target_crs=target_crs,
-                                left=ret_config["bound_left"],
-                                bottom=ret_config["bound_bottom"],
-                                right=ret_config["bound_right"],
-                                top=ret_config["bound_top"],
-                                s2grid=s2grid,
-                            )
-                        ret_config["S2_subtiles"] = subtile_cache[(xi, yi)]
-                    else:
-                        ret_config["S2_subtiles"] = None
-                    if (S2_cloud_classification
-                            and item["collection"] == "sentinel-2-l2a"):
-                        GLOBAL_QUEUES[job_id] = GLOBAL_QUEUE_MANAGER.Queue(
-                            maxsize=1)
-                        ret_config["cloud_response_queue"] = GLOBAL_QUEUES[job_id]
-                        ret_config["job_id"] = job_id
-                        job_id += 1
-                    else:
-                        ret_config["cloud_response_queue"] = None
-                        ret_config["job_id"] = None
-                    ret_config["save_as_uint16"] = save_as_uint16
-                    yield ret_config
+            for ((xi, yi, x_off, x_end, y_off, y_end,
+                  (x_min, y_min, x_max, y_max)), item, ts_save_index,
+                 item_list) in jobs:
+                ret_config = dict(config)
+                ret_config["bound_left"] = x_min
+                ret_config["bound_bottom"] = y_min
+                ret_config["bound_right"] = x_max
+                ret_config["bound_top"] = y_max
+                ret_config["ts"] = item["ts"]
+                ret_config["collection"] = item["collection"]
+                ret_config["item_list"] = item_list
+                ret_config["zarr_save_slice"] = dict(
+                    x=slice(x_off, x_end),
+                    y=slice(y_off, y_end),
+                    band=slice(0, len(S2_bands_to_save))
+                    if item["collection"] == "sentinel-2-l2a" else slice(
+                        len(S2_bands_to_save), len(total_bands_to_save)),
+                    time=ts_save_index,
+                )
+                if item["collection"] == "sentinel-2-l2a":
+                    if (xi, yi) not in subtile_cache:
+                        subtile_cache[(xi, yi)] = obtain_subtiles(
+                            target_crs=target_crs,
+                            left=ret_config["bound_left"],
+                            bottom=ret_config["bound_bottom"],
+                            right=ret_config["bound_right"],
+                            top=ret_config["bound_top"],
+                            s2grid=s2grid,
+                        )
+                    ret_config["S2_subtiles"] = subtile_cache[(xi, yi)]
+                else:
+                    ret_config["S2_subtiles"] = None
+                if (S2_cloud_classification
+                        and item["collection"] == "sentinel-2-l2a"):
+                    GLOBAL_QUEUES[job_id] = GLOBAL_QUEUE_MANAGER.Queue(
+                        maxsize=1)
+                    ret_config["cloud_response_queue"] = GLOBAL_QUEUES[job_id]
+                    ret_config["job_id"] = job_id
+                    job_id += 1
+                else:
+                    ret_config["cloud_response_queue"] = None
+                    ret_config["job_id"] = None
+                ret_config["save_as_uint16"] = save_as_uint16
+                yield ret_config
 
         with tqdm_joblib(
                 tqdm(
                     desc="processing",
                     unit="ptiles",
                     dynamic_ncols=True,
-                    total=len(timestamp_list),
+                    total=len(jobs),
                 )) as progress_bar:
             with parallel_backend("cleanupqueue"):
                 # joblib's ``timeout`` is a per-task budget: it is measured from
