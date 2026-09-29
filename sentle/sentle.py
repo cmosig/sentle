@@ -132,6 +132,7 @@ def process_ptile(
     read_retries: int,
     item_list: list,
     read_ptile_windows: bool = False,
+    S2_skip_redundant_reads: bool = False,
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor
 
@@ -198,6 +199,7 @@ def process_ptile(
             reuse_open_datasets=reuse_open_datasets,
             read_retries=read_retries,
             read_ptile_windows=read_ptile_windows,
+            skip_redundant_reads=S2_skip_redundant_reads,
         )
 
     else:
@@ -822,6 +824,7 @@ def process(
     provider: str = "planetary_computer",
     reuse_open_datasets: bool = True,
     read_ptile_windows: bool = False,
+    S2_skip_redundant_reads: bool = False,
     processing_spatial_chunk_size: int = 4000,
     S1_assets: list[str] = S1_ASSETS,
     S2_bands: list[str] = S2_RAW_BANDS,
@@ -939,13 +942,26 @@ def process(
        Sentinel-2 only. Download each band once per spatial chunk -- one read
        of the window covering all the chunk's subtiles -- instead of once per
        subtile. The pixels are identical. Against a local stand-in for the
-       data host, a 3000 x 3000 px chunk (30 km at 10 m) took 108 HTTP
-       requests per acquisition instead of 142 (see
-       ``benchmarks/request_count.py``).
+       data host, a 30 km chunk took 35-50% fewer HTTP requests per
+       acquisition (see ``benchmarks/request_count.py``).
        Costs extra memory per worker while a chunk is read: the chunk's window
        of every band at its native resolution and 16 bit (~150 MB for a
        3000 x 3000 px chunk). ``reuse_open_datasets`` has no effect on
        Sentinel-2 reads while this is on.
+    S2_skip_redundant_reads: bool, default=False
+       Prototype. Implies ``read_ptile_windows``, and per acquisition reads of
+       each MGRS tile only the part of the spatial chunk it is needed for:
+       every location is read from one tile (the highest-priority one whose
+       item has data there), and nothing is read outside the chunk (plus a
+       36 px margin) or outside an item's data footprint. For a 30 km chunk
+       this took 43-77% fewer HTTP requests per
+       acquisition than the default (``benchmarks/request_count.py``). Unlike
+       ``read_ptile_windows`` this changes some output values: where MGRS
+       tiles overlap, pixels come from one tile instead of being averaged
+       across both (a margin-wide strip still is), and cloud masks right
+       next to a cut can differ because the cloud model sees NoData beyond
+       it. A tile missing from an acquisition is now filled in by an
+       overlapping tile instead of leaving a gap.
     processing_spatial_chunk_size: int, default=4000
        Size of spatial chunks across which we perform parallization.
     S1_assets: list[str], default=["vh_asc", "vh_desc", "vv_asc", "vv_desc"]
@@ -1160,6 +1176,7 @@ def process(
             "provider": data_provider,
             "reuse_open_datasets": reuse_open_datasets,
             "read_ptile_windows": read_ptile_windows,
+            "S2_skip_redundant_reads": S2_skip_redundant_reads,
             "read_retries": read_retries,
         }
 
@@ -1240,6 +1257,8 @@ def process(
                             right=ret_config["bound_right"],
                             top=ret_config["bound_top"],
                             s2grid=s2grid,
+                            # decided per acquisition instead
+                            drop_redundant=not S2_skip_redundant_reads,
                         )
                     ret_config["S2_subtiles"] = subtile_cache[(xi, yi)]
                 else:

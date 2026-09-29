@@ -71,6 +71,16 @@ READ_RETRY_BACKOFF = 1.0
 # endpoint would block a worker forever -- see ``stac.refresh_sas_token``.
 SAS_SIGN_TIMEOUT = 120
 
+# ``S2_skip_redundant_reads``: pixels (10 m) read beyond the part of a tile an
+# acquisition needs, so resampling at the edge of that part still sees real
+# neighbours. A multiple of 6 keeps the 60 m band grid aligned.
+S2_NEEDED_WINDOW_MARGIN = 36
+
+# ``S2_skip_redundant_reads``: degrees an item's footprint is grown by before
+# reads outside it are skipped. STAC footprints are simplified outlines of the
+# valid data, so this keeps real pixels just outside the outline.
+S2_FOOTPRINT_BUFFER_DEG = 0.01
+
 S1_ASSETS = ["vh_asc", "vh_desc", "vv_asc", "vv_desc"]
 S1_TRUE_ASSETS = ["vv", "vh"]
 
