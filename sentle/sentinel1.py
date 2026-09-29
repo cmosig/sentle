@@ -20,7 +20,7 @@ from .reproject_util import (
     window_overlaps_bounds,
 )
 from .stac import (
-    gdal_http_timeout_options,
+    gdal_read_options,
     refresh_sas_token,
     retry_read,
 )
@@ -102,7 +102,7 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                 # Only the download lives in here: everything after it mutates
                 # ptile_array, which a retry must not repeat.
                 href = refresh_sas_token(asset_href)
-                with rasterio.Env(**gdal_http_timeout_options()), \
+                with rasterio.Env(**gdal_read_options()), \
                         rasterio.open(href) as dr:
 
                     # reproject ptile bounds to S1 tile CRS

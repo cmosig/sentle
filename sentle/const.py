@@ -41,12 +41,32 @@ CDSE_S3_ENDPOINT = "eodata.dataspace.copernicus.eu"
 # fires on an exception, and a stalled recv() never raises one. See issue #87.
 STAC_TIMEOUT = (10, 60)
 
+# Items requested per STAC search page on Planetary Computer (its maximum).
+# Left unset it serves 250 per page. Providers can override this with a
+# ``stac_page_size`` attribute: CDSE rejects a limit above 100 for
+# sentinel-2-l2a unless the fields extension is used.
+STAC_SEARCH_PAGE_SIZE = 1000
+
+# Degrees added on every side of the area's bbox for the single up-front item
+# search. The per-ptile filter compares against each spatial chunk's own
+# lon/lat bbox, which ``transform_bounds`` densifies independently of the full
+# area's, so a chunk on the edge can poke out of the area bbox by a hair. The
+# pad keeps the search a superset of every chunk; the extra items it pulls in
+# are dropped again by the local filter.
+STAC_SEARCH_BBOX_PAD = 0.01
+
 # Upper bound in seconds on a server-sent Retry-After. urllib3 honours the
 # header verbatim, so without a cap a single search can legally sleep for hours.
 STAC_RETRY_AFTER_MAX = 120
 
 # Extra attempts made after a raster read fails, before the run is aborted.
 DEFAULT_READ_RETRIES = 2
+
+# Band windows of one MGRS tile fetched concurrently per worker
+# (``sentinel2.prefetch_tile_windows``). Each band is one file, and fetching
+# them one after another leaves a worker waiting on round trips most of the
+# time; the requests are the same either way.
+S2_READ_THREADS = 4
 
 # Seconds to wait before the first retry of a failed raster read; doubled for
 # each further attempt.
@@ -56,6 +76,19 @@ READ_RETRY_BACKOFF = 1.0
 # ``planetary_computer.sign`` passes no timeout to requests, so a silent token
 # endpoint would block a worker forever -- see ``stac.refresh_sas_token``.
 SAS_SIGN_TIMEOUT = 120
+
+# Pixels (at the target resolution) around a pixel without any data within
+# which a pixel missing only some bands also counts as a hole to fill: at a
+# swath edge the bands end a few pixels apart (up to 6 px measured), so the
+# fringe has some bands but not all -- and a pixel missing any band is NoData.
+# Single dark pixels elsewhere (a band harmonized to 0) do not trigger reads.
+S2_HOLE_FRINGE_PX = 32
+
+# Degrees an item's footprint is grown by before a redundant subtile is ruled
+# out for filling a hole there (``sentinel2._hole_filling_subtiles``). STAC
+# footprints are simplified outlines of the valid data, so this keeps real
+# pixels just outside the outline.
+S2_FOOTPRINT_BUFFER_DEG = 0.01
 
 S1_ASSETS = ["vh_asc", "vh_desc", "vv_asc", "vv_desc"]
 S1_TRUE_ASSETS = ["vv", "vh"]

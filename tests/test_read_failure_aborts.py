@@ -23,7 +23,9 @@ from sentle import sentinel2, stac
 from sentle.const import S2_RAW_BANDS
 from sentle.stac import SentleReadError
 
-SIZE = 32
+# a multiple of 6 like the real S2_subtile_size (732), so the 20 m and 60 m
+# bands cover whole pixels of the subtile
+SIZE = 36
 
 
 class _FakeReader:
@@ -32,8 +34,9 @@ class _FakeReader:
         self.crs = crs
         self.transform = tf
 
-    def read(self, indexes, window, out_shape, out_dtype, **kwargs):
-        return np.full(out_shape, 5000, dtype=out_dtype)
+    def read(self, indexes, window, out_shape=None, out_dtype=np.uint16, **kwargs):
+        shape = out_shape or (int(window.height), int(window.width))
+        return np.full(shape, 5000, dtype=out_dtype)
 
     def close(self):
         pass
@@ -130,20 +133,21 @@ def test_retries_are_bounded_and_then_it_gives_up(monkeypatch):
     assert calls["n"] == 3
 
 
-def test_a_failed_read_evicts_the_cached_dataset(monkeypatch):
-    # a handle that just failed is not reliably reusable (GTiff latches the
-    # failed block, JP2 keeps the corrupted decoded tile), so the retry has to
-    # reopen rather than read through the cached one
-    fake_open, _ = _reader_failing("B03", times=1)
+def test_a_failed_read_leaves_nothing_cached(monkeypatch):
+    # the band windows of a tile are cached for its other subtiles; a read
+    # that failed must not leave a half-read entry behind, so the retry (and
+    # every later subtile) opens and reads the file again
+    fake_open, calls = _reader_failing("B03", times=1)
     monkeypatch.setattr(stac, "READ_RETRY_BACKOFF", 0.0)
-    ds_cache = {}
+    window_cache = {}
 
     with pytest.warns(UserWarning, match="stac_read_retry"):
-        _run(monkeypatch, fake_open, read_retries=1, ds_cache=ds_cache)
+        _run(monkeypatch, fake_open, read_retries=1,
+             window_cache=window_cache)
 
-    # the failed href was not left behind poisoning later subtiles
-    assert all("B03" not in href or ds is not None
-               for href, ds in ds_cache.items())
+    assert calls["n"] == 2
+    assert set(window_cache) == {
+        f"https://host/{b}.tif" for b in S2_RAW_BANDS}
 
 
 def test_all_bands_ok_returns_data(monkeypatch):

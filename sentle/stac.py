@@ -1,3 +1,4 @@
+import bisect
 import os
 import queue
 import re
@@ -6,11 +7,14 @@ import time
 import warnings
 
 import planetary_computer as pc
+import pystac
 import pystac_client
 import rasterio
 from pystac_client.stac_api_io import StacApiIO
 from urllib3 import Retry
 from urllib.parse import urlparse, urlunparse
+
+from shapely.geometry import MultiPolygon, box, shape
 
 from .const import (
     CDSE_S3_ENDPOINT,
@@ -20,6 +24,8 @@ from .const import (
     SAS_SIGN_TIMEOUT,
     STAC_ENDPOINT,
     STAC_RETRY_AFTER_MAX,
+    STAC_SEARCH_BBOX_PAD,
+    STAC_SEARCH_PAGE_SIZE,
     STAC_TIMEOUT,
 )
 
@@ -44,9 +50,14 @@ class CappedRetry(Retry):
 
 def get_stac_api_io():
     """
-    Returns a StacApiIO object with a retry policy that retries on 502, 503, 504
-    with exponential backoff to handle server overload, and a timeout so a
-    request can never wait forever (issue #87).
+    Returns a StacApiIO object with a retry policy that retries on 429, 502,
+    503, 504 with exponential backoff to handle rate limiting and server
+    overload, and a timeout so a request can never wait forever (issue #87).
+
+    429 is Planetary Computer's rate-limit answer. Without it in the list a
+    single throttled search raised straight out of the worker and aborted the
+    run; urllib3 honours the ``Retry-After`` it carries (capped by
+    ``CappedRetry``).
 
     ``read=3`` caps how often a *read timeout* is retried while leaving all 15
     attempts available for 502/503/504 responses: without it a stalled endpoint
@@ -57,7 +68,7 @@ def get_stac_api_io():
                         backoff_factor=1.0,
                         backoff_jitter=0.2,
                         backoff_max=120,
-                        status_forcelist=[502, 503, 504],
+                        status_forcelist=[429, 502, 503, 504],
                         allowed_methods=None)
     api_io = StacApiIO(max_retries=retry, timeout=STAC_TIMEOUT)
     # pystac-client 0.7.7 (the floor declared in setup.py) stores the timeout
@@ -111,6 +122,42 @@ _GDAL_HTTP_TIMEOUT_OPTIONS = {
 }
 
 
+# Request-saving GDAL options for reading Sentinel assets (measured against
+# Planetary Computer through a counting proxy):
+#
+# * GDAL_DISABLE_READDIR_ON_OPEN: no directory listing / sidecar probes
+#   (.aux.xml, .ovr, ...) next to each self-contained COG/JP2.
+# * GDAL_MAX_RAW_BLOCK_CACHE_SIZE: how many compressed bytes a windowed read
+#   may fetch up front, one request per run of consecutive blocks (one per
+#   block row). The default 10 MB is less than a 10 m band of a 3000 px chunk
+#   (~16 MB), and past it GDAL fetches the rest block by block with a doubling
+#   read-ahead: 12 instead of 7 requests for that window, and 31 instead of 10
+#   (56 instead of 36 MB) for a 4392 px one. The bytes are only held while one
+#   band window is read.
+_GDAL_READ_OPTIONS = {
+    "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+    "GDAL_MAX_RAW_BLOCK_CACHE_SIZE": str(256 * 1024 * 1024),
+}
+
+
+def _without_user_overrides(options):
+    return {
+        key: value
+        for key, value in options.items()
+        if not os.environ.get(key, "").strip()
+    }
+
+
+def gdal_read_options():
+    """GDAL options for reading remote Sentinel assets: the HTTP timeouts
+    (``gdal_http_timeout_options``) plus the request-saving options above. Keys
+    the user set in the environment are left to the user."""
+    return {
+        **_without_user_overrides(_GDAL_READ_OPTIONS),
+        **gdal_http_timeout_options(),
+    }
+
+
 def gdal_http_timeout_options():
     """HTTP timeout options for GDAL, minus any the user set themselves.
 
@@ -124,11 +171,7 @@ def gdal_http_timeout_options():
     sentle keeps its own default in that case rather than silently going back
     to an unbounded read.
     """
-    return {
-        key: value
-        for key, value in _GDAL_HTTP_TIMEOUT_OPTIONS.items()
-        if not os.environ.get(key, "").strip()
-    }
+    return _without_user_overrides(_GDAL_HTTP_TIMEOUT_OPTIONS)
 
 
 class SasSigningTimeout(RuntimeError):
@@ -271,6 +314,8 @@ class PlanetaryComputerProvider:
 
     name = "planetary_computer"
     supports_sentinel1 = True
+    # items per search page; Planetary Computer allows up to 1000
+    stac_page_size = STAC_SEARCH_PAGE_SIZE
     s2_collection = "sentinel-2-l2a"
     s1_collection = "sentinel-1-rtc"
 
@@ -283,7 +328,31 @@ class PlanetaryComputerProvider:
     def rasterio_env(self):
         # PC hrefs are plain (signed) HTTPS -> no S3 config needed, but the
         # reads still need a timeout (see gdal_http_timeout_options)
-        return rasterio.Env(**gdal_http_timeout_options())
+        return rasterio.Env(**gdal_read_options())
+
+    def prefetch_sas_tokens(self, items):
+        """Fetch the SAS tokens ``items`` need, in this process, up front.
+
+        ``planetary_computer`` caches one token per storage container per
+        process. Worker processes forked after this call inherit the cache, so
+        a run fetches each token once instead of once per worker -- and not all
+        at the same moment when the pool starts, which is exactly the burst the
+        token endpoint rate-limits. Best effort: a worker that finds no cached
+        token still signs for itself, so a failure here is not an error.
+        """
+        seen = set()
+        for item in items:
+            for asset in item.assets.values():
+                parsed = urlparse(asset.href)
+                container = parsed.path.lstrip("/").split("/", 1)[0]
+                if (not parsed.netloc.endswith(".blob.core.windows.net")
+                        or (parsed.netloc, container) in seen):
+                    continue
+                seen.add((parsed.netloc, container))
+                try:
+                    refresh_sas_token(asset.href)
+                except Exception:
+                    return
 
     def s2_asset_key(self, band):
         return band
@@ -307,6 +376,10 @@ class CDSEProvider:
     """
 
     name = "cdse"
+    # CDSE caps sentinel-2-l2a searches at 100 items per page unless the
+    # fields extension is used, and rejects anything larger with a 400
+    # (LimitValidationError) -- which would abort every CDSE run up front
+    stac_page_size = 100
     supports_sentinel1 = False
     s2_collection = "sentinel-2-l2a"
     s1_collection = None
@@ -322,6 +395,10 @@ class CDSEProvider:
             return "/vsis3/" + href[len("s3://"):]
         return href
 
+    def prefetch_sas_tokens(self, items):
+        # CDSE reads use S3 credentials, there are no tokens to fetch
+        pass
+
     def rasterio_env(self):
         # configure GDAL /vsis3/ for CDSE's (path-style) S3 endpoint using
         # whatever AWS credentials the standard chain provides.
@@ -333,9 +410,9 @@ class CDSEProvider:
         # have NO TLM, so the first read must discover the tile structure by
         # scanning SOT markers via many small range requests (~7s cold). For that
         # older archive we mitigate by (a) ingesting ~1 MB at open + merging
-        # consecutive ranges, and (b) keeping the dataset open across subtiles
-        # (see ``reuse_open_datasets``), which amortizes the discovery and lets
-        # GDAL reuse its decoded-tile block cache. See issue #75.
+        # consecutive ranges, and (b) reading each band once per tile and
+        # spatial chunk (``sentinel2.read_subtile_from_tile_window``), which
+        # pays the discovery once. See issue #75.
         import boto3
         from rasterio.session import AWSSession
         return rasterio.Env(
@@ -346,7 +423,7 @@ class CDSEProvider:
             GDAL_HTTP_MULTIRANGE="YES",
             GDAL_HTTP_MERGE_CONSECUTIVE_RANGES="YES",
             VSI_CACHE="TRUE",
-            **gdal_http_timeout_options(),
+            **gdal_read_options(),
         )
 
     def s2_asset_key(self, band):
@@ -385,3 +462,129 @@ def get_provider(name):
     except KeyError:
         raise ValueError(
             f"unknown provider {name!r}; choose from {sorted(_PROVIDERS)}")
+
+
+# --------------------------------------------------------------------------- #
+# Item search
+#
+# A run used to search the catalog once for the time axis and then once more
+# in *every* ptile (one per spatial chunk and timestamp), each time opening the
+# catalog first -- two or more Planetary Computer requests per ptile, which is
+# what ran into the rate limit on bigger cubes. Now the catalog is searched
+# once for the whole area and time range, and each ptile's items are picked out
+# of that result locally, with the same semantics the server applies.
+# --------------------------------------------------------------------------- #
+
+
+def lonlat_bbox(bbox):
+    """Shapely geometry of a STAC ``[west, south, east, north]`` bbox.
+
+    Following the STAC/GeoJSON convention, ``west > east`` means the box
+    crosses the antimeridian, so it is split into its two halves.
+    """
+    west, south, east, north = bbox
+    if west > east:
+        return MultiPolygon(
+            [box(west, south, 180, north),
+             box(-180, south, east, north)])
+    return box(west, south, east, north)
+
+
+def pad_lonlat_bbox(bbox, pad=STAC_SEARCH_BBOX_PAD):
+    """Grow a lon/lat bbox by ``pad`` degrees on every side."""
+    west, south, east, north = bbox
+    south, north = max(south - pad, -90.0), min(north + pad, 90.0)
+    if west > east:
+        # crosses the antimeridian: growing outwards keeps it crossing
+        return [west - pad, south, east + pad, north]
+    return [max(west - pad, -180.0), south, min(east + pad, 180.0), north]
+
+
+def search_items(provider, collections, datetime, bbox):
+    """Run one STAC item search and return every matching item.
+
+    Items come back as plain ``pystac.Item``s without the link to the client
+    that fetched them, so they pickle cheaply into the worker processes.
+    """
+    catalog = provider.open_catalog()
+    search = catalog.search(
+        collections=list(collections),
+        datetime=datetime,
+        bbox=list(bbox),
+        limit=getattr(provider, "stac_page_size", STAC_SEARCH_PAGE_SIZE),
+    )
+    return [pystac.Item.from_dict(d) for d in search.items_as_dicts()]
+
+
+def item_time_range(item):
+    """The ``[start, end]`` interval a STAC API matches ``item`` on.
+
+    Like pgstac (which serves both Planetary Computer and CDSE): the item's
+    ``start_datetime``/``end_datetime`` when it has both, else its ``datetime``.
+    Sentinel-1 RTC items carry the former, Sentinel-2 items only the latter.
+    """
+    start = item.common_metadata.start_datetime
+    end = item.common_metadata.end_datetime
+    if start is not None and end is not None:
+        return start, end
+    return item.datetime, item.datetime
+
+
+def sort_items(items):
+    """Order items newest first, newest reprocessing first (issue #87).
+
+    The catalog promises no order, but the order is load-bearing:
+    ``process_ptile_S2`` takes the first item for a tile, which decides which
+    product is used when an acquisition has been reprocessed, and it is the
+    order a mean composite accumulates float32 in. The last field of a Sentinel
+    product id is its processing timestamp, so descending id puts the most
+    recent reprocessing of an acquisition first -- which is also what Planetary
+    Computer happens to return today, so this pins the current selection.
+    """
+    return sorted(items, key=lambda item: (item.datetime, item.id),
+                  reverse=True)
+
+
+class ItemIndex:
+    """The items of one catalog search, queryable per ptile without a request.
+
+    ``query`` returns exactly what a STAC search restricted to that collection,
+    time range and bbox would: items whose time range (``item_time_range``)
+    overlaps the query range, both ends inclusive, and whose geometry
+    intersects the bbox.
+    """
+
+    def __init__(self, items):
+        by_collection = {}
+        for item in items:
+            if item.geometry is None:
+                # a bbox search never matches an item without geometry
+                continue
+            start, end = item_time_range(item)
+            by_collection.setdefault(item.collection_id, []).append(
+                (start, end, shape(item.geometry), item))
+
+        self._collections = {}
+        for collection, entries in by_collection.items():
+            entries.sort(key=lambda entry: entry[0])
+            self._collections[collection] = (
+                [entry[0] for entry in entries],
+                entries,
+                # longest item time range, bounds the backwards bisect below
+                max(entry[1] - entry[0] for entry in entries),
+            )
+
+    def query(self, collection, start, end, geometry):
+        """Items of ``collection`` overlapping ``[start, end]`` and
+        ``geometry`` (lon/lat, see ``lonlat_bbox``), in ``sort_items`` order."""
+        if collection not in self._collections:
+            return []
+        starts, entries, longest = self._collections[collection]
+        # only items starting in [start - longest, end] can overlap the range
+        lo = bisect.bisect_left(starts, start - longest)
+        hi = bisect.bisect_right(starts, end)
+        return sort_items(item
+                          for item_start, item_end, footprint, item in
+                          entries[lo:hi]
+                          if item_end >= start
+                          and footprint.intersects(geometry))
