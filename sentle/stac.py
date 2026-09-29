@@ -122,13 +122,21 @@ _GDAL_HTTP_TIMEOUT_OPTIONS = {
 }
 
 
-# Stops GDAL from listing the "directory" of every asset it opens and from
-# probing for sidecar files (.aux.xml, .ovr, .msk, ...) next to it. Sentinel
-# assets are self-contained COGs/JP2s, so on a signed blob URL those probes are
-# just extra round trips (a failing listing plus a HEAD per sidecar) paid on
-# every ``rasterio.open``.
+# Request-saving GDAL options for reading Sentinel assets (measured against
+# Planetary Computer through a counting proxy):
+#
+# * GDAL_DISABLE_READDIR_ON_OPEN: no directory listing / sidecar probes
+#   (.aux.xml, .ovr, ...) next to each self-contained COG/JP2.
+# * GDAL_MAX_RAW_BLOCK_CACHE_SIZE: how many compressed bytes a windowed read
+#   may fetch up front, one request per run of consecutive blocks (one per
+#   block row). The default 10 MB is less than a 10 m band of a 3000 px chunk
+#   (~16 MB), and past it GDAL fetches the rest block by block with a doubling
+#   read-ahead: 12 instead of 7 requests for that window, and 31 instead of 10
+#   (56 instead of 36 MB) for a 4392 px one. The bytes are only held while one
+#   band window is read.
 _GDAL_READ_OPTIONS = {
     "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+    "GDAL_MAX_RAW_BLOCK_CACHE_SIZE": str(256 * 1024 * 1024),
 }
 
 
@@ -306,6 +314,8 @@ class PlanetaryComputerProvider:
 
     name = "planetary_computer"
     supports_sentinel1 = True
+    # items per search page; Planetary Computer allows up to 1000
+    stac_page_size = STAC_SEARCH_PAGE_SIZE
     s2_collection = "sentinel-2-l2a"
     s1_collection = "sentinel-1-rtc"
 
@@ -366,6 +376,10 @@ class CDSEProvider:
     """
 
     name = "cdse"
+    # CDSE caps sentinel-2-l2a searches at 100 items per page unless the
+    # fields extension is used, and rejects anything larger with a 400
+    # (LimitValidationError) -- which would abort every CDSE run up front
+    stac_page_size = 100
     supports_sentinel1 = False
     s2_collection = "sentinel-2-l2a"
     s1_collection = None
@@ -396,9 +410,9 @@ class CDSEProvider:
         # have NO TLM, so the first read must discover the tile structure by
         # scanning SOT markers via many small range requests (~7s cold). For that
         # older archive we mitigate by (a) ingesting ~1 MB at open + merging
-        # consecutive ranges, and (b) keeping the dataset open across subtiles
-        # (see ``reuse_open_datasets``), which amortizes the discovery and lets
-        # GDAL reuse its decoded-tile block cache. See issue #75.
+        # consecutive ranges, and (b) reading each band once per tile and
+        # spatial chunk (``sentinel2.read_subtile_from_tile_window``), which
+        # pays the discovery once. See issue #75.
         import boto3
         from rasterio.session import AWSSession
         return rasterio.Env(
@@ -497,7 +511,7 @@ def search_items(provider, collections, datetime, bbox):
         collections=list(collections),
         datetime=datetime,
         bbox=list(bbox),
-        limit=STAC_SEARCH_PAGE_SIZE,
+        limit=getattr(provider, "stac_page_size", STAC_SEARCH_PAGE_SIZE),
     )
     return [pystac.Item.from_dict(d) for d in search.items_as_dicts()]
 

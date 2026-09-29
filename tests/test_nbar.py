@@ -154,8 +154,9 @@ class TestNbarRobustness:
             def close(self):
                 pass
 
-            def read(self, indexes, window, out_shape, out_dtype, **kw):
-                return np.full(out_shape, 5000, dtype=out_dtype)
+            def read(self, indexes, window, out_shape=None, out_dtype=np.uint16, **kw):
+                shape = out_shape or (int(window.height), int(window.width))
+                return np.full(shape, 5000, dtype=out_dtype)
 
         monkeypatch.setattr(sentinel2.rasterio, "open",
                             lambda *a, **k: _FakeReader())

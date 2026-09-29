@@ -17,6 +17,7 @@ pre-fix code and pass after decoupling the unpack target from the sentinel.
 import numpy as np
 import pandas as pd
 import pytest
+from affine import Affine
 
 from sentle import sentinel2
 from sentle.const import S2_RAW_BANDS
@@ -55,6 +56,11 @@ def test_process_ptile_S2_keeps_data_when_last_subtile_out_of_bounds(monkeypatch
         return arr, _full_window(), list(S2_RAW_BANDS)
 
     monkeypatch.setattr(sentinel2, "process_S2_subtile", fake_process_S2_subtile)
+    # the stub subtiles carry no geometry to place read windows with
+    monkeypatch.setattr(sentinel2, "tile_read_windows",
+                        lambda subset, *a, **k: {n: None for n in subset["name"]})
+    monkeypatch.setattr(sentinel2, "prefetch_tile_windows",
+                        lambda *a, **k: None)
 
     result_array, result_bands = sentinel2.process_ptile_S2(
         timestamp=0,
@@ -66,7 +72,7 @@ def test_process_ptile_S2_keeps_data_when_last_subtile_out_of_bounds(monkeypatch
         S2_return_cloud_probabilities=False,
         S2_nbar=False,
         subtiles=subtiles,
-        ptile_transform=None,
+        ptile_transform=Affine.identity(),
         ptile_width=PTILE_W,
         ptile_height=PTILE_H,
         items=items,
