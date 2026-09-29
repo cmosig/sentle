@@ -161,6 +161,56 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
     })
 
 
+def union_tile_windows(subtiles):
+    """The smallest 10 m pixel window per MGRS tile that covers all of that
+    tile's subtiles in ``subtiles`` (the ``obtain_subtiles`` result).
+
+    Subtile windows start at multiples of ``S2_subtile_size`` (732), which 2
+    and 6 divide, so the union lines up with the pixel grid of the 20 m and
+    60 m bands too.
+    """
+    return {
+        name: windows.union(*group["intersecting_windows"])
+        for name, group in subtiles.groupby("name")
+    }
+
+
+def read_subtile_from_tile_window(href, read_window, factor, tile_window,
+                                  window_cache):
+    """Return one subtile band exactly as a direct windowed read would, but
+    served from a single read of the whole ``tile_window``.
+
+    A ptile spans many subtiles (25 for a 30 km cube), and reading each on its
+    own costs an HTTP request per COG block per read, with blocks shared by
+    neighbouring subtiles fetched again whenever they fall out of GDAL's cache.
+    One read of the union window lets GDAL fetch every block once, in
+    contiguous runs. The window is kept in the band's native dtype and
+    resolution (uint16, and 4x/36x fewer pixels for the 20 m/60 m bands) and
+    upsampled per subtile with ``np.repeat`` -- for an integer factor that is
+    the same pixel GDAL's nearest-neighbour ``out_shape`` read picks.
+
+    ``read_window`` is in the band's own pixel grid, like the direct read.
+    """
+    entry = window_cache.get(href)
+    if entry is None:
+        native = windows.Window(tile_window.col_off // factor,
+                                tile_window.row_off // factor,
+                                tile_window.width // factor,
+                                tile_window.height // factor)
+        with rasterio.open(href) as dr:
+            entry = (dr.read(indexes=1, window=native), native, dr.crs,
+                     dr.transform)
+        window_cache[href] = entry
+    data, native, crs, tf = entry
+
+    row = read_window.row_off - native.row_off
+    col = read_window.col_off - native.col_off
+    subtile = data[row:row + read_window.height, col:col + read_window.width]
+    if factor > 1:
+        subtile = subtile.repeat(factor, axis=0).repeat(factor, axis=1)
+    return subtile.astype(np.float32), crs, tf
+
+
 def process_S2_subtile(
     intersecting_windows,
     stac_item,
@@ -181,6 +231,8 @@ def process_S2_subtile(
     provider=None,
     ds_cache=None,
     read_retries: int = DEFAULT_READ_RETRIES,
+    tile_window=None,
+    window_cache=None,
 ):
     """Processes a single sentinel 2 subtile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution, applying
@@ -193,6 +245,12 @@ def process_S2_subtile(
     requires the full set (enforced upstream). ``provider`` supplies the
     catalog-specific asset keys / href preparation / GDAL env (default:
     Planetary Computer).
+
+    ``tile_window`` (with ``window_cache``) switches the download from one
+    windowed read per subtile and band to one read per band of ``tile_window``,
+    the 10 m pixel window covering every subtile of this ptile in the tile; the
+    subtiles are then sliced out of that. Same pixels, fewer HTTP requests, see
+    ``read_subtile_from_tile_window``.
     """
     if provider is None:
         provider = PlanetaryComputerProvider()
@@ -236,10 +294,14 @@ def process_S2_subtile(
                                          orig_win.width // factor,
                                          orig_win.height // factor)
 
-            def attempt(asset_href=asset_href, read_window=read_window):
+            def attempt(asset_href=asset_href, read_window=read_window,
+                        factor=factor):
                 # re-signed on every attempt: an expired SAS token is a
                 # plausible cause of a failed read, and re-signing is cheap
                 href = provider.prepare_href(asset_href)
+                if window_cache is not None and tile_window is not None:
+                    return read_subtile_from_tile_window(
+                        href, read_window, factor, tile_window, window_cache)
                 if ds_cache is not None and href in ds_cache:
                     dr, owns_dataset = ds_cache[href], False
                 else:
@@ -438,6 +500,7 @@ def process_ptile_S2_dispatcher(
     provider=None,
     reuse_open_datasets: bool = True,
     read_retries: int = DEFAULT_READ_RETRIES,
+    read_ptile_windows: bool = False,
 ):
     if provider is None:
         provider = PlanetaryComputerProvider()
@@ -500,6 +563,7 @@ def process_ptile_S2_dispatcher(
             provider=provider,
             reuse_open_datasets=reuse_open_datasets,
             read_retries=read_retries,
+            read_ptile_windows=read_ptile_windows,
         )
 
         # this happens when the href is not available in subtile -> planetary
@@ -615,9 +679,17 @@ def process_ptile_S2(
     provider=None,
     reuse_open_datasets: bool = True,
     read_retries: int = DEFAULT_READ_RETRIES,
+    read_ptile_windows: bool = False,
 ):
     if provider is None:
         provider = PlanetaryComputerProvider()
+
+    # one read per band of everything this ptile needs from a tile, instead of
+    # one per subtile and band (see read_subtile_from_tile_window). The window
+    # cache holds one tile at a time: subtiles come grouped by tile.
+    tile_windows = union_tile_windows(subtiles) if read_ptile_windows else {}
+    window_cache = {} if read_ptile_windows else None
+    window_cache_tile = None
 
     # reuse open band datasets across subtiles of the same tile so the (JP2)
     # per-file tile-structure discovery cost is paid once per file, not per
@@ -660,6 +732,10 @@ def process_ptile_S2(
         # sentinel2 repository
         stac_item = subdf["item"].iloc[0]
 
+        if read_ptile_windows and st.name != window_cache_tile:
+            window_cache.clear()
+            window_cache_tile = st.name
+
         subtile_array_ret, write_win, ret_bands = process_S2_subtile(
             intersecting_windows=st.intersecting_windows,
             stac_item=stac_item,
@@ -680,6 +756,8 @@ def process_ptile_S2(
             provider=provider,
             ds_cache=ds_cache,
             read_retries=read_retries,
+            tile_window=tile_windows.get(st.name),
+            window_cache=window_cache,
         )
 
         # this happens when the href is not available

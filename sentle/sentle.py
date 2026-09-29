@@ -131,6 +131,7 @@ def process_ptile(
     reuse_open_datasets: bool,
     read_retries: int,
     item_list: list,
+    read_ptile_windows: bool = False,
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor
 
@@ -196,6 +197,7 @@ def process_ptile(
             provider=provider,
             reuse_open_datasets=reuse_open_datasets,
             read_retries=read_retries,
+            read_ptile_windows=read_ptile_windows,
         )
 
     else:
@@ -819,6 +821,7 @@ def process(
     zarr_store: str | zarr.storage.StoreLike,
     provider: str = "planetary_computer",
     reuse_open_datasets: bool = True,
+    read_ptile_windows: bool = False,
     processing_spatial_chunk_size: int = 4000,
     S1_assets: list[str] = S1_ASSETS,
     S2_bands: list[str] = S2_RAW_BANDS,
@@ -932,6 +935,17 @@ def process(
        (baseline >= 05.12, from 2026) carry native TLM markers that GDAL uses
        automatically, so they are already fast per crop without this. Set to
        ``False`` to open/close per subtile (lower memory).
+    read_ptile_windows: bool, default=False
+       Sentinel-2 only. Download each band once per spatial chunk -- one read
+       of the window covering all the chunk's subtiles -- instead of once per
+       subtile. The pixels are identical. Against a local stand-in for the
+       data host, a 3000 x 3000 px chunk (30 km at 10 m) took 108 HTTP
+       requests per acquisition instead of 142 (see
+       ``benchmarks/request_count.py``).
+       Costs extra memory per worker while a chunk is read: the chunk's window
+       of every band at its native resolution and 16 bit (~150 MB for a
+       3000 x 3000 px chunk). ``reuse_open_datasets`` has no effect on
+       Sentinel-2 reads while this is on.
     processing_spatial_chunk_size: int, default=4000
        Size of spatial chunks across which we perform parallization.
     S1_assets: list[str], default=["vh_asc", "vh_desc", "vv_asc", "vv_desc"]
@@ -1145,6 +1159,7 @@ def process(
             "save_as_uint16": save_as_uint16,
             "provider": data_provider,
             "reuse_open_datasets": reuse_open_datasets,
+            "read_ptile_windows": read_ptile_windows,
             "read_retries": read_retries,
         }
 
