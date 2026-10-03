@@ -62,6 +62,11 @@ STAC_RETRY_AFTER_MAX = 120
 # Extra attempts made after a raster read fails, before the run is aborted.
 DEFAULT_READ_RETRIES = 2
 
+# Whether a scene whose data is gone from the provider's storage (the catalog
+# still lists it, reading an asset answers HTTP 404) is skipped with a warning
+# instead of aborting the run. Default of ``process(skip_missing_assets=...)``.
+DEFAULT_SKIP_MISSING_ASSETS = True
+
 # Band windows of one MGRS tile fetched concurrently per worker
 # (``sentinel2.prefetch_tile_windows``). Each band is one file, and fetching
 # them one after another leaves a worker waiting on round trips most of the

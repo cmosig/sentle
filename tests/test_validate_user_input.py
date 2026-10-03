@@ -147,6 +147,17 @@ class TestReadRetries:
             validate_user_input(**_valid_kwargs(read_retries=value))
 
 
+class TestSkipMissingAssets:
+    @pytest.mark.parametrize("value", [True, False])
+    def test_boolean_passes(self, value):
+        validate_user_input(**_valid_kwargs(skip_missing_assets=value))
+
+    @pytest.mark.parametrize("value", [1, "yes", None])
+    def test_invalid_raises(self, value):
+        with pytest.raises(ValueError, match="skip_missing_assets"):
+            validate_user_input(**_valid_kwargs(skip_missing_assets=value))
+
+
 class TestWorkerTimeout:
     @pytest.mark.parametrize("value", [60, 60.0, None])
     def test_positive_number_or_none_passes(self, value):

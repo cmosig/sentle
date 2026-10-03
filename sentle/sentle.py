@@ -29,6 +29,7 @@ from .cloud_mask import (
 from .snow_mask import S2_snow_mask_band
 from .const import (
     DEFAULT_READ_RETRIES,
+    DEFAULT_SKIP_MISSING_ASSETS,
     S1_ASSETS,
     S2_NBAR_BANDS,
     S2_RAW_BAND_RESOLUTION,
@@ -50,7 +51,12 @@ from .stac import (
     pad_lonlat_bbox,
     search_items,
 )
-from .utils import GLOBAL_QUEUE_MANAGER, GLOBAL_QUEUES, tqdm_joblib
+from .utils import (
+    GLOBAL_QUEUE_MANAGER,
+    GLOBAL_QUEUES,
+    PtileResult,
+    tqdm_joblib,
+)
 
 
 def _s2_bands_to_save(S2_bands, S2_mask_snow, S2_cloud_classification,
@@ -130,20 +136,29 @@ def process_ptile(
     provider,
     read_retries: int,
     item_list: list,
+    skip_missing_assets: bool = DEFAULT_SKIP_MISSING_ASSETS,
 ):
     """Passing chunk to either sentinel-1 or sentinel-2 processor
 
     ``item_list`` holds the STAC items covering this ptile, newest first. They
     are picked out of the one catalog search ``process`` runs up front (see
     ``ItemIndex``), so a ptile makes no catalog request of its own.
+
+    Returns a ``PtileResult``: the ``job_id`` and the scenes that were skipped
+    because their data no longer exists (always empty without
+    ``skip_missing_assets``, a missing asset aborts the run then).
     """
+
+    # filled by the processors with the scenes they had to skip; None tells
+    # them to raise instead
+    missing_items = [] if skip_missing_assets else None
 
     # determine ptile dimensions and transform from bounds
     ptile_transform, ptile_height, ptile_width = transform_height_width_from_bounds_res(
         bound_left, bound_bottom, bound_right, bound_top, target_resolution)
 
     if len(item_list) == 0:
-        return job_id
+        return PtileResult(job_id)
 
     if collection == "sentinel-1-rtc":
         ptile_array = process_ptile_S1(
@@ -163,6 +178,7 @@ def process_ptile(
             S1_assets=S1_assets,
             resampling_method=resampling_method,
             read_retries=read_retries,
+            missing_items=missing_items,
         )
     elif collection == "sentinel-2-l2a":
         ptile_array = process_ptile_S2_dispatcher(
@@ -194,6 +210,7 @@ def process_ptile(
             resampling_method=resampling_method,
             provider=provider,
             read_retries=read_retries,
+            missing_items=missing_items,
         )
 
     else:
@@ -227,7 +244,29 @@ def process_ptile(
                 zarr_save_slice["x"],
             ] = ptile_array
 
-    return job_id
+    return PtileResult(job_id, tuple(missing_items or ()))
+
+
+def report_missing_items(results):
+    """Warn once, in the calling process, about every scene the run skipped
+    because its data no longer exists; returns them as ``{item id: reason}``.
+
+    The workers warn as they go, but that ends up in worker output, once per
+    ptile the scene touches. This is the summary a caller can act on.
+    """
+    missing = {}
+    for result in results or ():
+        for entry in getattr(result, "missing_items", ()):
+            missing.setdefault(entry["item"], entry["reason"])
+    if missing:
+        listing = "; ".join(f"item={item} {reason}"
+                            for item, reason in sorted(missing.items()))
+        warnings.warn(
+            f"missing_assets_skipped count={len(missing)} "
+            f"note=these_scenes_are_listed_in_the_catalog_but_their_data_no_"
+            f"longer_exists_and_were_left_out_of_the_cube "
+            f"(skip_missing_assets=False aborts instead): {listing}")
+    return missing
 
 
 def validate_user_input(
@@ -258,6 +297,7 @@ def validate_user_input(
     provider: str = "planetary_computer",
     worker_timeout: float | None = 3600,
     read_retries: int = DEFAULT_READ_RETRIES,
+    skip_missing_assets: bool = DEFAULT_SKIP_MISSING_ASSETS,
 ):
     # validate the data provider and its constraints
     if provider not in ("planetary_computer", "cdse"):
@@ -390,6 +430,10 @@ def validate_user_input(
         raise ValueError("read_retries must be an integer")
     if read_retries < 0:
         raise ValueError("read_retries must be zero or more")
+
+    # check if skip_missing_assets is a boolean
+    if not isinstance(skip_missing_assets, bool):
+        raise ValueError("skip_missing_assets must be a boolean")
 
     # check if time_composite_freq is a string
     if time_composite_freq is not None and not isinstance(
@@ -827,6 +871,7 @@ def process(
     num_workers: int = 1,
     worker_timeout: float | None = 3600,
     read_retries: int = DEFAULT_READ_RETRIES,
+    skip_missing_assets: bool = DEFAULT_SKIP_MISSING_ASSETS,
     time_composite_freq: str = None,
     time_composite_method: str = "mean",
     S2_apply_snow_mask: bool = False,
@@ -889,12 +934,25 @@ def process(
         cloud-service timeouts still apply there.
     read_retries : int, default=2
         How many extra attempts to make when reading a raster asset fails
-        (403/404/503, a dropped connection, a stalled transfer). Once they are
+        (403/503, a dropped connection, a stalled transfer). Once they are
         used up the whole run is aborted with a ``SentleReadError`` rather than
         skipping the band: a cube that finishes therefore always holds the same
         data as any other run over the same area. Set to 0 to fail on the first
         failure; there is no setting that restores the old skip-and-warn
-        behaviour.
+        behaviour. An asset that does not exist (404) is not retried, see
+        ``skip_missing_assets``.
+    skip_missing_assets : bool, default=True
+        What to do with a scene the catalog lists but whose data is gone from
+        the provider's storage (reading an asset answers HTTP 404, or "the
+        specified key does not exist" on S3). Such a scene cannot be read by
+        this or any later run. With ``True`` the whole scene is left out -- no
+        band of it is used, as if the catalog had not listed it -- a warning
+        names the item and asset, and a ``missing_assets_skipped`` warning
+        lists every skipped scene when the run ends. With ``False`` the run is
+        aborted with a ``SentleMissingAssetError`` (a ``SentleReadError``).
+        Only a clear "does not exist" counts: every other read failure (403,
+        429, 5xx, timeouts, ...) is retried and then aborts the run, whatever
+        this is set to.
     time_composite_freq: str, default=None
         Rounding interval across which data is aggregated.
     time_composite_method: str, default="mean"
@@ -991,6 +1049,7 @@ def process(
         provider=provider,
         worker_timeout=worker_timeout,
         read_retries=read_retries,
+        skip_missing_assets=skip_missing_assets,
     )
 
     # instantiate the data provider (Planetary Computer or CDSE)
@@ -1137,6 +1196,7 @@ def process(
             "save_as_uint16": save_as_uint16,
             "provider": data_provider,
             "read_retries": read_retries,
+            "skip_missing_assets": skip_missing_assets,
         }
 
         s2grid = gpd.read_file(
@@ -1252,9 +1312,13 @@ def process(
                 ptile_timeout = (worker_timeout if
                                  effective_n_jobs(num_workers) != 1 else None)
                 # backend can be loky or threading (or maybe something else)
-                Parallel(n_jobs=num_workers, batch_size=1,
-                         timeout=ptile_timeout)(delayed(process_ptile)(**p)
-                                                for p in job_generator())
+                results = Parallel(n_jobs=num_workers, batch_size=1,
+                                   timeout=ptile_timeout)(
+                                       delayed(process_ptile)(**p)
+                                       for p in job_generator())
+
+        # name the scenes that were skipped because their data is gone
+        report_missing_items(results)
     finally:
         # This teardown has to run on the failure path too, otherwise a timed
         # out, failed or interrupted run leaks the cloud-prediction process, the
