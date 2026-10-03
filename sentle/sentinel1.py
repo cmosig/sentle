@@ -20,7 +20,9 @@ from .reproject_util import (
     window_overlaps_bounds,
 )
 from .stac import (
+    SentleMissingAssetError,
     gdal_read_options,
+    note_missing_item,
     refresh_sas_token,
     retry_read,
 )
@@ -31,10 +33,16 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                      bound_bottom, bound_top, ts, S1_assets, ptile_height,
                      ptile_width, ptile_transform, item_list,
                      resampling_method, time_composite_method: str = "mean",
-                     read_retries: int = DEFAULT_READ_RETRIES):
+                     read_retries: int = DEFAULT_READ_RETRIES,
+                     missing_items: list = None):
     """Processes a single sentinel 1 ptile. This includes downloading the
     data, reprojecting it to the target_crs and target_resolution. The function
     returns the reprojected ptile.
+
+    ``missing_items`` switches on skipping of acquisitions whose data is gone:
+    when it is a list, an item with a requested asset that does not exist
+    (HTTP 404, see ``stac.SentleMissingAssetError``) is appended to it and
+    contributes nothing, in any band. With ``None`` (default) it raises.
     """
 
     # intiate one array representing the entire subtile for that timestamp
@@ -69,70 +77,81 @@ def process_ptile_S1(target_crs: CRS, target_resolution: float,
                                  fill_value=np.nan,
                                  dtype=np.float32)
 
-        # iterate through S1 assets
-        for s1_true_asset in S1_TRUE_ASSETS:
+        # Read every requested asset of the item before using any of them, so
+        # that an item with a missing asset is left out as a whole.
+        reads = []
+        try:
+            for s1_true_asset in S1_TRUE_ASSETS:
 
-            if s1_true_asset not in user_s1_true_assets:
-                continue
+                if s1_true_asset not in user_s1_true_assets:
+                    continue
 
-            if s1_true_asset not in item.assets:
-                # it's rare and weird, but sometimes assets are missing
-                continue
+                if s1_true_asset not in item.assets:
+                    # it's rare and weird, but sometimes assets are missing
+                    continue
 
-            # extract orbit state -> either ascending or descending
-            orbit_state = item.properties["sat:orbit_state"]
-            orbit_state = ORBIT_STATE_ABBREVIATION[orbit_state]
+                # extract orbit state -> either ascending or descending
+                orbit_state = item.properties["sat:orbit_state"]
+                orbit_state = ORBIT_STATE_ABBREVIATION[orbit_state]
 
-            # create band index string
-            band_index_string = f"{s1_true_asset}_{orbit_state}"
+                # create band index string
+                band_index_string = f"{s1_true_asset}_{orbit_state}"
 
-            if band_index_string not in S1_assets:
-                # user did not request this band
-                continue
+                if band_index_string not in S1_assets:
+                    # user did not request this band
+                    continue
 
-            # compute index to save
-            band_save_index = S1_assets.index(band_index_string)
-            asset_href = item.assets[s1_true_asset].href
+                # compute index to save
+                band_save_index = S1_assets.index(band_index_string)
+                asset_href = item.assets[s1_true_asset].href
 
-            def read_asset(asset_href=asset_href):
-                # Sentinel-1 does not go through the provider abstraction (only
-                # Planetary Computer serves RTC), but the reads still need the
-                # GDAL HTTP timeouts or a stalled socket hangs forever (#87).
-                # The Env wraps the whole block so ``dr.read`` is covered too.
-                # Only the download lives in here: everything after it mutates
-                # ptile_array, which a retry must not repeat.
-                href = refresh_sas_token(asset_href)
-                with rasterio.Env(**gdal_read_options()), \
-                        rasterio.open(href) as dr:
+                def read_asset(asset_href=asset_href):
+                    # Sentinel-1 does not go through the provider abstraction (only
+                    # Planetary Computer serves RTC), but the reads still need the
+                    # GDAL HTTP timeouts or a stalled socket hangs forever (#87).
+                    # The Env wraps the whole block so ``dr.read`` is covered too.
+                    # Only the download lives in here: everything after it mutates
+                    # ptile_array, which a retry must not repeat.
+                    href = refresh_sas_token(asset_href)
+                    with rasterio.Env(**gdal_read_options()), \
+                            rasterio.open(href) as dr:
 
-                    # reproject ptile bounds to S1 tile CRS
-                    ptile_bounds_local_crs = warp.transform_bounds(
-                        target_crs, dr.crs, bound_left, bound_bottom,
-                        bound_right, bound_top)
+                        # reproject ptile bounds to S1 tile CRS
+                        ptile_bounds_local_crs = warp.transform_bounds(
+                            target_crs, dr.crs, bound_left, bound_bottom,
+                            bound_right, bound_top)
 
-                    try:
-                        # figure out which area of the image is interesting for us
-                        read_win = dr.window(*ptile_bounds_local_crs)
-                    except rasterio.errors.WindowError:
-                        return None
+                        try:
+                            # figure out which area of the image is interesting for us
+                            read_win = dr.window(*ptile_bounds_local_crs)
+                        except rasterio.errors.WindowError:
+                            return None
 
-                    # read windowed
-                    data = dr.read(indexes=1,
-                                   window=read_win,
-                                   out_dtype=np.float32,
-                                   boundless=True,
-                                   fill_value=0)
+                        # read windowed
+                        data = dr.read(indexes=1,
+                                       window=read_win,
+                                       out_dtype=np.float32,
+                                       boundless=True,
+                                       fill_value=0)
 
-                    # replace nodata with zeros
-                    data[data == dr.nodata] = 0
+                        # replace nodata with zeros
+                        data[data == dr.nodata] = 0
 
-                    return data, dr.crs, ptile_bounds_local_crs, read_win
+                        return data, dr.crs, ptile_bounds_local_crs, read_win
 
-            # a read that fails every attempt aborts the run rather than
-            # silently leaving this acquisition out of the cube (issue #87)
-            read_result = retry_read(read_asset,
-                                     f"asset={asset_href}",
-                                     retries=read_retries)
+                # a read that fails every attempt aborts the run rather than
+                # silently leaving this acquisition out of the cube (issue #87)
+                reads.append((band_save_index,
+                              retry_read(read_asset,
+                                         f"asset={asset_href}",
+                                         retries=read_retries)))
+        except SentleMissingAssetError as exc:
+            if missing_items is None:
+                raise
+            note_missing_item(missing_items, item, exc)
+            continue
+
+        for band_save_index, read_result in reads:
             if read_result is None:
                 warnings.warn(
                     "Asset has transform that rasterio cannot handle. Skipping."

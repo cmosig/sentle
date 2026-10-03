@@ -1,4 +1,5 @@
 import contextlib
+import typing
 
 import joblib
 from joblib import register_parallel_backend
@@ -32,6 +33,16 @@ def tqdm_joblib(tqdm_object):
         tqdm_object.close()
 
 
+class PtileResult(typing.NamedTuple):
+    """What ``process_ptile`` hands back to ``process``."""
+    # key of the ptile's cloud response queue, None without cloud
+    # classification (see ``release_job_queues``)
+    job_id: int | None
+    # the scenes skipped because their data is gone, as recorded by
+    # ``stac.note_missing_item``
+    missing_items: tuple = ()
+
+
 class MultiCallback:
 
     def __init__(self, *callbacks):
@@ -49,8 +60,9 @@ def release_job_queues(result):
     the list of the batch's return values on success, or the (rebuilt)
     exception instance on failure -- joblib's ``_TracebackCapturingWrapper``
     *returns* the exception instead of raising it, so the success callback is
-    the one that fires. ``process_ptile`` returns its ``job_id``, which is
-    ``None`` when cloud classification is disabled.
+    the one that fires. ``process_ptile`` returns a ``PtileResult`` carrying
+    its ``job_id``, which is ``None`` when cloud classification is disabled (a
+    bare job id is accepted too).
 
     Dropping the entry here releases the manager queue as soon as its ptile is
     done. The registry itself is load-bearing and must not be removed: it holds
@@ -59,7 +71,8 @@ def release_job_queues(result):
     """
     if not isinstance(result, (list, tuple)):
         return
-    for job_id in result:
+    for entry in result:
+        job_id = entry.job_id if isinstance(entry, PtileResult) else entry
         if job_id is not None:
             GLOBAL_QUEUES.pop(job_id, None)
 
