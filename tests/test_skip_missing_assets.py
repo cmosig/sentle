@@ -290,7 +290,10 @@ def test_a_missing_scene_is_left_out_of_the_composite(
     assert np.array_equal(out, np.full_like(out, 5000.0))
     assert [m["item"] for m in missing] == [SCENES[NEW][0]]
     assert gone in missing[0]["reason"]
-    message = str(record[0].message)
+    # other warnings may be recorded too (NumPy 2.5 deprecations raised
+    # inside rasterio's reads, for one), so pick ours out
+    message, = [str(w.message) for w in record
+                if str(w.message).startswith("missing_asset_skip")]
     assert SCENES[NEW][0] in message and gone in message
 
 
