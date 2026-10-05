@@ -35,7 +35,12 @@ from .reproject_util import (
     window_overlaps_bounds,
 )
 from .snow_mask import S2_snow_mask_band, compute_potential_snow_layer
-from .stac import PlanetaryComputerProvider, retry_read
+from .stac import (
+    PlanetaryComputerProvider,
+    SentleMissingAssetError,
+    note_missing_item,
+    retry_read,
+)
 
 
 def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
@@ -268,7 +273,10 @@ def prefetch_tile_windows(stac_item, bands, tile_window, provider,
     """Read every band window of one tile into ``window_cache``,
     ``S2_READ_THREADS`` at a time. Same requests as reading them one by one
     from ``process_S2_subtile``, without waiting on each round trip in turn.
-    A read that still fails after its retries raises, like it would there.
+    A read that still fails after its retries raises, like it would there --
+    and so does a band that does not exist (``SentleMissingAssetError``),
+    before any of the tile's subtiles is processed: this is where
+    ``process_ptile_S2`` drops a scene whose data is gone, as a whole.
 
     The provider's GDAL environment is entered here, once, and not in the
     reading threads: rasterio applies an ``Env`` process-wide only from the
@@ -590,6 +598,7 @@ def process_ptile_S2_dispatcher(
     time_composite_method: str = "mean",
     provider=None,
     read_retries: int = DEFAULT_READ_RETRIES,
+    missing_items: list = None,
 ):
     if provider is None:
         provider = PlanetaryComputerProvider()
@@ -651,6 +660,7 @@ def process_ptile_S2_dispatcher(
             S2_bands=S2_bands,
             provider=provider,
             read_retries=read_retries,
+            missing_items=missing_items,
         )
 
         # this happens when the href is not available in subtile -> planetary
@@ -876,6 +886,7 @@ def process_ptile_S2(
     S2_bands: list = None,
     provider=None,
     read_retries: int = DEFAULT_READ_RETRIES,
+    missing_items: list = None,
 ):
     """One acquisition of one ptile: the mean of every subtile that has data.
 
@@ -886,6 +897,14 @@ def process_ptile_S2(
     redundant subtiles of tiles that do have an item in this acquisition --
     those are read only for such holes, and only where the item's footprint
     can have data.
+
+    ``missing_items`` switches on skipping of scenes whose data is gone: when
+    it is a list, an item with a band that does not exist (HTTP 404, see
+    ``stac.SentleMissingAssetError``) is appended to it and from then on
+    treated as if the catalog had not listed it -- none of its bands are used,
+    an older processing of the same tile and acquisition takes its place if
+    there is one, and overlapping tiles may fill its area like for any tile
+    without an item. With ``None`` (default) a missing band raises.
     """
     if provider is None:
         provider = PlanetaryComputerProvider()
@@ -900,6 +919,15 @@ def process_ptile_S2(
     if S2_cloud_classification:
         num_bands += 4
 
+    # items found to have a band that does not exist; from then on they count
+    # as not listed at all (see ``missing_items`` above)
+    missing_ids = set()
+
+    def usable_items():
+        if not missing_ids:
+            return items
+        return items[[item.id not in missing_ids for item in items["item"]]]
+
     def accumulate(subset, bounds):
         """Sum and count of the non-zero values ``subset`` reprojects onto the
         ptile, and the band names (None if nothing was read)."""
@@ -911,26 +939,41 @@ def process_ptile_S2(
         tile_windows = tile_read_windows(subset, target_crs, bounds,
                                          target_resolution, resampling_method,
                                          crop=not S2_cloud_classification)
-        window_cache, window_cache_tile = {}, None
+        window_cache, window_cache_tile, stac_item = {}, None, None
         for st in subset.itertuples(index=False, name="subtile"):
-            # get the item for the tile of this subtile
-            subdf = items[items["tile"] == st.name]
-
-            if subdf.empty or st.name not in tile_windows:
+            if st.name not in tile_windows:
                 continue
-
-            # the item list is ordered newest first (see ``sort_items``), so
-            # the first entry is the most recent reprocessing of the tile
-            stac_item = subdf["item"].iloc[0]
 
             # subtiles come grouped by tile: keep one tile's reads at a time,
             # and fetch its band windows together up front
             if st.name != window_cache_tile:
                 window_cache.clear()
                 window_cache_tile = st.name
-                prefetch_tile_windows(stac_item, S2_bands,
-                                      tile_windows[st.name], provider,
-                                      window_cache, read_retries)
+                stac_item = None
+                # the item list is ordered newest first (see ``sort_items``),
+                # so the first entry is the most recent reprocessing of the
+                # tile. The next one is only tried if that one's data is gone.
+                usable = usable_items()
+                for candidate in usable["item"][usable["tile"] == st.name]:
+                    try:
+                        prefetch_tile_windows(candidate, S2_bands,
+                                              tile_windows[st.name], provider,
+                                              window_cache, read_retries)
+                    except SentleMissingAssetError as exc:
+                        if missing_items is None:
+                            raise
+                        # all bands are fetched before any is used, so the
+                        # scene is dropped whole, never with a band missing
+                        note_missing_item(missing_items, candidate, exc)
+                        missing_ids.add(candidate.id)
+                        window_cache.clear()
+                        continue
+                    stac_item = candidate
+                    break
+
+            # no (readable) item for the tile of this subtile
+            if stac_item is None:
+                continue
 
             subtile_array_ret, write_win, ret_bands = process_S2_subtile(
                 intersecting_windows=st.intersecting_windows,
@@ -981,11 +1024,11 @@ def process_ptile_S2(
     # redundant subtiles; a band that has data is never touched.
     hole = hole_mask(subtile_array_count[:len(S2_bands)])
     if hole.any():
-        hole &= ~claimed_by_contributors(subtiles[~redundant.values], items,
-                                         target_crs, ptile_transform,
-                                         hole.shape)
-    fill = _hole_filling_subtiles(subtiles[redundant.values], items, hole,
-                                  target_crs, ptile_transform, provider)
+        hole &= ~claimed_by_contributors(subtiles[~redundant.values],
+                                         usable_items(), target_crs,
+                                         ptile_transform, hole.shape)
+    fill = _hole_filling_subtiles(subtiles[redundant.values], usable_items(),
+                                  hole, target_crs, ptile_transform, provider)
     if fill is not None:
         fill_subtiles, fill_bounds = fill
         fill_sum, fill_count, fill_bands = accumulate(fill_subtiles,

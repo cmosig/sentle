@@ -190,6 +190,49 @@ class SentleReadError(RuntimeError):
     """
 
 
+class SentleMissingAssetError(SentleReadError):
+    """The asset does not exist in the provider's storage (HTTP 404).
+
+    The catalog lists the item, but its data is gone, so no retry and no later
+    run can read it. With ``process(skip_missing_assets=True)`` the scene is
+    left out and the run goes on; otherwise this aborts the run like any other
+    ``SentleReadError`` (which it is, so existing handlers keep working). No
+    custom ``__init__``, for the same reason as ``SentleReadError``.
+    """
+
+
+# What GDAL reports when the object itself is not there. Deliberately narrow:
+# anything else (403 from an expired SAS token, 409 for an unsigned request,
+# 429, 5xx, timeouts, a missing bucket, ...) can be transient or a setup
+# problem and keeps the retry-then-abort path.
+#   * "HTTP response code: 404"            -- /vsicurl/ (Planetary Computer)
+#   * "The specified key does not exist"   -- /vsis3/ NoSuchKey (CDSE)
+_MISSING_ASSET_RE = re.compile(
+    r"HTTP response code: 404(?!\d)|The specified key does not exist")
+
+
+def is_missing_asset_error(exc):
+    """Whether ``exc`` says the asset does not exist (as opposed to: could not
+    be read right now). Looks at the exception and at what it was raised from:
+    a failed ``read`` only says "Read failed", the HTTP status is on the GDAL
+    error chained to it."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if _MISSING_ASSET_RE.search(str(exc)):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+def note_missing_item(missing_items, item, exc):
+    """Record (in ``missing_items``, a list that travels back to ``process``)
+    and warn that ``item`` is skipped because one of its assets is gone."""
+    missing_items.append({"item": item.id, "reason": str(exc)})
+    warnings.warn(f"missing_asset_skip item={item.id} {exc} "
+                  f"note=skipping_this_scene_as_no_data")
+
+
 def retry_read(operation, description, retries, on_failure=None):
     """Run ``operation``, retrying transient read failures, then fail loudly.
 
@@ -197,8 +240,13 @@ def retry_read(operation, description, retries, on_failure=None):
     backoff. ``on_failure`` runs after every failed attempt and is where the
     caller drops any state the failure may have poisoned (a cached dataset
     handle, say). ``RasterioIOError`` is the only thing retried: every network
-    failure shape -- 403/404/503, connection refused, DNS failure, a silent peer
+    failure shape -- 403/503, connection refused, DNS failure, a silent peer
     and a stalled body -- surfaces as one, at both ``open`` and ``read``.
+
+    The one failure that is not retried is an asset that does not exist (HTTP
+    404, see ``is_missing_asset_error``): trying again cannot bring it back.
+    It raises ``SentleMissingAssetError`` straight away, and the caller
+    decides whether that drops the scene or aborts the run.
     """
     for attempt in range(retries + 1):
         try:
@@ -206,6 +254,10 @@ def retry_read(operation, description, retries, on_failure=None):
         except rasterio.errors.RasterioIOError as exc:
             if on_failure is not None:
                 on_failure()
+            if is_missing_asset_error(exc):
+                raise SentleMissingAssetError(
+                    f"{description} does not exist (not retried): "
+                    f"{type(exc).__name__}: {exc}") from exc
             if attempt >= retries:
                 raise SentleReadError(
                     f"{description} failed after {attempt + 1} attempt(s): "
