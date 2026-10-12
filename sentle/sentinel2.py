@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import rasterio
 import scipy.ndimage as sc
+import shapely
 from rasterio import features, transform, warp, windows
 from rasterio.crs import CRS
 from rasterio.enums import Resampling
@@ -38,9 +39,86 @@ from .snow_mask import S2_snow_mask_band, compute_potential_snow_layer
 from .stac import (
     PlanetaryComputerProvider,
     SentleMissingAssetError,
+    lonlat_bbox,
     note_missing_item,
     retry_read,
 )
+
+# --------------------------------------------------------------------------- #
+# Antimeridian-safe lon/lat geometry
+#
+# The subtile bookkeeping compares footprints in lon/lat. Near +/-180
+# ``warp.transform_geom`` is not reliable for that: GDAL's antimeridian
+# cutting returns some geometries uncut (a polygon spanning the whole globe,
+# which then "intersects" every tile at that latitude) and others as
+# self-intersecting polygons, on which shapely raises ``TopologyException``.
+# Where an area or a tile touches the antimeridian, the lon/lat work is
+# therefore done with longitudes in [0, 360), where everything around the
+# antimeridian is contiguous: vertices are transformed point by point (no
+# cutting) and wrapped. Everywhere else the code path is unchanged.
+# --------------------------------------------------------------------------- #
+
+LONLAT_CRS = "EPSG:4326"
+
+
+def _lonlat360(geom, src_crs):
+    """``geom`` (a geometry or an array of them, in ``src_crs``) in lon/lat,
+    with longitudes wrapped to [0, 360)."""
+
+    def to_lonlat(xy):
+        if len(xy) == 0:
+            return xy
+        lon, lat = warp.transform(src_crs, LONLAT_CRS, xy[:, 0], xy[:, 1])
+        return np.column_stack([np.mod(lon, 360.0), lat])
+
+    return shapely.transform(geom, to_lonlat)
+
+
+def _from_lonlat(geom, dst_crs):
+    """A lon/lat geometry (longitudes in any range) in ``dst_crs``."""
+
+    def from_lonlat(xy):
+        if len(xy) == 0:
+            return xy
+        return np.column_stack(
+            warp.transform(LONLAT_CRS, dst_crs, xy[:, 0], xy[:, 1]))
+
+    return shapely.transform(geom, from_lonlat)
+
+
+def _wrap360(lonlat_geom):
+    """A lon/lat footprint that may be split at +/-180 into parts (STAC items,
+    the MGRS grid) as one geometry with longitudes in [0, 360). The parts
+    become adjacent at 180 and are merged; non-areal parts are dropped."""
+    wrapped = shapely.transform(
+        lonlat_geom, lambda xy: np.column_stack(
+            [np.where(xy[:, 0] < 0, xy[:, 0] + 360.0, xy[:, 0]), xy[:, 1]]))
+    return unary_union([
+        part for part in getattr(wrapped, "geoms", [wrapped])
+        if part.geom_type in ("Polygon", "MultiPolygon") and not part.is_empty
+    ])
+
+
+def _crosses_antimeridian(crs, bounds):
+    """Whether ``bounds`` (in ``crs``) cross +/-180. Unlike
+    ``transform_geom``, ``transform_bounds`` handles the antimeridian: it
+    returns west > east for such an area."""
+    west, _, east, _ = warp.transform_bounds(crs, LONLAT_CRS, *bounds)
+    return west > east
+
+
+def _straddles_antimeridian(lonlat_geom):
+    """Whether a lon/lat footprint is split at +/-180: its parts then sit at
+    both ends of the longitude range."""
+    minx, _, maxx, _ = shape(lonlat_geom).bounds
+    return (maxx - minx) > 180
+
+
+def _use_lonlat360(target_crs, bounds, lonlat_geoms):
+    """Whether the lon/lat work for an area (``bounds`` in ``target_crs``)
+    and the lon/lat footprints involved needs the [0, 360) frame."""
+    return _crosses_antimeridian(target_crs, bounds) or any(
+        _straddles_antimeridian(g) for g in lonlat_geoms)
 
 
 def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
@@ -65,19 +143,41 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
         10980 %
         S2_subtile_size) == 0, "S2_subtile_size needs to be a divisor of 10980"
 
-    # convert bounds to sentinel grid crs. ``shape`` (rather than
-    # ``Polygon(*coordinates)``) is used throughout obtain_subtiles because a
-    # geometry that crosses the antimeridian is returned by ``transform_geom``
-    # as a (cut) MultiPolygon, which ``Polygon(*...)`` cannot parse -- see
-    # issue #60. ``shape`` handles Polygon and MultiPolygon alike, and the
-    # downstream intersects/intersection/union/area operations work on both.
-    transformed_bounds = shape(
-        warp.transform_geom(src_crs=target_crs,
-                            dst_crs=s2grid.crs,
-                            geom=box(left, bottom, right, top)))
+    grid_crs = s2grid.crs
+    aoi = box(left, bottom, right, top)
 
-    # extract overlapping sentinel tiles
-    s2grid = s2grid[s2grid["geometry"].intersects(transformed_bounds)].copy()
+    # Tiles near the area, from its lon/lat bbox (antimeridian-aware). If the
+    # area crosses +/-180 or one of these tiles does, the lon/lat footprints
+    # below are computed with longitudes in [0, 360) (see ``_lonlat360``).
+    candidates = s2grid[s2grid["geometry"].intersects(
+        lonlat_bbox(warp.transform_bounds(target_crs, grid_crs, *aoi.bounds)))]
+    lonlat360 = _use_lonlat360(target_crs, aoi.bounds,
+                               candidates["geometry"])
+
+    if lonlat360:
+
+        def to_lonlat(geoms, crs):
+            return list(_lonlat360(np.asarray(geoms, dtype=object), crs))
+
+        transformed_bounds = to_lonlat([aoi], target_crs)[0]
+        s2grid = candidates[shapely.intersects(
+            np.asarray([_wrap360(g) for g in candidates["geometry"]],
+                       dtype=object), transformed_bounds)].copy()
+    else:
+        # ``shape`` (rather than ``Polygon(*coordinates)``) because a geometry
+        # that crosses the antimeridian is returned by ``transform_geom`` as a
+        # (cut) MultiPolygon -- see issue #60.
+        def to_lonlat(geoms, crs):
+            return [
+                shape(warp.transform_geom(src_crs=crs,
+                                          dst_crs=grid_crs,
+                                          geom=g)) for g in geoms
+            ]
+
+        transformed_bounds = to_lonlat([aoi], target_crs)[0]
+        # extract overlapping sentinel tiles
+        s2grid = s2grid[s2grid["geometry"].intersects(
+            transformed_bounds)].copy()
 
     general_subtile_windows = [
         windows.Window(col_off=col_off,
@@ -110,15 +210,14 @@ def obtain_subtiles(target_crs: CRS, left: float, bottom: float, right: float,
     # adjacent UTM/MGRS tiles overlap, so a single location is covered by up to
     # 6 tiles -- downloading it from more than one is wasted bandwidth).
     def _intersecting_window_footprints(ser):
-        out = []
-        for win_subtile in general_subtile_windows:
-            footprint = shape(warp.transform_geom(
-                src_crs=ser["crs"],
-                dst_crs=s2grid.crs,
-                geom=box(*windows.bounds(win_subtile, ser["tile_transform"]))))
-            if transformed_bounds.intersects(footprint):
-                out.append((win_subtile, footprint))
-        return out
+        footprints = to_lonlat([
+            box(*windows.bounds(win_subtile, ser["tile_transform"]))
+            for win_subtile in general_subtile_windows
+        ], ser["crs"])
+        return [(win_subtile, footprint)
+                for win_subtile, footprint in zip(general_subtile_windows,
+                                                  footprints)
+                if transformed_bounds.intersects(footprint)]
 
     s2grid["window_footprints"] = s2grid[["tile_transform", "crs"]].apply(
         _intersecting_window_footprints, axis=1)
@@ -787,19 +886,34 @@ def claimed_by_contributors(subtiles, items, target_crs, ptile_transform,
         item = first_item.get(name)
         if item is None or item.geometry is None:
             continue
+        tile = group.iloc[0]
+        boxes = [
+            box(*windows.bounds(w, tile.tile_transform)).segmentize(1000)
+            for w in group["intersecting_windows"]
+        ]
+        if _use_lonlat360(tile.tile_crs, shapely.total_bounds(boxes),
+                          [item.geometry]):
+            # near the antimeridian, see ``_lonlat360``
+            inner = _wrap360(shape(item.geometry)).buffer(
+                -S2_FOOTPRINT_BUFFER_DEG)
+            if inner.is_empty:
+                continue
+            covered = unary_union(
+                _lonlat360(np.asarray(boxes, dtype=object), tile.tile_crs))
+            claim = inner.intersection(covered)
+            if not claim.is_empty:
+                claims.append(mapping(_from_lonlat(claim, target_crs)))
+            continue
         inner = shape(item.geometry).buffer(-S2_FOOTPRINT_BUFFER_DEG)
         if inner.is_empty:
             continue
-        tile = group.iloc[0]
         covered = unary_union([
-            shape(warp.transform_geom(
-                tile.tile_crs, "EPSG:4326",
-                mapping(box(*windows.bounds(w, tile.tile_transform)).segmentize(
-                    1000)))) for w in group["intersecting_windows"]
+            shape(warp.transform_geom(tile.tile_crs, LONLAT_CRS, mapping(b)))
+            for b in boxes
         ])
         claim = inner.intersection(covered)
         if not claim.is_empty:
-            claims.append(warp.transform_geom("EPSG:4326", target_crs,
+            claims.append(warp.transform_geom(LONLAT_CRS, target_crs,
                                               mapping(claim)))
     if not claims:
         return np.zeros(shape_, dtype=bool)
@@ -850,12 +964,20 @@ def _hole_filling_subtiles(redundant, items, hole, target_crs,
                            cols.max() - cols.min() + 1,
                            rows.max() - rows.min() + 1), ptile_transform)
         if item.geometry is not None:
-            if st.name not in footprints:
-                footprints[st.name] = shape(item.geometry).buffer(
+            # near the antimeridian, see ``_lonlat360``
+            lonlat360 = _use_lonlat360(target_crs, hole_box, [item.geometry])
+            if (st.name, lonlat360) not in footprints:
+                footprint = shape(item.geometry)
+                if lonlat360:
+                    footprint = _wrap360(footprint)
+                footprints[st.name, lonlat360] = footprint.buffer(
                     S2_FOOTPRINT_BUFFER_DEG)
-            hole_lonlat = shape(warp.transform_geom(
-                target_crs, "EPSG:4326", mapping(box(*hole_box))))
-            if not footprints[st.name].intersects(hole_lonlat):
+            if lonlat360:
+                hole_lonlat = _lonlat360(box(*hole_box), target_crs)
+            else:
+                hole_lonlat = shape(warp.transform_geom(
+                    target_crs, LONLAT_CRS, mapping(box(*hole_box))))
+            if not footprints[st.name, lonlat360].intersects(hole_lonlat):
                 continue
         keep.append(idx)
         boxes.append(hole_box)
