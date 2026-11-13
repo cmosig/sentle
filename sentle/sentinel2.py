@@ -1049,9 +1049,11 @@ def process_ptile_S2(
     reprocessings, which cover the same area, and the newest one is used. But
     when an acquisition reaches the ground in two pieces, ESA publishes one
     product per piece for the tiles on the cut, and each covers only part of
-    the tile. So before the overlapping tiles fill holes, older items of a
-    tile fill the pixels that are still empty, where their footprint reaches
-    past the items already used for the tile (see ``_older_part``).
+    the tile. So after the overlapping tiles have filled holes, older items
+    of a tile fill the bands that are still empty, where their footprint
+    reaches past the items already used for the tile (see ``_older_part``).
+    A band that had data, and the cloud class of a pixel that had every raw
+    band, stay exactly as without them.
 
     ``missing_items`` switches on skipping of scenes whose data is gone: when
     it is a list, an item with a band that does not exist (HTTP 404, see
@@ -1184,10 +1186,33 @@ def process_ptile_S2(
     subtile_array, subtile_array_count, subtile_array_bands = accumulate(
         subtiles[~redundant.values], ptile_bounds)
 
+    # holes: pixels without any raw band, plus the pixels around them that
+    # miss some band (see S2_HOLE_FRINGE_PX), minus gaps in the scene itself
+    # (see claimed_by_contributors). Their missing bands are filled from
+    # redundant subtiles; a band that has data is never touched.
+    hole = hole_mask(subtile_array_count[:len(S2_bands)])
+    if hole.any():
+        hole &= ~claimed_by_contributors(subtiles[~redundant.values],
+                                         usable_items(), target_crs,
+                                         ptile_transform, hole.shape)
+    fill = _hole_filling_subtiles(subtiles[redundant.values], usable_items(),
+                                  hole, target_crs, ptile_transform, provider)
+    if fill is not None:
+        fill_subtiles, fill_bounds = fill
+        fill_sum, fill_count, fill_bands = accumulate(fill_subtiles,
+                                                      fill_bounds)
+        take = hole[None] & (subtile_array_count == 0) & (fill_count > 0)
+        subtile_array[take] = fill_sum[take]
+        subtile_array_count[take] = fill_count[take]
+        if subtile_array_bands is None and take.any():
+            subtile_array_bands = fill_bands
+
     # older items of a tile that cover part of it the items used so far do
     # not, e.g. the other piece of an acquisition published as two products
-    # (see above); they only fill bands that are still empty. Each item is
-    # tried once, so this ends.
+    # (see above). They only fill bands that are still empty, after the
+    # overlapping tiles, so a band that had data is never changed. Each item
+    # is tried once, so this ends.
+    had_data = None  # the counts before any older item filled in
     tried = set()
     while (items["tile"].duplicated().any()
            and (subtile_array_count[:len(S2_bands)] == 0).any()):
@@ -1211,31 +1236,12 @@ def process_ptile_S2(
             subtiles[~redundant.values & subtiles["name"].isin(older).values],
             ptile_bounds, candidates_for=lambda tile: [older[tile]])
         take = (subtile_array_count == 0) & (older_count > 0)
+        if had_data is None and take.any():
+            had_data = subtile_array_count.copy()
         subtile_array[take] = older_sum[take]
         subtile_array_count[take] = older_count[take]
         if subtile_array_bands is None and take.any():
             subtile_array_bands = older_bands
-
-    # holes: pixels without any raw band, plus the pixels around them that
-    # miss some band (see S2_HOLE_FRINGE_PX), minus gaps in the scene itself
-    # (see claimed_by_contributors). Their missing bands are filled from
-    # redundant subtiles; a band that has data is never touched.
-    hole = hole_mask(subtile_array_count[:len(S2_bands)])
-    if hole.any():
-        hole &= ~claimed_by_contributors(subtiles[~redundant.values],
-                                         usable_items(), target_crs,
-                                         ptile_transform, hole.shape)
-    fill = _hole_filling_subtiles(subtiles[redundant.values], usable_items(),
-                                  hole, target_crs, ptile_transform, provider)
-    if fill is not None:
-        fill_subtiles, fill_bounds = fill
-        fill_sum, fill_count, fill_bands = accumulate(fill_subtiles,
-                                                      fill_bounds)
-        take = hole[None] & (subtile_array_count == 0) & (fill_count > 0)
-        subtile_array[take] = fill_sum[take]
-        subtile_array_count[take] = fill_count[take]
-        if subtile_array_bands is None and take.any():
-            subtile_array_bands = fill_bands
 
     # no subtile had data for this acquisition
     if subtile_array_bands is None:
@@ -1264,6 +1270,19 @@ def process_ptile_S2(
         cloud_class = sc.maximum_filter(cloud_class,
                                         size=(1, 7, 7),
                                         mode="nearest").astype(np.float32)
+
+        # pixels that had every raw band before the older items filled in
+        # keep the class they get without them, so a cloud in the filled part
+        # does not dilate into data that was there already
+        if had_data is not None:
+            filled = had_data[cloud_prob_indices] != subtile_array_count[
+                cloud_prob_indices]
+            before = np.where(filled, np.nan, subtile_array[cloud_prob_indices])
+            before = sc.maximum_filter(np.argmax(before, axis=0, keepdims=True),
+                                       size=(1, 7, 7),
+                                       mode="nearest").astype(np.float32)
+            kept = had_data[:len(S2_bands)].all(axis=0, keepdims=True)
+            cloud_class = np.where(kept, before, cloud_class)
 
         # save cloud classes layer
         subtile_array = np.concatenate([subtile_array, cloud_class], axis=0)
