@@ -988,6 +988,31 @@ def _hole_filling_subtiles(redundant, items, hole, target_crs,
     return redundant.iloc[keep], bounds
 
 
+def _older_part(candidates, taken, tried, ptile_lonlat):
+    """The first of ``candidates`` (a tile's items, newest first) that is
+    neither in ``taken`` (items already used for the tile) nor ``tried``
+    (ids), and whose footprint reaches past those of ``taken`` within
+    ``ptile_lonlat``; None if there is none.
+
+    Footprints are compared with ``S2_FOOTPRINT_BUFFER_DEG`` of slack, so a
+    reprocessing, which covers the same area as the item it replaces, is never
+    picked. An item without a footprint is never picked either.
+    """
+    taken_ids = {item.id for item in taken}
+    if any(item.geometry is None for item in taken):
+        return None
+    covered = unary_union([shape(item.geometry) for item in taken]).buffer(
+        S2_FOOTPRINT_BUFFER_DEG)
+    for item in candidates:
+        if item.id in taken_ids or item.id in tried or item.geometry is None:
+            continue
+        extra = shape(item.geometry).buffer(
+            -S2_FOOTPRINT_BUFFER_DEG).difference(covered)
+        if extra.intersects(ptile_lonlat):
+            return item
+    return None
+
+
 def process_ptile_S2(
     timestamp,
     target_crs: CRS,
@@ -1020,6 +1045,14 @@ def process_ptile_S2(
     those are read only for such holes, and only where the item's footprint
     can have data.
 
+    A tile can have more than one item per acquisition. Most are
+    reprocessings, which cover the same area, and the newest one is used. But
+    when an acquisition reaches the ground in two pieces, ESA publishes one
+    product per piece for the tiles on the cut, and each covers only part of
+    the tile. So before the overlapping tiles fill holes, older items of a
+    tile fill the pixels that are still empty, where their footprint reaches
+    past the items already used for the tile (see ``_older_part``).
+
     ``missing_items`` switches on skipping of scenes whose data is gone: when
     it is a list, an item with a band that does not exist (HTTP 404, see
     ``stac.SentleMissingAssetError``) is appended to it and from then on
@@ -1050,9 +1083,15 @@ def process_ptile_S2(
             return items
         return items[[item.id not in missing_ids for item in items["item"]]]
 
-    def accumulate(subset, bounds):
+    # {tile: [items read for it]}, in the order they were used
+    used = {}
+
+    def accumulate(subset, bounds, candidates_for=None):
         """Sum and count of the non-zero values ``subset`` reprojects onto the
-        ptile, and the band names (None if nothing was read)."""
+        ptile, and the band names (None if nothing was read).
+
+        ``candidates_for(tile)`` gives the items to try for a tile, in order;
+        by default the tile's usable items."""
         total = np.zeros((num_bands, ptile_height, ptile_width),
                          dtype=np.float32)
         count = np.zeros((num_bands, ptile_height, ptile_width),
@@ -1075,8 +1114,12 @@ def process_ptile_S2(
                 # the item list is ordered newest first (see ``sort_items``),
                 # so the first entry is the most recent reprocessing of the
                 # tile. The next one is only tried if that one's data is gone.
-                usable = usable_items()
-                for candidate in usable["item"][usable["tile"] == st.name]:
+                if candidates_for is None:
+                    usable = usable_items()
+                    candidates = usable["item"][usable["tile"] == st.name]
+                else:
+                    candidates = candidates_for(st.name)
+                for candidate in candidates:
                     try:
                         prefetch_tile_windows(candidate, S2_bands,
                                               tile_windows[st.name], provider,
@@ -1091,6 +1134,7 @@ def process_ptile_S2(
                         window_cache.clear()
                         continue
                     stac_item = candidate
+                    used.setdefault(st.name, []).append(candidate)
                     break
 
             # no (readable) item for the tile of this subtile
@@ -1139,6 +1183,38 @@ def process_ptile_S2(
                  pd.Series(False, index=subtiles.index))
     subtile_array, subtile_array_count, subtile_array_bands = accumulate(
         subtiles[~redundant.values], ptile_bounds)
+
+    # older items of a tile that cover part of it the items used so far do
+    # not, e.g. the other piece of an acquisition published as two products
+    # (see above); they only fill bands that are still empty. Each item is
+    # tried once, so this ends.
+    tried = set()
+    while (items["tile"].duplicated().any()
+           and (subtile_array_count[:len(S2_bands)] == 0).any()):
+        west, south, east, north = warp.transform_bounds(
+            target_crs, LONLAT_CRS, *ptile_bounds)
+        if west > east:
+            # across the antimeridian: any longitude may be in the ptile
+            west, east = -180.0, 180.0
+        ptile_lonlat = box(west, south, east, north)
+        older = {}
+        for tile, taken in used.items():
+            usable = usable_items()
+            item = _older_part(usable["item"][usable["tile"] == tile], taken,
+                               tried, ptile_lonlat)
+            if item is not None:
+                older[tile] = item
+                tried.add(item.id)
+        if not older:
+            break
+        older_sum, older_count, older_bands = accumulate(
+            subtiles[~redundant.values & subtiles["name"].isin(older).values],
+            ptile_bounds, candidates_for=lambda tile: [older[tile]])
+        take = (subtile_array_count == 0) & (older_count > 0)
+        subtile_array[take] = older_sum[take]
+        subtile_array_count[take] = older_count[take]
+        if subtile_array_bands is None and take.any():
+            subtile_array_bands = older_bands
 
     # holes: pixels without any raw band, plus the pixels around them that
     # miss some band (see S2_HOLE_FRINGE_PX), minus gaps in the scene itself
