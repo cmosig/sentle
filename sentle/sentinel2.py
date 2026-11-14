@@ -1052,8 +1052,6 @@ def process_ptile_S2(
     the tile. So after the overlapping tiles have filled holes, older items
     of a tile fill the bands that are still empty, where their footprint
     reaches past the items already used for the tile (see ``_older_part``).
-    A band that had data, and the cloud class of a pixel that had every raw
-    band, stay exactly as without them.
 
     ``missing_items`` switches on skipping of scenes whose data is gone: when
     it is a list, an item with a band that does not exist (HTTP 404, see
@@ -1212,7 +1210,6 @@ def process_ptile_S2(
     # (see above). They only fill bands that are still empty, after the
     # overlapping tiles, so a band that had data is never changed. Each item
     # is tried once, so this ends.
-    had_data = None  # the counts before any older item filled in
     tried = set()
     while (items["tile"].duplicated().any()
            and (subtile_array_count[:len(S2_bands)] == 0).any()):
@@ -1236,8 +1233,6 @@ def process_ptile_S2(
             subtiles[~redundant.values & subtiles["name"].isin(older).values],
             ptile_bounds, candidates_for=lambda tile: [older[tile]])
         take = (subtile_array_count == 0) & (older_count > 0)
-        if had_data is None and take.any():
-            had_data = subtile_array_count.copy()
         subtile_array[take] = older_sum[take]
         subtile_array_count[take] = older_count[take]
         if subtile_array_bands is None and take.any():
@@ -1270,19 +1265,6 @@ def process_ptile_S2(
         cloud_class = sc.maximum_filter(cloud_class,
                                         size=(1, 7, 7),
                                         mode="nearest").astype(np.float32)
-
-        # pixels that had every raw band before the older items filled in
-        # keep the class they get without them, so a cloud in the filled part
-        # does not dilate into data that was there already
-        if had_data is not None:
-            filled = had_data[cloud_prob_indices] != subtile_array_count[
-                cloud_prob_indices]
-            before = np.where(filled, np.nan, subtile_array[cloud_prob_indices])
-            before = sc.maximum_filter(np.argmax(before, axis=0, keepdims=True),
-                                       size=(1, 7, 7),
-                                       mode="nearest").astype(np.float32)
-            kept = had_data[:len(S2_bands)].all(axis=0, keepdims=True)
-            cloud_class = np.where(kept, before, cloud_class)
 
         # save cloud classes layer
         subtile_array = np.concatenate([subtile_array, cloud_class], axis=0)
